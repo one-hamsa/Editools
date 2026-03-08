@@ -1,12 +1,8 @@
 {
-    "name": "Editools.Editor",
+    "name": "Editools",
     "rootNamespace": "",
-    "references": [
-        "Editools"
-    ],
-    "includePlatforms": [
-        "Editor"
-    ],
+    "references": [],
+    "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,
