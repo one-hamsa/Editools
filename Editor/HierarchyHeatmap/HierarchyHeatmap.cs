@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEditor;
+using UnityEditor.ShortcutManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -48,7 +49,6 @@ public static class HierarchyHeatmap
     static HierarchyHeatmap() {
         // Load enabled state from EditorPrefs
         enabled = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false);
-        Menu.SetChecked(enableMenu, enabled);
 
         // Load maxRecent and maxMarked
         maxRecent = EditorPrefs.GetInt("HierarchyHeatmap_MaxRecent", DefaultMaxRecent);
@@ -183,7 +183,7 @@ public static class HierarchyHeatmap
         EditorPrefs.SetString("HierarchyHeatmap_MarkedProject", string.Join(",", projectStrings));
     }
 
-    [MenuItem("Tools/Hierarchy Heatmap/Toggle Mark %&d")] // Alt+D hotkey
+    [Shortcut("Editools/Toggle Heatmap Mark", KeyCode.D, ShortcutModifiers.Alt)]
     private static void ToggleMark() {
         // Handle active folder in project view (even if not explicitly selected)
         string activeFolderPath = GetActiveFolderPath();
@@ -240,7 +240,7 @@ public static class HierarchyHeatmap
         }
     }
 
-    [MenuItem("Tools/Hierarchy Heatmap/Clear All Marks %&#d")] // Alt+Shift+D hotkey
+    [Shortcut("Editools/Clear All Heatmap Marks", KeyCode.D, ShortcutModifiers.Alt | ShortcutModifiers.Shift)]
     private static void ClearAllMarks() {
         markedHierarchyItems.Clear();
         markedProjectItems.Clear();
@@ -559,29 +559,18 @@ public static class HierarchyHeatmap
         return Mathf.CeilToInt(normalized * 5); // 1 to 5
     }
 
-    private const string enableMenu = "Tools/Hierarchy Heatmap/Enabled";
-    [MenuItem(enableMenu)]
-    private static void EnableHeatmap() {
-        enabled = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false);
-        enabled = !enabled;
+    public static void SetEnabled(bool value) {
+        enabled = value;
         EditorPrefs.SetBool("HierarchyHeatmapEnabled", enabled);
-
-        Menu.SetChecked(enableMenu, enabled);
         EditorApplication.RepaintHierarchyWindow();
         EditorApplication.RepaintProjectWindow();
     }
 
-    [MenuItem("Tools/Hierarchy Heatmap/Reset Recent")]
-    private static void ResetRecent() {
+    public static void ResetRecent() {
         recentHierarchySelections.Clear();
         recentProjectSelections.Clear();
         EditorApplication.RepaintHierarchyWindow();
         EditorApplication.RepaintProjectWindow();
-    }
-
-    [MenuItem("Tools/Hierarchy Heatmap/Settings")]
-    private static void OpenSettings() {
-        HeatmapSettingsWindow.ShowWindow();
     }
 
     private static void OnPlayModeChanged(PlayModeStateChange state) {

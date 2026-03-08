@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.ShortcutManagement;
 using System.Collections.Generic;
 
 public class SnapToSurface : EditorWindow
@@ -10,7 +11,7 @@ public class SnapToSurface : EditorWindow
     private static Quaternion originalRotation;
     private static HashSet<GameObject> ignoredObjects = new HashSet<GameObject>();
 
-    [MenuItem("Tools/Snap To Surface %&s")] // Alt+A (Cmd+Alt+A on Mac)
+    [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
         if (Selection.activeGameObject == null)
             return;

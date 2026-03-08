@@ -11,10 +11,10 @@ using UnityEngine.UIElements;
 /// Scrubs stale/duplicate overlay entries from layout files on startup.
 /// Prevents ToolbarOverlay from accumulating duplicate instances across restarts.
 /// </summary>
-static class AdvancedVisualsLayoutCleaner
+static class EditoolsLayoutCleaner
 {
-	static readonly string[] s_staleIds = { "view-comp", "advanced-visuals" };
-	const string k_OverlayId = "advanced-visuals-toolbar";
+	static readonly string[] s_staleIds = { "view-comp", "advanced-visuals", "advanced-visuals-toolbar" };
+	const string k_OverlayId = "editools-toolbar";
 
 	[InitializeOnLoadMethod]
 	static void CleanOnStartup()
@@ -150,22 +150,18 @@ public class ViewCompScreenshot
 }
 
 /// <summary>
-/// Scene View overlay containing View Comp (screenshot capture/compare)
-/// and Material Check tools. Each SceneView window gets its own overlay
-/// instance with independent state.
-///
-/// Extends ToolbarOverlay so it shows inline icon buttons when docked
-/// in the Scene View top toolbar. Each toolbar element is a separate class
-/// so Unity can lay them out individually.
+/// Main Editools overlay in the Scene View toolbar. Hosts screenshot capture,
+/// material check, hierarchy heatmap, and serves as the central access point
+/// for all Editools features. Each SceneView window gets its own instance.
 /// </summary>
-[Overlay(typeof(SceneView), "advanced-visuals-toolbar", "Advanced Visuals")]
-public class AdvancedVisualsOverlay : ToolbarOverlay
+[Overlay(typeof(SceneView), "editools-toolbar", "Editools")]
+public class EditoolsOverlay : ToolbarOverlay
 {
 	const int MaxScreenshots = 10;
 	const string k_Session = "AV_";
 	static string ScreenshotDir => Path.Combine("Library", "AdvancedVisuals");
 
-	internal static readonly Dictionary<SceneView, AdvancedVisualsOverlay> s_instances = new();
+	internal static readonly Dictionary<SceneView, EditoolsOverlay> s_instances = new();
 	static bool s_subscribedToSceneGui;
 
 	readonly List<ViewCompScreenshot> _screenshots = new();
@@ -177,18 +173,19 @@ public class AdvancedVisualsOverlay : ToolbarOverlay
 	IMGUIContainer _displayIMGUI;
 
 	// Screenshot strip element reference (for rebuilding dynamic buttons)
-	AVScreenshotStrip _screenshotStrip;
+	EditoolsScreenshotStrip _screenshotStrip;
 
-	AdvancedVisualsOverlay() : base(
-		AVScreenshotStrip.k_Id,
-		AVCaptureButton.k_Id,
-		AVMaterialCheckButton.k_Id
+	EditoolsOverlay() : base(
+		EditoolsScreenshotStrip.k_Id,
+		EditoolsCaptureButton.k_Id,
+		EditoolsMaterialCheckButton.k_Id,
+		EditoolsHeatmapButton.k_Id
 	) { }
 
 	// ---- Element registration ----
 
-	internal void RegisterScreenshotStrip(AVScreenshotStrip strip) => _screenshotStrip = strip;
-	internal void UnregisterScreenshotStrip(AVScreenshotStrip strip)
+	internal void RegisterScreenshotStrip(EditoolsScreenshotStrip strip) => _screenshotStrip = strip;
+	internal void UnregisterScreenshotStrip(EditoolsScreenshotStrip strip)
 	{
 		if (_screenshotStrip == strip) _screenshotStrip = null;
 	}
@@ -583,7 +580,7 @@ public class AdvancedVisualsOverlay : ToolbarOverlay
 
 	// ---- Shared helper: find overlay from a toolbar element ----
 
-	internal static AdvancedVisualsOverlay FindOverlayFromElement(VisualElement element)
+	internal static EditoolsOverlay FindOverlayFromElement(VisualElement element)
 	{
 		// Match by panel — toolbar strip elements share a panel with their SceneView
 		// even though they're not children of rootVisualElement
@@ -614,14 +611,14 @@ public class AdvancedVisualsOverlay : ToolbarOverlay
 /// Dynamic strip of numbered screenshot buttons. Empty when no screenshots exist.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
-class AVScreenshotStrip : VisualElement
+class EditoolsScreenshotStrip : VisualElement
 {
-	public const string k_Id = "AdvancedVisuals/Screenshots";
+	public const string k_Id = "Editools/Screenshots";
 
-	AdvancedVisualsOverlay _overlay;
+	EditoolsOverlay _overlay;
 	readonly List<Button> _buttons = new();
 
-	public AVScreenshotStrip()
+	public EditoolsScreenshotStrip()
 	{
 		style.flexDirection = FlexDirection.Row;
 		style.alignItems = Align.Center;
@@ -632,7 +629,7 @@ class AVScreenshotStrip : VisualElement
 			EditorApplication.delayCall += () =>
 			{
 				if (panel == null) return; // detached before callback fired
-				_overlay = AdvancedVisualsOverlay.FindOverlayFromElement(this);
+				_overlay = EditoolsOverlay.FindOverlayFromElement(this);
 				_overlay?.RegisterScreenshotStrip(this);
 				Rebuild();
 			};
@@ -650,7 +647,7 @@ class AVScreenshotStrip : VisualElement
 		Clear();
 		_buttons.Clear();
 
-		_overlay ??= AdvancedVisualsOverlay.FindOverlayFromElement(this);
+		_overlay ??= EditoolsOverlay.FindOverlayFromElement(this);
 		if (_overlay == null) return;
 
 		for (int i = 0; i < _overlay.Screenshots.Count; i++)
@@ -701,13 +698,13 @@ class AVScreenshotStrip : VisualElement
 /// Capture button — takes a screenshot of the current scene view.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
-class AVCaptureButton : EditorToolbarButton
+class EditoolsCaptureButton : EditorToolbarButton
 {
-	public const string k_Id = "AdvancedVisuals/Capture";
+	public const string k_Id = "Editools/Capture";
 
-	AdvancedVisualsOverlay _overlay;
+	EditoolsOverlay _overlay;
 
-	public AVCaptureButton() : base()
+	public EditoolsCaptureButton() : base()
 	{
 		icon = EditorGUIUtility.IconContent("d_SceneViewCamera").image as Texture2D;
 		tooltip = "Capture current scene view";
@@ -718,14 +715,14 @@ class AVCaptureButton : EditorToolbarButton
 			EditorApplication.delayCall += () =>
 			{
 				if (panel == null) return;
-				_overlay = AdvancedVisualsOverlay.FindOverlayFromElement(this);
+				_overlay = EditoolsOverlay.FindOverlayFromElement(this);
 			};
 		});
 	}
 
 	void OnClick()
 	{
-		_overlay ??= AdvancedVisualsOverlay.FindOverlayFromElement(this);
+		_overlay ??= EditoolsOverlay.FindOverlayFromElement(this);
 		_overlay?.OnCaptureClicked();
 	}
 }
@@ -735,11 +732,11 @@ class AVCaptureButton : EditorToolbarButton
 /// a material override on all opaque scene renderers.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
-class AVMaterialCheckButton : EditorToolbarDropdown
+class EditoolsMaterialCheckButton : EditorToolbarDropdown
 {
-	public const string k_Id = "AdvancedVisuals/MaterialCheck";
+	public const string k_Id = "Editools/MaterialCheck";
 
-	public AVMaterialCheckButton()
+	public EditoolsMaterialCheckButton()
 	{
 		icon = EditorGUIUtility.IconContent("d_Material Icon").image as Texture2D;
 		tooltip = "Material Check — drag a material here to assign it";
@@ -764,6 +761,58 @@ class AVMaterialCheckButton : EditorToolbarDropdown
 				MaterialCheckPopup.SetMaterial(mat);
 			}
 		});
+	}
+}
+
+/// <summary>
+/// Hierarchy Heatmap toggle+dropdown — click the icon to toggle on/off,
+/// click the arrow to open settings menu. Mirrors the Gizmos button pattern.
+/// </summary>
+[EditorToolbarElement(k_Id, typeof(SceneView))]
+class EditoolsHeatmapButton : VisualElement
+{
+	public const string k_Id = "Editools/Heatmap";
+
+	readonly EditorToolbarToggle _toggle;
+
+	public EditoolsHeatmapButton()
+	{
+		style.flexDirection = FlexDirection.Row;
+		style.alignItems = Align.Center;
+
+		_toggle = new EditorToolbarToggle
+		{
+			icon = EditorGUIUtility.IconContent("d_Grid.Default").image as Texture2D,
+			tooltip = "Toggle Hierarchy Heatmap",
+			value = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false)
+		};
+		_toggle.RegisterValueChangedCallback(evt => HierarchyHeatmap.SetEnabled(evt.newValue));
+		// Fuse right edge with arrow
+		_toggle.style.borderTopRightRadius = 0;
+		_toggle.style.borderBottomRightRadius = 0;
+		_toggle.style.marginRight = 0;
+		_toggle.style.paddingLeft = 4;
+		_toggle.style.paddingRight = 4;
+		Add(_toggle);
+
+		var arrow = new EditorToolbarButton { text = "\u25BE", tooltip = "Heatmap options" };
+		arrow.clicked += ShowMenu;
+		// Fuse left edge with toggle, 1px gap
+		arrow.style.borderTopLeftRadius = 0;
+		arrow.style.borderBottomLeftRadius = 0;
+		arrow.style.marginLeft = 1;
+		arrow.style.paddingLeft = 2;
+		arrow.style.paddingRight = 4;
+		arrow.style.minWidth = StyleKeyword.Auto;
+		Add(arrow);
+	}
+
+	void ShowMenu()
+	{
+		var menu = new GenericMenu();
+		menu.AddItem(new GUIContent("Settings..."), false, () => HeatmapSettingsWindow.ShowWindow());
+		menu.AddItem(new GUIContent("Reset Recent"), false, () => HierarchyHeatmap.ResetRecent());
+		menu.ShowAsContext();
 	}
 }
 

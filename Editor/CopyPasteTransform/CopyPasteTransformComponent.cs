@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.ShortcutManagement;
 
 public static class CopyPasteTransformComponent {
     struct TransformData {
@@ -15,16 +16,15 @@ public static class CopyPasteTransformComponent {
     }
 
     private static TransformData _data;
-    private static Vector3? _dataCenter;
 
-    [MenuItem("Edit/Copy Transform Values ^&c", false, -101)]
+    [Shortcut("Editools/Copy Transform", KeyCode.C, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
     public static void CopyTransformValues() {
         if(Selection.gameObjects.Length == 0) return;
         var selectionTr = Selection.gameObjects[0].transform;
         _data = new TransformData(selectionTr.localPosition, selectionTr.localRotation, selectionTr.localScale);
     }
 
-    [MenuItem("Edit/Paste Transform Values ^&v", false, -101)]
+    [Shortcut("Editools/Paste Transform", KeyCode.V, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
     public static void PasteTransformValues() {
         foreach(var selection in Selection.gameObjects) {
             Transform selectionTr = selection.transform;
@@ -35,20 +35,15 @@ public static class CopyPasteTransformComponent {
         }
     }
 
-    // [MenuItem("Edit/Copy Center Position ^&k", false, -101)]
-    // public static void CopyCenterPosition() {
-    //     if(Selection.gameObjects.Length == 0) return;
-    //     var render = Selection.gameObjects[0].GetComponent<Renderer>();
-    //     if(render == null) return;
-    //     _dataCenter = render.bounds.center;
-    // }
-    //
-    // [MenuItem("Edit/Paste Center Position ^&l", false, -101)]
-    // public static void PasteCenterPosition() {
-    //     if(_dataCenter == null) return;
-    //     foreach(var selection in Selection.gameObjects) {
-    //         Undo.RecordObject(selection.transform, "Paste Center Position");
-    //         selection.transform.position = _dataCenter.Value;
-    //     }
-    // }
+    [Shortcut("Editools/Reset Transform", KeyCode.X, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
+    public static void ResetTransformValues() {
+        if(Selection.gameObjects.Length == 0) return;
+        foreach(var selection in Selection.gameObjects) {
+            Transform selectionTr = selection.transform;
+            Undo.RecordObject(selectionTr, "Reset Transform");
+            selectionTr.localPosition = Vector3.zero;
+            selectionTr.localRotation = Quaternion.identity;
+            selectionTr.localScale = Vector3.one;
+        }
+    }
 }
