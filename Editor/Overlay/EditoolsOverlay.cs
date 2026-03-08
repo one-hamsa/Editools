@@ -767,11 +767,14 @@ class EditoolsMaterialCheckButton : EditorToolbarDropdown
 /// <summary>
 /// Hierarchy Heatmap toggle+dropdown — click the icon to toggle on/off,
 /// click the arrow to open settings menu. Mirrors the Gizmos button pattern.
+/// Toggle state is synced across all SceneView instances.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsHeatmapButton : VisualElement
 {
 	public const string k_Id = "Editools/Heatmap";
+
+	static readonly List<EditoolsHeatmapButton> s_instances = new();
 
 	readonly EditorToolbarToggle _toggle;
 
@@ -786,13 +789,20 @@ class EditoolsHeatmapButton : VisualElement
 			tooltip = "Toggle Hierarchy Heatmap",
 			value = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false)
 		};
-		_toggle.RegisterValueChangedCallback(evt => HierarchyHeatmap.SetEnabled(evt.newValue));
+		_toggle.RegisterValueChangedCallback(evt =>
+		{
+			HierarchyHeatmap.SetEnabled(evt.newValue);
+			// Sync all other instances
+			foreach (var inst in s_instances)
+				if (inst != this)
+					inst._toggle.SetValueWithoutNotify(evt.newValue);
+		});
 		// Fuse right edge with arrow
 		_toggle.style.borderTopRightRadius = 0;
 		_toggle.style.borderBottomRightRadius = 0;
 		_toggle.style.marginRight = 0;
-		_toggle.style.paddingLeft = 4;
-		_toggle.style.paddingRight = 4;
+		_toggle.style.paddingLeft = 2;
+		_toggle.style.paddingRight = 2;
 		Add(_toggle);
 
 		var arrow = new EditorToolbarButton { text = "\u25BE", tooltip = "Heatmap options" };
@@ -805,6 +815,9 @@ class EditoolsHeatmapButton : VisualElement
 		arrow.style.paddingRight = 4;
 		arrow.style.minWidth = StyleKeyword.Auto;
 		Add(arrow);
+
+		RegisterCallback<AttachToPanelEvent>(_ => s_instances.Add(this));
+		RegisterCallback<DetachFromPanelEvent>(_ => s_instances.Remove(this));
 	}
 
 	void ShowMenu()
