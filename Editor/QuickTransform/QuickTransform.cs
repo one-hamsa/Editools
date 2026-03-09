@@ -6,12 +6,30 @@ using UnityEngine;
 /// move/rotate/scale selected objects without grabbing a gizmo handle.
 /// Standard tool switching (tap W/E/R) still works normally.
 ///
-/// W = Move (plane ⊥ upAxis), E = Rotate (around upAxis), R = Scale (local X or Z)
-/// W+Shift = Duplicate then move
-/// Multi-select rotation uses the selection's center pivot.
+/// While any mode key is held, a wireframe bounding box wraps the selection
+/// (including all child MeshRenderers and SkinnedMeshRenderers).
+/// Hover state determines behavior:
 ///
+/// W = Move
+///   Outside box   → wireframe only, world XZ plane movement (gizmo preview)
+///   LMB face      → face highlights, movement locked to face plane
+///   RMB face      → movement locked along face normal
+///
+/// E = Rotate
+///   Outside box   → wireframe only, rotate around world Y with center pivot (gizmo preview)
+///   Hover face    → face highlights, rotate around face normal, pivot = face center
+///   Hover edge    → edge highlights (incl. backface), rotate around edge dir, pivot = grab point
+///   Ctrl held     → snap to 15° increments
+///
+/// R = Scale
+///   Quadrant      → side face by screen direction, scale along face normal
+///   Hover Y face  → top/bottom face, scale along Y
+///   Anchor = opposite face, stays fixed; group scales as one unit
+///
+/// Shift + W/E/R = Duplicate then transform
+///
+/// Toggle on/off via the Editools toolbar button.
 /// Configure per-project via a QuickTransformConfig ScriptableObject asset.
-/// If no config asset exists, defaults are used (Y-up, click-required).
 /// </summary>
 [InitializeOnLoad]
 static class QuickTransform
@@ -20,16 +38,61 @@ static class QuickTransform
 
     enum Mode { None, Move, Rotate, Scale }
     enum Phase { Idle, Ready, Dragging }
+    enum HoverKind { None, AllSideFaces, Face, Edge }
 
-    // ─── Config ─────────────────────────────────────────────────
+    // ─── Public API / Settings (EditorPrefs-backed) ───────────
+
+    const string k_Pref          = "QuickTransform_";
+    const string k_EnabledPref   = k_Pref + "Enabled";
+    const string k_EdgeHoverPref = k_Pref + "EdgeHoverPx";
+    const string k_CircleRadPref = k_Pref + "CircleRadius";
+    const string k_LinearRotPref = k_Pref + "LinearRot";
+    const string k_LinearRotSensPref = k_Pref + "LinearRotSens";
+    const string k_RotSnapPref      = k_Pref + "RotSnapAngle";
+    internal static bool Enabled
+    {
+        get => EditorPrefs.GetBool(k_EnabledPref, true);
+        set => EditorPrefs.SetBool(k_EnabledPref, value);
+    }
+
+    internal static float EdgeHoverPx
+    {
+        get => EditorPrefs.GetFloat(k_EdgeHoverPref, 10f);
+        set => EditorPrefs.SetFloat(k_EdgeHoverPref, Mathf.Clamp(value, 4f, 30f));
+    }
+
+    internal static float CircleRadius
+    {
+        get => EditorPrefs.GetFloat(k_CircleRadPref, 1.2f);
+        set => EditorPrefs.SetFloat(k_CircleRadPref, Mathf.Clamp(value, 0.3f, 5f));
+    }
+
+    internal static bool LinearRotation
+    {
+        get => EditorPrefs.GetBool(k_LinearRotPref, false);
+        set => EditorPrefs.SetBool(k_LinearRotPref, value);
+    }
+
+    internal static float LinearRotSensitivity
+    {
+        get => EditorPrefs.GetFloat(k_LinearRotSensPref, 0.5f);
+        set => EditorPrefs.SetFloat(k_LinearRotSensPref, Mathf.Clamp(value, 0.01f, 10f));
+    }
+
+    internal static float RotSnapAngle
+    {
+        get => EditorPrefs.GetFloat(k_RotSnapPref, 15f);
+        set => EditorPrefs.SetFloat(k_RotSnapPref, Mathf.Clamp(value, 1f, 90f));
+    }
+
+    // ─── Config (legacy ScriptableObject, still used for UpAxis) ─
 
     static QuickTransformConfig config;
-    static double configRetryTime;  // next EditorApplication.timeSinceStartup to retry FindAssets
+    static double configRetryTime;
 
     static QuickTransformConfig GetConfig()
     {
         if (config != null) return config;
-        // Avoid calling FindAssets every event — retry at most once per second.
         if (EditorApplication.timeSinceStartup < configRetryTime) return null;
         configRetryTime = EditorApplication.timeSinceStartup + 1.0;
 
@@ -42,23 +105,12 @@ static class QuickTransform
         return config;
     }
 
-    /// <summary>Configured up axis, or Vector3.up if no config asset exists.</summary>
     static Vector3 UpAxis
     {
         get
         {
             var cfg = GetConfig();
             return cfg != null ? cfg.upAxis.normalized : Vector3.up;
-        }
-    }
-
-    /// <summary>Whether click-free drag mode is enabled.</summary>
-    static bool ClickFreeDrag
-    {
-        get
-        {
-            var cfg = GetConfig();
-            return cfg != null && cfg.clickFreeDrag;
         }
     }
 
@@ -69,6 +121,8 @@ static class QuickTransform
 
     // Key tracking
     static bool wHeld, eHeld, rHeld;
+    static bool rmbHeld;
+    static double modeKeyDownTime;   // EditorApplication.timeSinceStartup when mode key first pressed
     static Mode suppressKeyUpFor;
 
     // Drag data
@@ -78,33 +132,105 @@ static class QuickTransform
     static Quaternion[] startRotations;
     static Vector3[]    startScales;
     static Vector3      selectionPivot;
+    static int          dragButton;         // 0=LMB, 1=RMB
 
-    // Move
-    static Vector3 moveHitStart;
+    // ─── Shared Bounding Box ────────────────────────────────────
+    //
+    // OBB for single object (axes = object's right/up/forward).
+    // AABB for multi-select (axes = world right/up/forward).
+    // Face index: axisIdx = face/2, sign = (face%2==0) ? +1 : -1
+    //   0:+axes[0]  1:-axes[0]  2:+axes[1]  3:-axes[1]  4:+axes[2]  5:-axes[2]
 
-    // Rotate
-    static float rotateAngleStart;
+    static Vector3   boundsCenter;
+    static Vector3[] boundsAxes;        // [3] world-space axes
+    static float[]   boundsExtents;     // [3] half-extents
 
-    // Scale  (world-space raycasting for true 1:1 tracking)
-    static int     scaleAxisIndex;          // 0 = local X, 2 = local Z
-    static bool    scaleAxisChosen;
-    static int     scalePullSign;           // +1 = pulling positive face, -1 = pulling negative face
-    static Vector3 scaleAnchorWorld;        // opposite face center in world space
-    static Vector3 scaleWorldAxis;          // world-space direction of the scale axis
-    static float   scaleFaceStartDist;      // world distance: anchor → active face at start (= full extent)
-    static float   scaleMouseStartDist;     // world distance: anchor → mouse raycast along axis at start
+    // Hover result — updated in Idle, locked on click
+    static HoverKind hoveredKind, lockedKind;
+    static int       hoveredIndex, lockedIndex;   // face 0-5 or edge 0-11
 
-    // Duplicate-move
-    static bool shiftHeldOnPress;        // was Shift down when mouse was pressed?
-    static bool didDuplicate;            // did we already duplicate this drag?
+    // ─── Move State ─────────────────────────────────────────────
 
-    const float DragThresholdPx = 3f;
+    static Vector3 moveHitStart;        // plane hit at start
+    static Vector3 movePlaneNormal;     // plane normal (face normal for face hover, UpAxis for outside)
+    static Vector3 movePlanePoint;      // point on the plane (face center for face hover, pivot for outside)
+    static bool    moveAlongNormal;     // true when RMB drag = move along face normal
+    static float   moveNormalStartDist; // starting projection distance for normal-locked move
+
+    // ─── Rotate State ───────────────────────────────────────────
+
+    static Vector3 rotateAxis;              // world-space rotation axis
+    static Vector3 rotatePivot;             // world-space pivot point
+    static float   rotateAccumAngle;        // accumulated rotation (screen-space deg)
+    static float   rotatePrevScreenAngle;   // previous frame's screen angle (for incremental delta)
+    static Vector3 rotateStartDir;          // initial direction on rotation plane (for gizmo line)
+    static Vector2 rotateLinearStartPos;    // screen pos when dragging started (for linear mode)
+    static float   rotateLinearSign;        // precomputed sign for linear mode (mouse-right → rotation direction)
+
+    // ─── Scale State ────────────────────────────────────────────
+
+    static Vector3 scaleAnchorWorld;
+    static Vector3 scaleNormalWorld;
+    static float   scaleStartFaceDist;
+    static float   scaleStartMouseDist;
+
+    // ─── Undo ─────────────────────────────────────────────────
+
+    static int undoGroup;
+
+    // ─── Duplicate ──────────────────────────────────────────────
+
+    static bool shiftHeldOnPress;
+    static bool didDuplicate;
+
+    // ─── Constants ──────────────────────────────────────────────
+
+    const float DragThresholdPx  = 3f;
+    const float MinBoundsExtent  = 0.05f;
+    const double ModeKeyDelaySec = 0.1;   // delay before showing bounding box preview
+
+    // ─── Cursor Warp (Windows) ──────────────────────────────────
+
+#if UNITY_EDITOR_WIN
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct POINT { public int X, Y; }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool GetCursorPos(out POINT lpPoint);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    static extern bool SetCursorPos(int X, int Y);
+
+    /// <summary>
+    /// Warps the OS cursor by the delta between two GUI-space points.
+    /// Using a delta avoids DPI-scaling and window-offset conversion issues.
+    /// </summary>
+    static void WarpCursorDelta(Vector2 fromGUI, Vector2 toGUI)
+    {
+        GetCursorPos(out POINT pt);
+        Vector2 delta = toGUI - fromGUI;
+        SetCursorPos(pt.X + Mathf.RoundToInt(delta.x), pt.Y + Mathf.RoundToInt(delta.y));
+    }
+#endif
 
     // ─── Hook ───────────────────────────────────────────────────
 
     static QuickTransform()
     {
         SceneView.duringSceneGui += OnSceneGUI;
+        Undo.undoRedoPerformed += OnUndoRedo;
+    }
+
+    static void OnUndoRedo()
+    {
+        // When undo/redo fires mid-operation, our cached state (startPositions,
+        // startRotations, etc.) becomes stale.  Reset to Idle so we don't apply
+        // transforms from an invalidated snapshot.
+        if (phase != Phase.Idle)
+        {
+            GUIUtility.hotControl = 0;
+            ResetState();
+        }
     }
 
     // ─── Main Loop ──────────────────────────────────────────────
@@ -113,66 +239,73 @@ static class QuickTransform
     {
         Event e = Event.current;
 
-        // Focus loss — reset everything
         if (e.type == EventType.MouseLeaveWindow)
         {
             wHeld = eHeld = rHeld = false;
-            if (phase == Phase.Dragging)
-                RevertToSnapshot();
-            if (phase != Phase.Idle)
-            {
-                GUIUtility.hotControl = 0;
-                ResetState();
-            }
+            if (phase == Phase.Dragging) RevertToSnapshot();
+            if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
             return;
         }
 
-        // ── Key tracking ────────────────────────────────────────
         UpdateKeyTracking(e);
 
-        // ── Suppress tool-switch KeyUp after a successful drag ──
+        // Early-out if disabled via toolbar toggle
+        if (!Enabled)
+        {
+            wHeld = eHeld = rHeld = false;
+            if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
+            Tools.hidden = false;
+            return;
+        }
+
         if (suppressKeyUpFor != Mode.None && e.type == EventType.KeyUp)
         {
             bool suppress = (suppressKeyUpFor == Mode.Move   && e.keyCode == KeyCode.W)
                          || (suppressKeyUpFor == Mode.Rotate && e.keyCode == KeyCode.E)
                          || (suppressKeyUpFor == Mode.Scale  && e.keyCode == KeyCode.R);
-            if (suppress)
-            {
-                suppressKeyUpFor = Mode.None;
-                e.Use();
-                return;
-            }
+            if (suppress) { suppressKeyUpFor = Mode.None; e.Use(); return; }
         }
 
-        // ── Nothing selected → nothing to do ────────────────────
         Transform[] selected = Selection.transforms;
         if (selected == null || selected.Length == 0)
         {
-            if (phase != Phase.Idle)
-            {
-                GUIUtility.hotControl = 0;
-                ResetState();
-            }
+            if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
+            Tools.hidden = false;
             return;
         }
 
         Mode heldMode = GetHeldMode();
 
-        // ── Phase dispatch ──────────────────────────────────────
+        // Hide Unity's built-in gizmo when QuickTransform is active
+        Tools.hidden = heldMode != Mode.None || phase != Phase.Idle;
+
         switch (phase)
         {
-            case Phase.Idle:
-                HandleIdle(e, sv, selected, heldMode);
-                break;
-            case Phase.Ready:
-                HandleReady(e, sv);
-                break;
-            case Phase.Dragging:
-                HandleDragging(e, sv);
-                break;
+            case Phase.Idle:    HandleIdle(e, sv, selected, heldMode); break;
+            case Phase.Ready:   HandleReady(e, sv);                    break;
+            case Phase.Dragging: HandleDragging(e, sv);                break;
         }
 
-        // ── Cursor feedback ─────────────────────────────────────
+        // ── Bounding box preview while any mode key is held in Idle ──
+        bool showPreview = heldMode != Mode.None && phase == Phase.Idle
+            && (EditorApplication.timeSinceStartup - modeKeyDownTime) >= ModeKeyDelaySec;
+        if (showPreview)
+        {
+            ComputeBounds(selected);
+            DetectHover(sv, e.mousePosition, heldMode);
+            if (e.type == EventType.Repaint)
+            {
+                DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                if (hoveredKind == HoverKind.AllSideFaces)
+                {
+                    if (heldMode == Mode.Move)        DrawWorldMoveGizmo(boundsCenter);
+                    else if (heldMode == Mode.Rotate)  DrawWorldRotateGizmo(boundsCenter);
+                }
+            }
+            if (e.type == EventType.MouseMove)
+                sv.Repaint();
+        }
+
         if (heldMode != Mode.None || phase != Phase.Idle)
         {
             EditorGUIUtility.AddCursorRect(
@@ -185,13 +318,25 @@ static class QuickTransform
 
     static void UpdateKeyTracking(Event e)
     {
-        if (e.type == EventType.KeyDown && !e.alt && !e.control)
+        // Track RMB state. Mode keys pressed BEFORE RMB stay held so
+        // W+RMB on a face can trigger normal-axis movement.  New mode keys
+        // pressed WHILE RMB is held are still suppressed by the !rmbHeld
+        // check in the KeyDown handler below (WASD navigation case).
+        if (e.type == EventType.MouseDown && e.button == 1)
+            rmbHeld = true;
+        if (e.type == EventType.MouseUp && e.button == 1)
+            rmbHeld = false;
+
+        if (e.type == EventType.KeyDown && !e.alt && !e.control && !rmbHeld)
         {
+            bool anyPrev = wHeld || eHeld || rHeld;
             if (e.keyCode == KeyCode.W) wHeld = true;
             if (e.keyCode == KeyCode.E) eHeld = true;
             if (e.keyCode == KeyCode.R) rHeld = true;
+            // Record timestamp when we first enter a mode key hold
+            if (!anyPrev && (wHeld || eHeld || rHeld))
+                modeKeyDownTime = EditorApplication.timeSinceStartup;
         }
-
         if (e.type == EventType.KeyUp)
         {
             if (e.keyCode == KeyCode.W) wHeld = false;
@@ -213,102 +358,204 @@ static class QuickTransform
     static void HandleIdle(Event e, SceneView sv, Transform[] selected, Mode heldMode)
     {
         if (heldMode == Mode.None) return;
+        if (e.type != EventType.MouseDown) return;
+        if (e.button != 0 && e.button != 1) return;
 
-        bool clickFree = ClickFreeDrag;
-
-        // Click mode: require LMB press.
-        // Click-free mode: enter Ready on the KeyDown that starts the mode.
-        if (!clickFree)
-        {
-            if (e.type != EventType.MouseDown || e.button != 0) return;
-        }
-        else
-        {
-            if (e.type != EventType.KeyDown) return;
-        }
+        // RMB is only used for face-normal movement in Move mode
+        if (e.button == 1 && heldMode != Mode.Move) return;
 
         activeMode = heldMode;
-        phase = Phase.Ready;
-        mousePressPos = e.mousePosition;
-        shiftHeldOnPress = !clickFree && e.shift; // shift-duplicate only in click mode
-        didDuplicate = false;
-
-        // Cache targets — immune to selection changes mid-drag
         dragTargets = selected;
         SnapshotTransforms();
-
         selectionPivot = ComputePivot();
 
-        // Pre-compute mode-specific start data
-        switch (activeMode)
+        // Lock hover result
+        ComputeBounds(dragTargets);
+        DetectHover(sv, e.mousePosition, activeMode);
+        lockedKind  = hoveredKind;
+        lockedIndex = hoveredIndex;
+
+        // RMB drag requires a face to lock onto — otherwise let Unity handle scene nav
+        if (e.button == 1 && lockedKind != HoverKind.Face)
         {
-            case Mode.Move:
-                RaycastMovePlane(sv, e.mousePosition, selectionPivot, out moveHitStart);
-                break;
-            case Mode.Rotate:
-                rotateAngleStart = ScreenAngleFromPivot(e.mousePosition);
-                break;
-            case Mode.Scale:
-                scaleAxisChosen = false;
-                break;
+            activeMode = Mode.None;
+            dragTargets = null;
+            startPositions = null;
+            startRotations = null;
+            startScales = null;
+            return;
         }
 
-        // Claim input control
+        dragButton = e.button;
+        moveAlongNormal = e.button == 1;
+        phase = Phase.Ready;
+        mousePressPos = e.mousePosition;
+        shiftHeldOnPress = e.shift;
+        didDuplicate = false;
+
+        // Mode-specific init
+        switch (activeMode)
+        {
+            case Mode.Move:   InitMove(sv, e.mousePosition);   break;
+            case Mode.Rotate: InitRotate(sv, e.mousePosition); break;
+            case Mode.Scale:  InitScale(sv, e.mousePosition);  break;
+        }
+
         int id = GUIUtility.GetControlID(FocusType.Passive);
         HandleUtility.AddDefaultControl(id);
         GUIUtility.hotControl = id;
-
         e.Use();
     }
 
-    // ─── Phase: Ready (waiting for drag threshold) ──────────────
+    // ─── Mode Init ──────────────────────────────────────────────
+
+    static void InitMove(SceneView sv, Vector2 mousePos)
+    {
+        if (lockedKind == HoverKind.Face)
+        {
+            movePlaneNormal = GetFaceNormal(lockedIndex);
+            movePlanePoint  = GetFaceCenter(lockedIndex);
+        }
+        else
+        {
+            movePlaneNormal = UpAxis;
+            movePlanePoint  = selectionPivot;
+        }
+
+        if (moveAlongNormal)
+        {
+            // RMB face drag → movement locked along face normal (ray-to-line projection)
+            Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+            moveNormalStartDist = ProjectRayOntoLine(mouseRay, movePlanePoint, movePlaneNormal);
+        }
+        else
+        {
+            RaycastPlane(mousePos, movePlanePoint, movePlaneNormal, out moveHitStart);
+        }
+    }
+
+    static void InitRotate(SceneView sv, Vector2 mousePos)
+    {
+        if (lockedKind == HoverKind.Face)
+        {
+            rotateAxis  = GetFaceNormal(lockedIndex);
+            rotatePivot = GetFaceCenter(lockedIndex);
+        }
+        else if (lockedKind == HoverKind.Edge)
+        {
+            rotateAxis = GetEdgeDirection(lockedIndex);
+            Vector3[] corners = GetBoxCorners();
+            int[] ec = EdgeCornerIndices[lockedIndex];
+            rotatePivot = ClosestPointOnSegmentToScreenPos(corners[ec[0]], corners[ec[1]], mousePos);
+
+            // Warp cursor to the rotation circle edge, pointing outward from object center.
+            // This replaces sensitivity-based slowdown — the cursor starts at the circle
+            // perimeter so full 1:1 rotation feels natural from any edge.
+            float worldRadius = HandleUtility.GetHandleSize(rotatePivot) * CircleRadius;
+            Vector3 outward = rotatePivot - boundsCenter;
+            outward -= Vector3.Dot(outward, rotateAxis) * rotateAxis; // project onto rotation plane
+            if (outward.sqrMagnitude < 0.0001f)
+                outward = Vector3.Cross(rotateAxis, sv.camera.transform.right);
+            outward.Normalize();
+
+            Vector3 warpWorld = rotatePivot + outward * worldRadius;
+            Vector2 warpGUI = HandleUtility.WorldToGUIPoint(warpWorld);
+#if UNITY_EDITOR_WIN
+            WarpCursorDelta(mousePos, warpGUI);
+            mousePos = warpGUI;
+            mousePressPos = warpGUI;
+#endif
+        }
+        else // AllSideFaces or None → world Y
+        {
+            rotateAxis  = UpAxis;
+            rotatePivot = selectionPivot;
+        }
+        rotateAccumAngle = 0f;
+        rotatePrevScreenAngle = ScreenAngleFrom(mousePos, rotatePivot);
+
+        // Initial direction on the rotation plane (for gizmo line)
+        Ray initRay = HandleUtility.GUIPointToWorldRay(mousePos);
+        Plane initPlane = new Plane(rotateAxis, rotatePivot);
+        if (initPlane.Raycast(initRay, out float initEnter))
+            rotateStartDir = (initRay.GetPoint(initEnter) - rotatePivot).normalized;
+        else
+            rotateStartDir = Vector3.Cross(rotateAxis, Vector3.up).normalized;
+
+        // Precompute linear-mode sign: determine which screen-X direction
+        // corresponds to a positive rotation so mouse-right always maps to
+        // a visually consistent rotation regardless of axis orientation.
+        {
+            Vector3 testOffset = rotateStartDir * 0.001f;
+            Quaternion testRot = Quaternion.AngleAxis(1f, rotateAxis);
+            Vector2 sBefore = HandleUtility.WorldToGUIPoint(rotatePivot + testOffset);
+            Vector2 sAfter  = HandleUtility.WorldToGUIPoint(rotatePivot + testRot * testOffset);
+            rotateLinearSign = (sAfter.x - sBefore.x) >= 0f ? 1f : -1f;
+        }
+    }
+
+    static void InitScale(SceneView sv, Vector2 mousePos)
+    {
+        // lockedIndex is the face index (always Face kind for scale)
+        int face = lockedIndex;
+        int axisIdx = face / 2;
+        float sign = (face % 2 == 0) ? 1f : -1f;
+
+        scaleNormalWorld = boundsAxes[axisIdx] * sign;
+        Vector3 faceCenter = boundsCenter + scaleNormalWorld * boundsExtents[axisIdx];
+        scaleAnchorWorld   = boundsCenter - scaleNormalWorld * boundsExtents[axisIdx];
+
+        scaleStartFaceDist = Vector3.Dot(faceCenter - scaleAnchorWorld, scaleNormalWorld);
+
+        Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+        scaleStartMouseDist = ProjectRayOntoLine(mouseRay, scaleAnchorWorld, scaleNormalWorld);
+    }
+
+    // ─── Phase: Ready ───────────────────────────────────────────
 
     static void HandleReady(Event e, SceneView sv)
     {
-        bool clickFree = ClickFreeDrag;
+        if (ModeKeyReleased()) { GUIUtility.hotControl = 0; ResetState(); return; }
 
-        // ── Abort / commit conditions ───────────────────────────
-        if (ModeKeyReleased())
-        {
-            // Click-free: key release in Ready = nothing happened, just reset.
-            // Click mode: same — haven't started dragging yet.
-            GUIUtility.hotControl = 0;
-            ResetState();
-            return;
-        }
+        if (e.type == EventType.MouseUp && e.button == dragButton)
+        { GUIUtility.hotControl = 0; ResetState(); e.Use(); return; }
 
-        if (!clickFree && e.type == EventType.MouseUp && e.button == 0)
-        {
-            GUIUtility.hotControl = 0;
-            ResetState();
-            e.Use();
-            return;
-        }
-
-        // ── Threshold detection ─────────────────────────────────
-        // Click mode: MouseDrag (button held).
-        // Click-free: MouseMove (no button needed).
-        bool isDragEvent = (e.type == EventType.MouseDrag && e.button == 0)
-                        || (clickFree && e.type == EventType.MouseMove);
-
-        if (isDragEvent)
+        if (e.type == EventType.MouseDrag && e.button == dragButton)
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                // Shift = duplicate first, then drag the copies
                 if (shiftHeldOnPress && !didDuplicate)
                     DuplicateAndSwapTargets();
 
-                // Begin drag — register undo
                 string undoName = GetUndoName();
                 foreach (var t in dragTargets)
-                    Undo.RecordObject(t, undoName);
+                    Undo.RegisterCompleteObjectUndo(t, undoName);
+                undoGroup = Undo.GetCurrentGroup();
 
                 phase = Phase.Dragging;
+
+                // Re-sync rotation reference to current cursor position.
+                // Prevents a jump from cursor-warp latency or drag-threshold offset.
+                if (activeMode == Mode.Rotate)
+                {
+                    rotatePrevScreenAngle = ScreenAngleFrom(e.mousePosition, rotatePivot);
+                    rotateAccumAngle = 0f;
+                    rotateLinearStartPos = e.mousePosition;
+                }
+
                 ApplyDrag(e, sv);
             }
             e.Use();
             return;
+        }
+
+        // Draw the locked bounding box (+ rotation gizmo) while waiting for drag threshold
+        if (e.type == EventType.Repaint)
+        {
+            ComputeBounds(dragTargets);
+            DrawBoundsBox(lockedKind, lockedIndex, activeMode);
+            if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
+                DrawRotationGizmo(sv);
         }
 
         if (IsMouseEvent(e)) e.Use();
@@ -318,28 +565,12 @@ static class QuickTransform
 
     static void HandleDragging(Event e, SceneView sv)
     {
-        bool clickFree = ClickFreeDrag;
+        if (e.type == EventType.MouseDrag && e.button == dragButton)
+        { ApplyDrag(e, sv); e.Use(); return; }
 
-        // ── Continuous drag ─────────────────────────────────────
-        bool isDragEvent = (e.type == EventType.MouseDrag && e.button == 0)
-                        || (clickFree && e.type == EventType.MouseMove);
-
-        if (isDragEvent)
+        if ((e.type == EventType.MouseUp && e.button == dragButton) || ModeKeyReleased())
         {
-            ApplyDrag(e, sv);
-            e.Use();
-            return;
-        }
-
-        // ── Commit conditions ───────────────────────────────────
-        bool commitOnMouseUp = !clickFree && e.type == EventType.MouseUp && e.button == 0;
-        bool commitOnKeyUp   = ModeKeyReleased();
-        // Click-free: LMB click while dragging also commits (prevents click falling through)
-        bool commitOnClick   = clickFree && e.type == EventType.MouseDown && e.button == 0;
-
-        if (commitOnMouseUp || commitOnKeyUp || commitOnClick)
-        {
-            Undo.CollapseUndoOperations(Undo.GetCurrentGroup());
+            Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
             ResetState();
@@ -347,10 +578,7 @@ static class QuickTransform
             return;
         }
 
-        // Draw visual feedback
-        if (e.type == EventType.Repaint)
-            DrawFeedback();
-
+        if (e.type == EventType.Repaint) DrawFeedback(sv);
         if (IsMouseEvent(e)) e.Use();
     }
 
@@ -369,156 +597,638 @@ static class QuickTransform
 
     static void ApplyMove(SceneView sv, Vector2 mousePos)
     {
-        if (!RaycastMovePlane(sv, mousePos, selectionPivot, out Vector3 hit))
-            return;
-
-        Vector3 delta = hit - moveHitStart;
-        for (int i = 0; i < dragTargets.Length; i++)
-            dragTargets[i].position = startPositions[i] + delta;
+        if (moveAlongNormal)
+        {
+            // RMB face drag: movement locked along face normal
+            Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+            float currentDist = ProjectRayOntoLine(mouseRay, movePlanePoint, movePlaneNormal);
+            float delta = currentDist - moveNormalStartDist;
+            for (int i = 0; i < dragTargets.Length; i++)
+                dragTargets[i].position = startPositions[i] + movePlaneNormal * delta;
+        }
+        else
+        {
+            if (!RaycastPlane(mousePos, movePlanePoint, movePlaneNormal, out Vector3 hit)) return;
+            Vector3 delta = hit - moveHitStart;
+            for (int i = 0; i < dragTargets.Length; i++)
+                dragTargets[i].position = startPositions[i] + delta;
+        }
     }
 
     static void ApplyRotate(SceneView sv, Vector2 mousePos)
     {
-        Vector3 upAxis = UpAxis;
-        float currentAngle = ScreenAngleFromPivot(mousePos);
-        float delta = currentAngle - rotateAngleStart;
+        if (LinearRotation)
+        {
+            // Linear mode: horizontal screen-space delta → degrees, ignoring pivot/object size.
+            float dx = mousePos.x - rotateLinearStartPos.x;
+            rotateAccumAngle = dx * LinearRotSensitivity;
+        }
+        else
+        {
+            // Radial mode: frame-by-frame angular delta avoids wraparound glitches.
+            float currentScreenAngle = ScreenAngleFrom(mousePos, rotatePivot);
+            float frameDelta = currentScreenAngle - rotatePrevScreenAngle;
 
-        // Sign correction: ensure CW mouse motion = CW world rotation
-        float sign = Vector3.Dot(sv.camera.transform.up, upAxis) > 0f ? 1f : -1f;
-        Quaternion rot = Quaternion.AngleAxis(sign * delta, upAxis);
+            if (frameDelta > 180f)  frameDelta -= 360f;
+            if (frameDelta < -180f) frameDelta += 360f;
+
+            rotateAccumAngle += frameDelta;
+            rotatePrevScreenAngle = currentScreenAngle;
+        }
+
+        // Ctrl held: snap to configured increment
+        float snapAngle = RotSnapAngle;
+        if (Event.current.control)
+            rotateAccumAngle = Mathf.Round(rotateAccumAngle / snapAngle) * snapAngle;
+
+        // Sign: for linear mode use precomputed sign that maps mouse-right to
+        // consistent visual rotation; for radial mode derive from camera/axis.
+        float sign = LinearRotation
+            ? rotateLinearSign
+            : (Vector3.Dot(sv.camera.transform.forward, rotateAxis) > 0f ? -1f : 1f);
+
+        Quaternion rot = Quaternion.AngleAxis(sign * rotateAccumAngle, rotateAxis);
 
         for (int i = 0; i < dragTargets.Length; i++)
         {
-            Vector3 offset = startPositions[i] - selectionPivot;
-            dragTargets[i].position = selectionPivot + rot * offset;
-            dragTargets[i].rotation = rot * startRotations[i];
+            Vector3 offset = startPositions[i] - rotatePivot;
+            dragTargets[i].position = rotatePivot + rot * offset;
+            // Normalize to prevent denormalized quaternions that cause
+            // "Quaternion To Matrix conversion failed" errors on undo.
+            dragTargets[i].rotation = Quaternion.Normalize(rot * startRotations[i]);
         }
     }
 
     static void ApplyScale(SceneView sv, Vector2 mousePos)
     {
-        Vector2 mouseDelta = mousePos - mousePressPos;
+        Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+        float mouseDist  = ProjectRayOntoLine(mouseRay, scaleAnchorWorld, scaleNormalWorld);
+        float mouseDelta = mouseDist - scaleStartMouseDist;
 
-        if (!scaleAxisChosen)
-        {
-            if (mouseDelta.magnitude < DragThresholdPx) return;
-
-            scaleAxisIndex = ChooseDominantAxis(sv, mouseDelta);
-            scaleAxisChosen = true;
-
-            // Determine which side of the axis we're pulling.
-            Vector2 pivotScreen = HandleUtility.WorldToGUIPoint(selectionPivot);
-            Vector2 axisDir = GetAxisScreenDir(sv, dragTargets[0], scaleAxisIndex);
-            float dot = Vector2.Dot(mousePressPos - pivotScreen, axisDir);
-            scalePullSign = dot >= 0f ? 1 : -1;
-
-            // World-space axis and anchor for the reference object.
-            scaleWorldAxis = scaleAxisIndex == 0
-                ? dragTargets[0].rotation * Vector3.right
-                : dragTargets[0].rotation * Vector3.forward;
-            float refScale = scaleAxisIndex == 0 ? startScales[0].x : startScales[0].z;
-
-            // Anchor = opposite face (stays fixed). Face = side being pulled.
-            scaleAnchorWorld = startPositions[0] - scaleWorldAxis * (scalePullSign * refScale * 0.5f);
-            Vector3 faceWorld = startPositions[0] + scaleWorldAxis * (scalePullSign * refScale * 0.5f);
-
-            // World distance from anchor to face along the axis (= full extent along axis).
-            scaleFaceStartDist = Vector3.Dot(faceWorld - scaleAnchorWorld, scaleWorldAxis) * scalePullSign;
-
-            // Raycast mouse press to move plane, project onto axis to get starting mouse distance.
-            if (RaycastMovePlane(sv, mousePressPos, startPositions[0], out Vector3 mouseWorldStart))
-                scaleMouseStartDist = Vector3.Dot(mouseWorldStart - scaleAnchorWorld, scaleWorldAxis) * scalePullSign;
-            else
-                scaleMouseStartDist = scaleFaceStartDist; // fallback: pretend we clicked on the face
-        }
-
-        // Raycast current mouse to move plane, project onto the scale axis.
-        if (!RaycastMovePlane(sv, mousePos, startPositions[0], out Vector3 mouseWorld))
-            return;
-
-        float mouseAlongAxis = Vector3.Dot(mouseWorld - scaleAnchorWorld, scaleWorldAxis) * scalePullSign;
-        float mouseWorldDelta = mouseAlongAxis - scaleMouseStartDist;
-
-        // The face should move the same world distance as the mouse along the axis.
-        // factor = (original extent + mouse delta) / original extent
         float factor;
-        if (Mathf.Abs(scaleFaceStartDist) < 0.001f)
-            factor = Mathf.Max(1f + mouseWorldDelta, 0.01f);
+        if (Mathf.Abs(scaleStartFaceDist) < 0.001f)
+            factor = Mathf.Max(1f + mouseDelta, 0.01f);
         else
-            factor = Mathf.Max((scaleFaceStartDist + mouseWorldDelta) / scaleFaceStartDist, 0.01f);
+            factor = Mathf.Max((scaleStartFaceDist + mouseDelta) / scaleStartFaceDist, 0.01f);
 
         for (int i = 0; i < dragTargets.Length; i++)
         {
+            int localAxis = GetBestLocalAxis(startRotations[i], scaleNormalWorld);
             Vector3 s = startScales[i];
-            float oldAxisScale, newAxisScale;
-            Vector3 worldAxis;
-
-            if (scaleAxisIndex == 0)
-            {
-                oldAxisScale = startScales[i].x;
-                newAxisScale = oldAxisScale * factor;
-                s.x = newAxisScale;
-                worldAxis = startRotations[i] * Vector3.right;
-            }
-            else
-            {
-                oldAxisScale = startScales[i].z;
-                newAxisScale = oldAxisScale * factor;
-                s.z = newAxisScale;
-                worldAxis = startRotations[i] * Vector3.forward;
-            }
-
+            s[localAxis] = startScales[i][localAxis] * factor;
             dragTargets[i].localScale = s;
 
-            // Offset position to keep the opposite face fixed.
-            float scaleDelta = newAxisScale - oldAxisScale;
-            dragTargets[i].position = startPositions[i]
-                + worldAxis * (scalePullSign * scaleDelta * 0.5f);
+            // Reposition: scale axial distance from anchor, preserve lateral offset
+            Vector3 offset   = startPositions[i] - scaleAnchorWorld;
+            float   axialDist = Vector3.Dot(offset, scaleNormalWorld);
+            dragTargets[i].position = scaleAnchorWorld
+                + scaleNormalWorld * (axialDist * factor)
+                + (offset - scaleNormalWorld * axialDist);
+        }
+
+        // ── Verify and correct: guarantee anchor face stays pixel-perfect ──
+        ComputeBounds(dragTargets);
+        int axisIdx = lockedIndex / 2;
+        float signF = (lockedIndex % 2 == 0) ? 1f : -1f;
+        // The anchor is the face OPPOSITE to the locked face
+        Vector3 actualAnchor = boundsCenter - boundsAxes[axisIdx] * (signF * boundsExtents[axisIdx]);
+        Vector3 correction   = scaleAnchorWorld - actualAnchor;
+        if (correction.sqrMagnitude > 0.00001f)
+        {
+            for (int i = 0; i < dragTargets.Length; i++)
+                dragTargets[i].position += correction;
         }
     }
 
-    // ─── Helpers ────────────────────────────────────────────────
+    // ─── Helpers: Plane & Ray ───────────────────────────────────
 
-    /// <summary>
-    /// Raycast a screen point onto the movement plane (perpendicular to upAxis,
-    /// passing through <paramref name="planePoint"/>).
-    /// </summary>
-    static bool RaycastMovePlane(SceneView sv, Vector2 mousePos, Vector3 planePoint, out Vector3 hit)
+    static bool RaycastPlane(Vector2 mousePos, Vector3 planePoint, Vector3 planeNormal, out Vector3 hit)
     {
         hit = Vector3.zero;
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        Plane plane = new Plane(UpAxis, planePoint);
+        Plane plane = new Plane(planeNormal, planePoint);
         if (!plane.Raycast(ray, out float enter)) return false;
         hit = ray.GetPoint(enter);
         return true;
     }
 
-    static float ScreenAngleFromPivot(Vector2 mousePos)
+    /// <summary>Screen angle (degrees) from a world-space pivot to a screen point.</summary>
+    static float ScreenAngleFrom(Vector2 mousePos, Vector3 worldPivot)
     {
-        Vector2 pivotScreen = HandleUtility.WorldToGUIPoint(selectionPivot);
+        Vector2 pivotScreen = HandleUtility.WorldToGUIPoint(worldPivot);
         Vector2 dir = mousePos - pivotScreen;
         return Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
     }
 
-    static int ChooseDominantAxis(SceneView sv, Vector2 mouseDelta)
+    /// <summary>
+    /// Closest-point parameter t along a unit-length line from lineOrigin,
+    /// for the point on the line nearest to the given ray.
+    /// </summary>
+    static float ProjectRayOntoLine(Ray ray, Vector3 lineOrigin, Vector3 lineDir)
     {
-        Vector2 xScreen = GetAxisScreenDir(sv, dragTargets[0], 0);
-        Vector2 zScreen = GetAxisScreenDir(sv, dragTargets[0], 2);
+        Vector3 w = ray.origin - lineOrigin;
+        float a = Vector3.Dot(ray.direction, ray.direction);
+        float b = Vector3.Dot(ray.direction, lineDir);
+        float d = Vector3.Dot(ray.direction, w);
+        float e = Vector3.Dot(lineDir, w);
 
-        float dotX = Mathf.Abs(Vector2.Dot(mouseDelta.normalized, xScreen.normalized));
-        float dotZ = Mathf.Abs(Vector2.Dot(mouseDelta.normalized, zScreen.normalized));
-
-        return dotX >= dotZ ? 0 : 2;
+        float denom = a - b * b;
+        if (denom < 0.0001f) return e;
+        return (e * a - b * d) / denom;
     }
 
-    static Vector2 GetAxisScreenDir(SceneView sv, Transform t, int axisIndex)
+    /// <summary>
+    /// Closest point on a world-space line segment to a screen position.
+    /// Projects the screen position onto the segment in screen space, then lerps in world space.
+    /// </summary>
+    static Vector3 ClosestPointOnSegmentToScreenPos(Vector3 segA, Vector3 segB, Vector2 screenPos)
     {
-        Vector3 worldAxis = axisIndex == 0 ? t.right : t.forward;
-        Vector2 originScreen = HandleUtility.WorldToGUIPoint(t.position);
-        Vector2 tipScreen = HandleUtility.WorldToGUIPoint(t.position + worldAxis);
-        Vector2 dir = tipScreen - originScreen;
-        return dir.magnitude > 0.001f ? dir.normalized : Vector2.right;
+        Vector2 sa = HandleUtility.WorldToGUIPoint(segA);
+        Vector2 sb = HandleUtility.WorldToGUIPoint(segB);
+        Vector2 ab = sb - sa;
+        float lenSq = ab.sqrMagnitude;
+        if (lenSq < 0.0001f) return (segA + segB) * 0.5f;
+        float t = Mathf.Clamp01(Vector2.Dot(screenPos - sa, ab) / lenSq);
+        return Vector3.Lerp(segA, segB, t);
     }
+
+    // ─── Bounds Computation ─────────────────────────────────────
+
+    static void ComputeBounds(Transform[] targets)
+    {
+        if (targets.Length == 1)
+            ComputeOBB(targets[0]);
+        else
+            ComputeAABB(targets);
+
+        for (int i = 0; i < 3; i++)
+            boundsExtents[i] = Mathf.Max(boundsExtents[i], MinBoundsExtent);
+    }
+
+    /// <summary>
+    /// OBB aligned to the object's local axes, encompassing all child
+    /// MeshRenderers and SkinnedMeshRenderers using mesh-local bounds
+    /// (not renderer.bounds which inflates for rotated objects).
+    /// </summary>
+    static void ComputeOBB(Transform t)
+    {
+        // Guard against denormalized quaternion (can happen mid-undo).
+        Quaternion q = t.rotation;
+        float sqrLen = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+        if (sqrLen < 0.1f || sqrLen > 2f)
+            q = Quaternion.identity;
+        else if (sqrLen < 0.95f || sqrLen > 1.05f)
+            q = Quaternion.Normalize(q);
+
+        Vector3 axR = q * Vector3.right;
+        Vector3 axU = q * Vector3.up;
+        Vector3 axF = q * Vector3.forward;
+        boundsAxes = new[] { axR, axU, axF };
+
+        Vector3 pos = t.position;
+
+        Bounds localBounds = default;
+        bool first = true;
+
+        // Collect mesh-local corners from MeshRenderers
+        foreach (var mf in t.GetComponentsInChildren<MeshFilter>())
+        {
+            var mr = mf.GetComponent<MeshRenderer>();
+            if (mr == null || mf.sharedMesh == null) continue;
+
+            Bounds mb = mf.sharedMesh.bounds;
+            EncapsulateLocalBoundsCorners(mf.transform, mb, pos, axR, axU, axF, ref localBounds, ref first);
+        }
+
+        // Collect mesh-local corners from SkinnedMeshRenderers
+        foreach (var smr in t.GetComponentsInChildren<SkinnedMeshRenderer>())
+        {
+            Bounds lb = smr.localBounds;
+            EncapsulateLocalBoundsCorners(smr.transform, lb, pos, axR, axU, axF, ref localBounds, ref first);
+        }
+
+        if (first)
+        {
+            // No mesh renderers found — fall back to a point at the transform
+            boundsCenter = pos;
+            boundsExtents = new[] { 0f, 0f, 0f };
+            return;
+        }
+
+        boundsCenter = pos + axR * localBounds.center.x
+                           + axU * localBounds.center.y
+                           + axF * localBounds.center.z;
+        boundsExtents = new[] { localBounds.extents.x, localBounds.extents.y, localBounds.extents.z };
+    }
+
+    /// <summary>
+    /// Transform 8 corners of a local-space bounds through a child transform
+    /// into world space, then project onto root axes to build an enclosing OBB.
+    /// </summary>
+    static void EncapsulateLocalBoundsCorners(
+        Transform child, Bounds localBounds,
+        Vector3 rootPos, Vector3 axR, Vector3 axU, Vector3 axF,
+        ref Bounds projBounds, ref bool first)
+    {
+        Vector3 center = localBounds.center;
+        Vector3 ext    = localBounds.extents;
+
+        for (int ci = 0; ci < 8; ci++)
+        {
+            float sx = (ci & 1) != 0 ? 1f : -1f;
+            float sy = (ci & 2) != 0 ? 1f : -1f;
+            float sz = (ci & 4) != 0 ? 1f : -1f;
+
+            // Local-space corner → world-space via the child's transform
+            Vector3 localCorner = center + new Vector3(ext.x * sx, ext.y * sy, ext.z * sz);
+            Vector3 worldCorner = child.TransformPoint(localCorner);
+
+            // Project onto root axes (OBB-local space relative to root position)
+            Vector3 off = worldCorner - rootPos;
+            Vector3 lp = new Vector3(
+                Vector3.Dot(off, axR),
+                Vector3.Dot(off, axU),
+                Vector3.Dot(off, axF));
+
+            if (first) { projBounds = new Bounds(lp, Vector3.zero); first = false; }
+            else projBounds.Encapsulate(lp);
+        }
+    }
+
+    /// <summary>AABB encompassing all targets and their child mesh renderers.</summary>
+    static void ComputeAABB(Transform[] targets)
+    {
+        boundsAxes = new[] { Vector3.right, Vector3.up, Vector3.forward };
+
+        Bounds combined = new Bounds(targets[0].position, Vector3.zero);
+        foreach (var t in targets)
+        {
+            bool any = false;
+
+            foreach (var mf in t.GetComponentsInChildren<MeshFilter>())
+            {
+                var mr = mf.GetComponent<MeshRenderer>();
+                if (mr == null || mf.sharedMesh == null) continue;
+                EncapsulateWorldBounds(mf.transform, mf.sharedMesh.bounds, ref combined);
+                any = true;
+            }
+
+            foreach (var smr in t.GetComponentsInChildren<SkinnedMeshRenderer>())
+            {
+                EncapsulateWorldBounds(smr.transform, smr.localBounds, ref combined);
+                any = true;
+            }
+
+            if (!any)
+                combined.Encapsulate(t.position);
+        }
+
+        boundsCenter  = combined.center;
+        boundsExtents = new[] { combined.extents.x, combined.extents.y, combined.extents.z };
+    }
+
+    /// <summary>Transform local bounds corners to world space and encapsulate into an AABB.</summary>
+    static void EncapsulateWorldBounds(Transform child, Bounds localBounds, ref Bounds worldBounds)
+    {
+        Vector3 center = localBounds.center;
+        Vector3 ext    = localBounds.extents;
+
+        for (int ci = 0; ci < 8; ci++)
+        {
+            float sx = (ci & 1) != 0 ? 1f : -1f;
+            float sy = (ci & 2) != 0 ? 1f : -1f;
+            float sz = (ci & 4) != 0 ? 1f : -1f;
+
+            Vector3 localCorner = center + new Vector3(ext.x * sx, ext.y * sy, ext.z * sz);
+            worldBounds.Encapsulate(child.TransformPoint(localCorner));
+        }
+    }
+
+    // ─── Hover Detection ────────────────────────────────────────
+
+    static void DetectHover(SceneView sv, Vector2 mousePos, Mode mode)
+    {
+        switch (mode)
+        {
+            case Mode.Move:   DetectMoveHover(sv, mousePos);   break;
+            case Mode.Rotate: DetectRotateHover(sv, mousePos); break;
+            case Mode.Scale:  DetectScaleHover(sv, mousePos);  break;
+        }
+    }
+
+    static void DetectMoveHover(SceneView sv, Vector2 mousePos)
+    {
+        // Y face hover → axis-locked Y movement
+        int yFace = CheckYFaceHover(sv, mousePos);
+        if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
+
+        // Side face hover → lock movement to that face's plane
+        int sideFace = CheckSideFaceHover(sv, mousePos);
+        if (sideFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = sideFace; return; }
+
+        // Outside box → world XZ plane (no face highlights)
+        hoveredKind  = HoverKind.AllSideFaces;
+        hoveredIndex = 0;
+    }
+
+    static void DetectRotateHover(SceneView sv, Vector2 mousePos)
+    {
+        // Edge proximity first (highest priority)
+        int edge = DetectNearestEdge(sv, mousePos);
+        if (edge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = edge; return; }
+
+        // Y face hover
+        int yFace = CheckYFaceHover(sv, mousePos);
+        if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
+
+        // Side face hover
+        int sideFace = CheckSideFaceHover(sv, mousePos);
+        if (sideFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = sideFace; return; }
+
+        // Outside → world Y-axis rotation (no face highlights)
+        hoveredKind  = HoverKind.AllSideFaces;
+        hoveredIndex = 0;
+    }
+
+    static void DetectScaleHover(SceneView sv, Vector2 mousePos)
+    {
+        // Y face hover (exact polygon hit)
+        int yFace = CheckYFaceHover(sv, mousePos);
+        if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
+
+        // Y face proximity — if mouse is within EdgeHoverPx of a Y face edge,
+        // give it to Y face. This provides precedence over quadrant-based side faces,
+        // since side faces can always be selected from outside the box.
+        int yProx = CheckYFaceProximity(sv, mousePos);
+        if (yProx >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yProx; return; }
+
+        // Quadrant for side faces (always picks one)
+        hoveredKind  = HoverKind.Face;
+        hoveredIndex = GetQuadrantFace(sv, mousePos);
+    }
+
+    /// <summary>Check if mouse is within EdgeHoverPx of a front-facing Y face's edges.</summary>
+    static int CheckYFaceProximity(SceneView sv, Vector2 mousePos)
+    {
+        Vector3 camFwd = sv.camera.transform.forward;
+        float threshold = EdgeHoverPx;
+        for (int face = 2; face <= 3; face++)
+        {
+            Vector3 normal = GetFaceNormal(face);
+            if (Vector3.Dot(normal, camFwd) > 0f) continue;
+
+            Vector3[] corners = GetFaceWorldCorners(face);
+            Vector2[] screen = new Vector2[4];
+            for (int i = 0; i < 4; i++)
+                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+
+            // Check distance to each edge of the face quad
+            for (int i = 0; i < 4; i++)
+            {
+                float dist = DistPointToSegment2D(mousePos, screen[i], screen[(i + 1) % 4]);
+                if (dist < threshold) return face;
+            }
+        }
+        return -1;
+    }
+
+    // ─── Hover Helpers ──────────────────────────────────────────
+
+    /// <summary>Check if mouse is over top (+Y=2) or bottom (-Y=3) face polygon. Skips back-facing.</summary>
+    static int CheckYFaceHover(SceneView sv, Vector2 mousePos)
+    {
+        Vector3 camFwd = sv.camera.transform.forward;
+        for (int face = 2; face <= 3; face++)
+        {
+            // Skip back-facing Y faces
+            Vector3 normal = GetFaceNormal(face);
+            if (Vector3.Dot(normal, camFwd) > 0f) continue;
+
+            Vector3[] corners = GetFaceWorldCorners(face);
+            Vector2[] screen = new Vector2[4];
+            for (int i = 0; i < 4; i++)
+                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+            if (IsPointInScreenQuad(mousePos, screen))
+                return face;
+        }
+        return -1;
+    }
+
+    /// <summary>Check if mouse is over any front-facing side face (0,1,4,5).</summary>
+    static int CheckSideFaceHover(SceneView sv, Vector2 mousePos)
+    {
+        Vector3 camFwd = sv.camera.transform.forward;
+        int[] sideFaces = { 0, 1, 4, 5 };
+        foreach (int face in sideFaces)
+        {
+            Vector3 normal = GetFaceNormal(face);
+            // Skip back-facing faces
+            if (Vector3.Dot(normal, camFwd) > 0f) continue;
+
+            Vector3[] corners = GetFaceWorldCorners(face);
+            Vector2[] screen = new Vector2[4];
+            for (int i = 0; i < 4; i++)
+                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+            if (IsPointInScreenQuad(mousePos, screen))
+                return face;
+        }
+        return -1;
+    }
+
+    /// <summary>Quadrant method: pick the side face whose screen-space center is most aligned with mouse direction.</summary>
+    static int GetQuadrantFace(SceneView sv, Vector2 mousePos)
+    {
+        Vector2 centerScreen = HandleUtility.WorldToGUIPoint(boundsCenter);
+        Vector2 mouseDir = mousePos - centerScreen;
+        if (mouseDir.sqrMagnitude < 0.001f) return 0;
+        mouseDir.Normalize();
+
+        int bestFace = 0;
+        float bestDot = float.NegativeInfinity;
+
+        int[] sideFaces = { 0, 1, 4, 5 };
+        foreach (int face in sideFaces)
+        {
+            Vector3 fc = GetFaceCenter(face);
+            Vector2 fcScreen = HandleUtility.WorldToGUIPoint(fc);
+            Vector2 fDir = fcScreen - centerScreen;
+            if (fDir.sqrMagnitude < 0.001f) continue;
+            float dot = Vector2.Dot(mouseDir, fDir.normalized);
+            if (dot > bestDot) { bestDot = dot; bestFace = face; }
+        }
+        return bestFace;
+    }
+
+    /// <summary>Find the nearest front-facing edge within threshold pixels, or -1.</summary>
+    static int DetectNearestEdge(SceneView sv, Vector2 mousePos)
+    {
+        Vector3[] corners = GetBoxCorners();
+        float threshold = EdgeHoverPx;
+        int bestEdge = -1;
+        float bestDist = threshold;
+
+        for (int ei = 0; ei < 12; ei++)
+        {
+            int[] ec = EdgeCornerIndices[ei];
+            Vector2 a = HandleUtility.WorldToGUIPoint(corners[ec[0]]);
+            Vector2 b = HandleUtility.WorldToGUIPoint(corners[ec[1]]);
+            float dist = DistPointToSegment2D(mousePos, a, b);
+            if (dist < bestDist) { bestDist = dist; bestEdge = ei; }
+        }
+        return bestEdge;
+    }
+
+    /// <summary>
+    /// Returns true if at least one of the edge's two adjacent faces is front-facing.
+    /// An edge along axis A is bordered by faces on the two other axes (B and C).
+    /// The specific +/- face depends on which side of center the edge sits.
+    /// </summary>
+    static bool IsEdgeVisible(int edgeIdx, Vector3 camFwd)
+    {
+        int mainAxis = edgeIdx / 4;
+
+        // The two perpendicular axis indices
+        int perpA, perpB;
+        switch (mainAxis)
+        {
+            case 0: perpA = 1; perpB = 2; break;
+            case 1: perpA = 0; perpB = 2; break;
+            default: perpA = 0; perpB = 1; break;
+        }
+
+        // Use the first corner's bit pattern to determine which face on each perp axis.
+        // Corner bit N = axis N sign (0 = negative, 1 = positive).
+        int[] ec = EdgeCornerIndices[edgeIdx];
+        int cornerSample = ec[0]; // either corner gives same perp-axis signs
+
+        // Check face on perpA axis
+        bool perpAPositive = ((cornerSample >> perpA) & 1) != 0;
+        int faceA = perpA * 2 + (perpAPositive ? 0 : 1);
+        Vector3 normalA = GetFaceNormal(faceA);
+
+        // Check face on perpB axis
+        bool perpBPositive = ((cornerSample >> perpB) & 1) != 0;
+        int faceB = perpB * 2 + (perpBPositive ? 0 : 1);
+        Vector3 normalB = GetFaceNormal(faceB);
+
+        // At least one adjacent face must be front-facing (normal opposes camera forward)
+        return Vector3.Dot(normalA, camFwd) < 0f || Vector3.Dot(normalB, camFwd) < 0f;
+    }
+
+    static bool IsPointInScreenQuad(Vector2 point, Vector2[] quad)
+    {
+        bool allPos = true, allNeg = true;
+        for (int i = 0; i < 4; i++)
+        {
+            Vector2 a = quad[i], b = quad[(i + 1) % 4];
+            float cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+            if (cross > 0f) allNeg = false;
+            if (cross < 0f) allPos = false;
+        }
+        return allPos || allNeg;
+    }
+
+    static float DistPointToSegment2D(Vector2 p, Vector2 a, Vector2 b)
+    {
+        Vector2 ab = b - a;
+        float lenSq = ab.sqrMagnitude;
+        if (lenSq < 0.0001f) return Vector2.Distance(p, a);
+        float t = Mathf.Clamp01(Vector2.Dot(p - a, ab) / lenSq);
+        Vector2 proj = a + ab * t;
+        return Vector2.Distance(p, proj);
+    }
+
+    // ─── Box Geometry ───────────────────────────────────────────
+
+    /// <summary>Face normal (unit vector) for a face index 0-5.</summary>
+    static Vector3 GetFaceNormal(int face)
+    {
+        int axisIdx = face / 2;
+        float sign = (face % 2 == 0) ? 1f : -1f;
+        return boundsAxes[axisIdx] * sign;
+    }
+
+    /// <summary>World-space center of a face.</summary>
+    static Vector3 GetFaceCenter(int face)
+    {
+        return boundsCenter + GetFaceNormal(face) * boundsExtents[face / 2];
+    }
+
+    /// <summary>Find which local axis (0=X,1=Y,2=Z) best matches a world direction.</summary>
+    static int GetBestLocalAxis(Quaternion rotation, Vector3 worldDir)
+    {
+        float bestDot = 0f;
+        int best = 0;
+        for (int i = 0; i < 3; i++)
+        {
+            Vector3 ax = rotation * (i == 0 ? Vector3.right : i == 1 ? Vector3.up : Vector3.forward);
+            float dot = Mathf.Abs(Vector3.Dot(ax, worldDir));
+            if (dot > bestDot) { bestDot = dot; best = i; }
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// 8 corners of the bounding box.
+    /// Corner index bits: bit0=X sign, bit1=Y sign, bit2=Z sign.
+    /// </summary>
+    static Vector3[] GetBoxCorners()
+    {
+        Vector3[] c = new Vector3[8];
+        for (int i = 0; i < 8; i++)
+        {
+            float sx = (i & 1) != 0 ? 1f : -1f;
+            float sy = (i & 2) != 0 ? 1f : -1f;
+            float sz = (i & 4) != 0 ? 1f : -1f;
+            c[i] = boundsCenter
+                + boundsAxes[0] * (boundsExtents[0] * sx)
+                + boundsAxes[1] * (boundsExtents[1] * sy)
+                + boundsAxes[2] * (boundsExtents[2] * sz);
+        }
+        return c;
+    }
+
+    /// <summary>Corner indices for each face (winding order).</summary>
+    static readonly int[][] FaceCornerIndices =
+    {
+        new[] { 1, 3, 7, 5 }, // face 0: +X
+        new[] { 0, 4, 6, 2 }, // face 1: -X
+        new[] { 2, 6, 7, 3 }, // face 2: +Y
+        new[] { 0, 1, 5, 4 }, // face 3: -Y
+        new[] { 4, 5, 7, 6 }, // face 4: +Z
+        new[] { 0, 2, 3, 1 }, // face 5: -Z
+    };
+
+    /// <summary>Corner pairs for each of 12 edges. Edges 0-3 along axis 0, 4-7 axis 1, 8-11 axis 2.</summary>
+    static readonly int[][] EdgeCornerIndices =
+    {
+        new[] {0,1}, new[] {2,3}, new[] {4,5}, new[] {6,7}, // along axis 0
+        new[] {0,2}, new[] {1,3}, new[] {4,6}, new[] {5,7}, // along axis 1
+        new[] {0,4}, new[] {1,5}, new[] {2,6}, new[] {3,7}, // along axis 2
+    };
+
+    static Vector3[] GetFaceWorldCorners(int face)
+    {
+        Vector3[] all = GetBoxCorners();
+        int[] ci = FaceCornerIndices[face];
+        return new[] { all[ci[0]], all[ci[1]], all[ci[2]], all[ci[3]] };
+    }
+
+    /// <summary>World-space direction of an edge (unit vector along the edge's axis).</summary>
+    static Vector3 GetEdgeDirection(int edgeIdx)
+    {
+        return boundsAxes[edgeIdx / 4];
+    }
+
+    /// <summary>World-space midpoint of an edge.</summary>
+    static Vector3 GetEdgeMidpoint(int edgeIdx)
+    {
+        Vector3[] corners = GetBoxCorners();
+        int[] ec = EdgeCornerIndices[edgeIdx];
+        return (corners[ec[0]] + corners[ec[1]]) * 0.5f;
+    }
+
+    // ─── Common Helpers ─────────────────────────────────────────
 
     static void SnapshotTransforms()
     {
@@ -537,8 +1247,7 @@ static class QuickTransform
     static Vector3 ComputePivot()
     {
         Vector3 sum = Vector3.zero;
-        foreach (var t in dragTargets)
-            sum += t.position;
+        foreach (var t in dragTargets) sum += t.position;
         return sum / dragTargets.Length;
     }
 
@@ -554,34 +1263,24 @@ static class QuickTransform
         }
     }
 
-    /// <summary>
-    /// Duplicate selected objects and swap drag targets to the new copies.
-    /// The originals stay in place; the copies become the active drag targets.
-    /// </summary>
     static void DuplicateAndSwapTargets()
     {
         didDuplicate = true;
 
-        // Save current selection, duplicate via menu command
-        var originalObjects = new GameObject[dragTargets.Length];
+        var originals = new GameObject[dragTargets.Length];
         for (int i = 0; i < dragTargets.Length; i++)
-            originalObjects[i] = dragTargets[i].gameObject;
+            originals[i] = dragTargets[i].gameObject;
 
-        Selection.objects = originalObjects;
+        Selection.objects = originals;
         Undo.SetCurrentGroupName("QuickTransform Duplicate " + activeMode);
         EditorApplication.ExecuteMenuItem("Edit/Duplicate");
 
-        // The duplicated objects are now the selection
         Transform[] duplicates = Selection.transforms;
         if (duplicates == null || duplicates.Length == 0) return;
 
-        // Swap drag targets to the duplicates
         dragTargets = duplicates;
         SnapshotTransforms();
         selectionPivot = ComputePivot();
-
-        // Re-init move start for the duplicates
-        // (they start at the same positions, so moveHitStart is still valid)
     }
 
     static void ResetState()
@@ -592,7 +1291,13 @@ static class QuickTransform
         startPositions = null;
         startRotations = null;
         startScales = null;
-        scaleAxisChosen = false;
+        hoveredKind = HoverKind.None;
+        lockedKind  = HoverKind.None;
+        hoveredIndex = 0;
+        lockedIndex  = 0;
+        movePlaneNormal = Vector3.up;
+        moveAlongNormal = false;
+        dragButton = 0;
         shiftHeldOnPress = false;
         didDuplicate = false;
     }
@@ -627,28 +1332,212 @@ static class QuickTransform
 
     // ─── Visual Feedback ────────────────────────────────────────
 
-    static void DrawFeedback()
+    static void DrawFeedback(SceneView sv)
     {
         if (dragTargets == null) return;
 
-        switch (activeMode)
+        ComputeBounds(dragTargets);
+        DrawBoundsBox(lockedKind, lockedIndex, activeMode);
+
+        // Rotation gizmo: circle + line from pivot to mouse
+        if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
         {
-            case Mode.Rotate:
-                Handles.color = new Color(0.2f, 0.9f, 0.2f, 0.4f);
-                Handles.DrawWireDisc(selectionPivot, UpAxis, 1.5f);
+            DrawRotationGizmo(sv);
+        }
+
+        // World-space gizmo while dragging outside bounds
+        if (lockedKind == HoverKind.AllSideFaces)
+        {
+            if (activeMode == Mode.Move)        DrawWorldMoveGizmo(boundsCenter);
+            else if (activeMode == Mode.Rotate) DrawWorldRotateGizmo(boundsCenter);
+        }
+    }
+
+    /// <summary>
+    /// Draws a circle on the rotation plane at the pivot, a faint reference line at the
+    /// original orientation, and a dynamic line showing the accumulated rotation.
+    /// When Ctrl is held (snapping), shows the degree value outside the circle.
+    /// </summary>
+    static void DrawRotationGizmo(SceneView sv)
+    {
+        Color gizmoColor = GetModeColor(Mode.Rotate, 0.8f);
+
+        // Fixed screen-space radius: HandleUtility.GetHandleSize ≈ 64px at that world point
+        float worldRadius = HandleUtility.GetHandleSize(rotatePivot) * CircleRadius;
+
+        // Circle
+        Handles.color = gizmoColor;
+        Handles.DrawWireDisc(rotatePivot, rotateAxis, worldRadius);
+
+        // Faint reference line at original orientation (stays fixed)
+        if (rotateStartDir.sqrMagnitude > 0.0001f)
+        {
+            Handles.color = GetModeColor(Mode.Rotate, 0.2f);
+            Handles.DrawLine(rotatePivot, rotatePivot + rotateStartDir * worldRadius, 1f);
+        }
+
+        // Dynamic line showing accumulated rotation direction
+        float sign = LinearRotation
+            ? rotateLinearSign
+            : (Vector3.Dot(sv.camera.transform.forward, rotateAxis) > 0f ? -1f : 1f);
+        Quaternion vizRot = Quaternion.AngleAxis(sign * rotateAccumAngle, rotateAxis);
+        Vector3 lineDir = vizRot * rotateStartDir;
+        if (lineDir.sqrMagnitude > 0.0001f)
+        {
+            Handles.color = gizmoColor;
+            Handles.DrawLine(rotatePivot, rotatePivot + lineDir.normalized * worldRadius, 2f);
+        }
+
+        // Degree label outside the circle when Ctrl-snapping
+        if (Event.current.control && lineDir.sqrMagnitude > 0.0001f)
+        {
+            Vector3 labelPos = rotatePivot + lineDir.normalized * worldRadius * 1.25f;
+            GUIStyle style = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white },
+                alignment = TextAnchor.MiddleCenter,
+            };
+            Handles.Label(labelPos, $"{rotateAccumAngle:F0}°", style);
+        }
+    }
+
+    // ─── Box Drawing ────────────────────────────────────────────
+
+    static void DrawBoundsBox(HoverKind kind, int index, Mode mode)
+    {
+        Vector3[] corners = GetBoxCorners();
+
+        // ── Wireframe ──
+        Handles.color = new Color(1f, 1f, 1f, 0.25f);
+        int[][] edges =
+        {
+            new[] {0,1}, new[] {2,3}, new[] {4,5}, new[] {6,7},
+            new[] {0,2}, new[] {1,3}, new[] {4,6}, new[] {5,7},
+            new[] {0,4}, new[] {1,5}, new[] {2,6}, new[] {3,7},
+        };
+        foreach (var edge in edges)
+            Handles.DrawLine(corners[edge[0]], corners[edge[1]]);
+
+        // ── Highlights ──
+        switch (kind)
+        {
+            case HoverKind.AllSideFaces:
+                // Outside box: wireframe only, no face highlights (world-space operation)
                 break;
 
-            case Mode.Scale:
-                Handles.color = scaleAxisIndex == 0
-                    ? new Color(1f, 0.2f, 0.2f, 0.8f)    // red = X
-                    : new Color(0.2f, 0.2f, 1f, 0.8f);   // blue = Z
-                foreach (var t in dragTargets)
-                {
-                    if (t == null) continue;
-                    Vector3 axis = scaleAxisIndex == 0 ? t.right : t.forward;
-                    Handles.DrawLine(t.position - axis * 3f, t.position + axis * 3f);
-                }
+            case HoverKind.Face:
+                DrawFaceHighlight(corners, index, mode);
+                break;
+
+            case HoverKind.Edge:
+                DrawEdgeHighlight(corners, index, mode);
                 break;
         }
+    }
+
+    static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode)
+    {
+        if (face < 0 || face >= 6) return;
+        int[] ci = FaceCornerIndices[face];
+        Vector3[] verts = { corners[ci[0]], corners[ci[1]], corners[ci[2]], corners[ci[3]] };
+
+        Color fill, outline;
+        if (mode == Mode.Scale)
+        {
+            int axisIdx = face / 2;
+            fill = axisIdx == 0 ? new Color(1f, 0.3f, 0.3f, 0.25f)
+                 : axisIdx == 1 ? new Color(0.3f, 1f, 0.3f, 0.25f)
+                 : new Color(0.3f, 0.3f, 1f, 0.25f);
+        }
+        else
+        {
+            fill = GetModeColor(mode, 0.2f);
+        }
+        outline = fill; outline.a = 0.9f;
+        Handles.DrawSolidRectangleWithOutline(verts, fill, outline);
+    }
+
+    static void DrawEdgeHighlight(Vector3[] corners, int edgeIdx, Mode mode)
+    {
+        if (edgeIdx < 0 || edgeIdx >= 12) return;
+        int[] ec = EdgeCornerIndices[edgeIdx];
+        Color c = GetModeColor(mode, 0.9f);
+        Handles.color = c;
+        Handles.DrawLine(corners[ec[0]], corners[ec[1]], 4f);
+    }
+
+    static Color GetModeColor(Mode mode, float alpha)
+    {
+        return mode switch
+        {
+            Mode.Move   => new Color(1f, 0.8f, 0.2f, alpha),   // yellow-orange
+            Mode.Rotate => new Color(0.2f, 0.9f, 0.2f, alpha), // green
+            Mode.Scale  => new Color(0.5f, 0.5f, 1f, alpha),   // blue-ish
+            _           => new Color(1f, 1f, 1f, alpha),
+        };
+    }
+
+    // ─── World-Space Gizmo Preview (outside bounding box) ────
+
+    /// <summary>
+    /// Move gizmo showing world XZ plane: X and Z arrows active (yellow),
+    /// Y arrow grayed out, small XZ plane square.
+    /// </summary>
+    static void DrawWorldMoveGizmo(Vector3 center)
+    {
+        float sz = HandleUtility.GetHandleSize(center) * 0.9f;
+        Color active   = new Color(1f, 1f, 0.2f, 0.8f);
+        Color dimGreen = new Color(0.4f, 0.7f, 0.4f, 0.2f);
+
+        // Active X axis
+        Handles.color = active;
+        Handles.DrawLine(center, center + Vector3.right * sz, 2f);
+        Handles.ConeHandleCap(0, center + Vector3.right * sz,
+            Quaternion.LookRotation(Vector3.right), sz * 0.1f, EventType.Repaint);
+
+        // Active Z axis
+        Handles.DrawLine(center, center + Vector3.forward * sz, 2f);
+        Handles.ConeHandleCap(0, center + Vector3.forward * sz,
+            Quaternion.LookRotation(Vector3.forward), sz * 0.1f, EventType.Repaint);
+
+        // Inactive Y axis
+        Handles.color = dimGreen;
+        Handles.DrawLine(center, center + Vector3.up * sz);
+
+        // XZ plane square
+        float q = sz * 0.2f;
+        Vector3[] quad =
+        {
+            center,
+            center + Vector3.right * q,
+            center + Vector3.right * q + Vector3.forward * q,
+            center + Vector3.forward * q,
+        };
+        Handles.DrawSolidRectangleWithOutline(quad,
+            new Color(1f, 1f, 0.2f, 0.12f), active);
+    }
+
+    /// <summary>
+    /// Rotate gizmo showing world Y axis: Y disc active (yellow),
+    /// X and Z discs grayed out.
+    /// </summary>
+    static void DrawWorldRotateGizmo(Vector3 center)
+    {
+        float sz = HandleUtility.GetHandleSize(center) * 0.9f;
+        Color active = new Color(1f, 1f, 0.2f, 0.8f);
+
+        // Active Y rotation disc
+        Handles.color = active;
+        Handles.DrawWireDisc(center, Vector3.up, sz);
+
+        // Inactive X disc
+        Handles.color = new Color(0.8f, 0.3f, 0.3f, 0.15f);
+        Handles.DrawWireDisc(center, Vector3.right, sz);
+
+        // Inactive Z disc
+        Handles.color = new Color(0.3f, 0.3f, 0.8f, 0.15f);
+        Handles.DrawWireDisc(center, Vector3.forward, sz);
     }
 }

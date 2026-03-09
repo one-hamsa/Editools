@@ -179,7 +179,8 @@ public class EditoolsOverlay : ToolbarOverlay
 		EditoolsScreenshotStrip.k_Id,
 		EditoolsCaptureButton.k_Id,
 		EditoolsMaterialCheckButton.k_Id,
-		EditoolsHeatmapButton.k_Id
+		EditoolsHeatmapButton.k_Id,
+		EditoolsQuickTransformButton.k_Id
 	) { }
 
 	// ---- Element registration ----
@@ -826,6 +827,121 @@ class EditoolsHeatmapButton : VisualElement
 		menu.AddItem(new GUIContent("Settings..."), false, () => HeatmapSettingsWindow.ShowWindow());
 		menu.AddItem(new GUIContent("Reset Recent"), false, () => HierarchyHeatmap.ResetRecent());
 		menu.ShowAsContext();
+	}
+}
+
+/// <summary>
+/// QuickTransform toggle+dropdown — click the icon to toggle the tool on/off,
+/// click the arrow to open a settings popup. Toggle state is synced across all SceneView instances.
+/// </summary>
+[EditorToolbarElement(k_Id, typeof(SceneView))]
+class EditoolsQuickTransformButton : VisualElement
+{
+	public const string k_Id = "Editools/QuickTransform";
+
+	static readonly List<EditoolsQuickTransformButton> s_instances = new();
+
+	readonly EditorToolbarToggle _toggle;
+
+	public EditoolsQuickTransformButton()
+	{
+		style.flexDirection = FlexDirection.Row;
+		style.alignItems = Align.Center;
+
+		_toggle = new EditorToolbarToggle
+		{
+			icon = EditorGUIUtility.IconContent("d_MoveTool").image as Texture2D,
+			tooltip = "Toggle QuickTransform (hold W/E/R + drag)",
+			value = QuickTransform.Enabled
+		};
+		_toggle.RegisterValueChangedCallback(evt =>
+		{
+			QuickTransform.Enabled = evt.newValue;
+			foreach (var inst in s_instances)
+				if (inst != this)
+					inst._toggle.SetValueWithoutNotify(evt.newValue);
+		});
+		_toggle.style.borderTopRightRadius = 0;
+		_toggle.style.borderBottomRightRadius = 0;
+		_toggle.style.marginRight = 0;
+		_toggle.style.paddingLeft = 2;
+		_toggle.style.paddingRight = 2;
+		Add(_toggle);
+
+		var arrow = new EditorToolbarButton { text = "\u25BE", tooltip = "QuickTransform options" };
+		arrow.clicked += () => UnityEditor.PopupWindow.Show(worldBound, new QuickTransformPopup());
+		arrow.style.borderTopLeftRadius = 0;
+		arrow.style.borderBottomLeftRadius = 0;
+		arrow.style.marginLeft = 1;
+		arrow.style.paddingLeft = 2;
+		arrow.style.paddingRight = 4;
+		arrow.style.minWidth = StyleKeyword.Auto;
+		Add(arrow);
+
+		RegisterCallback<AttachToPanelEvent>(_ => s_instances.Add(this));
+		RegisterCallback<DetachFromPanelEvent>(_ => s_instances.Remove(this));
+	}
+}
+
+/// <summary>
+/// Settings popup for QuickTransform. Shows editable fields backed by EditorPrefs.
+/// </summary>
+class QuickTransformPopup : PopupWindowContent
+{
+	static readonly GUIContent k_EdgeHoverLabel = new GUIContent(
+		"Edge Detection (px)",
+		"Pixel distance threshold for detecting edge hover in the Scene View.");
+	static readonly GUIContent k_CircleRadLabel = new GUIContent(
+		"Rotation Circle Size",
+		"Size multiplier for the rotation feedback circle shown during rotation.");
+	static readonly GUIContent k_RotSnapLabel = new GUIContent(
+		"Rotation Snap (\u00B0)",
+		"Angle increment in degrees when holding Ctrl during rotation.");
+	static readonly GUIContent k_LinearRotLabel = new GUIContent(
+		"Linear Rotation",
+		"Use horizontal mouse movement instead of radial motion for rotation control.");
+	static readonly GUIContent k_LinearSensLabel = new GUIContent(
+		"  Sensitivity (\u00B0/px)",
+		"Degrees of rotation per pixel of horizontal mouse movement.");
+
+	public override Vector2 GetWindowSize()
+	{
+		int rows = QuickTransform.LinearRotation ? 6 : 5;
+		return new Vector2(240, rows * 22);
+	}
+
+	public override void OnGUI(Rect rect)
+	{
+		float hover = QuickTransform.EdgeHoverPx;
+		float newHover = EditorGUILayout.FloatField(k_EdgeHoverLabel, hover);
+		if (!Mathf.Approximately(newHover, hover))
+			QuickTransform.EdgeHoverPx = newHover;
+
+		float rad = QuickTransform.CircleRadius;
+		float newRad = EditorGUILayout.FloatField(k_CircleRadLabel, rad);
+		if (!Mathf.Approximately(newRad, rad))
+			QuickTransform.CircleRadius = newRad;
+
+		float snap = QuickTransform.RotSnapAngle;
+		float newSnap = EditorGUILayout.FloatField(k_RotSnapLabel, snap);
+		if (!Mathf.Approximately(newSnap, snap))
+			QuickTransform.RotSnapAngle = newSnap;
+
+		bool linear = QuickTransform.LinearRotation;
+		bool newLinear = EditorGUILayout.Toggle(k_LinearRotLabel, linear);
+		if (newLinear != linear)
+		{
+			QuickTransform.LinearRotation = newLinear;
+			editorWindow.Repaint(); // resize popup
+		}
+
+		if (QuickTransform.LinearRotation)
+		{
+			float sens = QuickTransform.LinearRotSensitivity;
+			float newSens = EditorGUILayout.FloatField(k_LinearSensLabel, sens);
+			if (!Mathf.Approximately(newSens, sens))
+				QuickTransform.LinearRotSensitivity = newSens;
+		}
 	}
 }
 
