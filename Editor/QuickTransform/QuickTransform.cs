@@ -295,8 +295,8 @@ static class QuickTransform
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                // Shift+Move = duplicate first, then drag the copies
-                if (shiftHeldOnPress && activeMode == Mode.Move && !didDuplicate)
+                // Shift = duplicate first, then drag the copies
+                if (shiftHeldOnPress && !didDuplicate)
                     DuplicateAndSwapTargets();
 
                 // Begin drag — register undo
@@ -568,7 +568,7 @@ static class QuickTransform
             originalObjects[i] = dragTargets[i].gameObject;
 
         Selection.objects = originalObjects;
-        Undo.SetCurrentGroupName("QuickTransform Duplicate Move");
+        Undo.SetCurrentGroupName("QuickTransform Duplicate " + activeMode);
         EditorApplication.ExecuteMenuItem("Edit/Duplicate");
 
         // The duplicated objects are now the selection
