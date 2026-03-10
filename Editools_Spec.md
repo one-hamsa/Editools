@@ -211,6 +211,43 @@ Transform clipboard operations:
 - `Alt+Ctrl+V` — paste (with undo support)
 - `Alt+Ctrl+X` — reset transform to identity (with undo support)
 
+### 8. QuickAccess (EditorWindow)
+
+User-curated quick-access panel for frequently used scene objects and project assets.
+Opens via `Tools > Editools > Quick Access`.
+
+**Two sections:**
+- **Scene** — references to GameObjects in the active scene. Saved per-scene, local.
+- **Project** — references to files, folders, and assets. Saved per-project, local.
+
+**Interactions:**
+- Drag from Hierarchy/Project → drops anywhere in the window, auto-classified into the
+  appropriate section (bottom of list). Root-level handler catches external drops;
+  section handlers only handle internal reorder (with `StopPropagation`).
+- Click → selects and pings the object. Folders: navigates the Project window (selects
+  folder in left tree with yellow ping, shows contents in right column) via reflection
+  into `ProjectBrowser.ShowFolderContents` + `m_FolderTree.Frame(id, true, ping: true)`.
+  `PingObject` is avoided — it navigates to the parent folder instead.
+- Double-click → opens the asset (`AssetDatabase.OpenAsset`)
+- Right-click → removes from list (undoable)
+- Drag within section → swaps position with hovered item (two-item swap, not list shift)
+- Drag outside window → standard Unity `DragAndDrop` (like dragging from Hierarchy/Project)
+- Ctrl/Cmd+click → additive selection
+
+**Persistence:**
+- `EditorPrefs` keyed with `Application.dataPath` prefix (per-project, per-machine, git-ignored)
+- Scene list key: `Application.dataPath + "QuickAccess_Scene_" + sceneName`
+- Project list key: `Application.dataPath + "QuickAccess_Project"`
+- Scene objects stored via `GlobalObjectId` (survives renames — uses scene GUID + local file ID).
+  Falls back to path-based `gameObject:` format for unserialized objects. Project assets use
+  `guid:` prefix (same as LRUAssets). Legacy `gameObject:` entries still resolve for backward compat.
+
+**Scene lifecycle:** Scene list reloads on `EditorSceneManager.activeSceneChangedInEditMode`.
+
+**Files:**
+- `Editor/QuickAccess/QuickAccess.cs`
+- `Editor/QuickAccess/Resources/QuickAccess.uss`
+
 ---
 
 ## Integration: HAS_EDITOOLS Define
@@ -250,6 +287,12 @@ the key-up event from switching Unity's active tool after a QuickTransform opera
 via reflection to determine collapsed state. This is fragile across Unity versions but
 necessary for parent-row heat propagation.
 
+**QuickAccess folder navigation:** Uses reflection into `ProjectBrowser.ShowFolderContents`
+to navigate the two-column Project window (select in tree + show contents). The yellow ping
+is triggered via `m_FolderTree.Frame(id, true, true)` directly on the tree controller.
+`EditorGUIUtility.PingObject` cannot be used for folders — it navigates to the parent
+folder, overriding the contents view.
+
 **Cursor warp (Windows only):** QuickTransform's edge rotation mode warps the OS cursor
 to the rotation circle perimeter via Win32 P/Invoke (`SetCursorPos`). This provides
 natural 1:1 rotation feel regardless of where the user clicked the edge. Uses delta-based
@@ -267,3 +310,69 @@ warping to avoid DPI/window-offset conversion issues.
   or average position (multi)
 - SnapToSurface does not use Physics colliders — uses direct mesh triangle intersection
 - No runtime assembly or runtime behavior beyond the SceneMaterialOverride backup system
+
+---
+
+## Code Style & Patterns
+
+Conventions observed across Editools tools. Follow these when adding new features.
+
+### EditorWindows
+
+- **UIElements over IMGUI.** New windows use `rootVisualElement` + UIToolkit, not `OnGUI()`.
+  (See `QuickAccess`, and `LRUAssets` in One Humus for the established pattern.)
+- USS stylesheets live in a `Resources/` subfolder next to the script, loaded via
+  `Resources.Load<StyleSheet>("SheetName")` in `OnEnable()`.
+- Open windows via `[MenuItem("Tools/Editools/...")]` + `GetWindow<T>()`.
+- Set `titleContent` with icon: `new GUIContent("Name", EditorGUIUtility.IconContent("d_Icon").image)`.
+
+### Static Tools (non-window)
+
+- Register via `[InitializeOnLoad]` on the class or `[InitializeOnLoadMethod]` on a static method.
+- Hook into `SceneView.duringSceneGui` for scene-view input handling.
+- Keyboard shortcuts via `[Shortcut("Editools/Tool Name", KeyCode.X, ShortcutModifiers.Y)]`.
+
+### Local Persistence
+
+- **EditorPrefs** for all local state. Key with `Application.dataPath` prefix for per-project
+  isolation: `Application.dataPath + "ToolName_Setting"`.
+- Complex lists stored as comma-separated (or semicolon-separated) ID strings.
+- **SessionState** for transient state that should survive domain reloads but not editor restarts.
+
+### Object ID Encoding
+
+Shared pattern (originated in LRUAssets, extended in QuickAccess) for serializing references
+to both project assets and scene objects as strings:
+
+| Prefix | Format | Survives |
+|---|---|---|
+| `guid:` | `guid:{assetGUID}` | Renames, domain reloads, editor restarts |
+| `globalid:` | `globalid:{GlobalObjectId}` | Renames, domain reloads (scene GUID + local file ID) |
+| `gameObject:` | `gameObject:{sceneName}:{hierarchy/path}` | Domain reloads (if scene loaded, breaks on rename) |
+| `instance:` | `instance:{instanceID}` | Current session only (fallback) |
+
+QuickAccess uses `globalid:` for scene objects (rename-proof). LRUAssets still uses
+`gameObject:` (auto-populated list, so stale entries naturally cycle out).
+
+Classification: `AssetDatabase.Contains(obj)` → project asset. `GameObject` with valid
+loaded scene → scene object. Components unwrap to their GameObject.
+
+### Row-Based List UI
+
+- Each row is a `VisualElement` with class `.row`, containing `.title` (`.icon` Image + Label).
+- `row.userData` stores the string ID for persistence and lookup.
+- Alternating row colors via `.variant1` / `.variant2` classes, updated on list mutation.
+- Icon via `EditorGUIUtility.ObjectContent(obj, obj.GetType()).image`.
+
+### Drag and Drop
+
+**Drag initiation (from custom UI):**
+1. `PointerDownEvent` → store drag candidate
+2. `PointerMoveEvent` → `DragAndDrop.PrepareStartDrag()`, set `objectReferences` + `paths`,
+   call `DragAndDrop.StartDrag(label)`
+3. `PointerUpEvent` → clear candidate
+
+**Drop acceptance (onto custom UI):**
+1. `DragEnterEvent` / `DragUpdatedEvent` → validate, set `DragAndDrop.visualMode`
+2. `DragPerformEvent` → `DragAndDrop.AcceptDrag()`, process dropped objects
+3. `DragLeaveEvent` → remove visual feedback
