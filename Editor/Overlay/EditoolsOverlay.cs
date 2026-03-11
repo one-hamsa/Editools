@@ -188,6 +188,7 @@ public class EditoolsOverlay : ToolbarOverlay
 
 	VisualElement _displayRoot;
 	IMGUIContainer _displayIMGUI;
+	bool _pendingCapture;
 
 	// Screenshot strip element reference (for rebuilding dynamic buttons)
 	EditoolsScreenshotStrip _screenshotStrip;
@@ -266,31 +267,16 @@ public class EditoolsOverlay : ToolbarOverlay
 		var sceneView = containerWindow as SceneView;
 		if (sceneView == null) return;
 
-		var tex = CaptureSceneView(sceneView);
-		if (tex == null) return;
-
-		// If at max, discard oldest
-		if (_screenshots.Count >= MaxScreenshots)
-		{
-			if (_activeIndex == 0)
-				_activeIndex = -1;
-			else if (_activeIndex > 0)
-				_activeIndex--;
-
-			Object.DestroyImmediate(_screenshots[0].texture);
-			_screenshots.RemoveAt(0);
-		}
-
-		_screenshots.Add(new ViewCompScreenshot { texture = tex, comment = "" });
-		_lastViewportSize = sceneView.cameraViewport.size;
-
-		_screenshotStrip?.Rebuild();
+		// Defer capture to the next Repaint so the gizmo RT has fresh content
+		// from this frame's built-in gizmo pass (OnDrawGizmos, etc.).
+		_pendingCapture = true;
+		sceneView.Repaint();
 	}
 
-	Texture2D CaptureSceneView(SceneView sceneView)
+	void CaptureSceneView(SceneView sceneView)
 	{
 		Camera cam = sceneView.camera;
-		if (cam == null) return null;
+		if (cam == null) return;
 
 		var prevTarget = cam.targetTexture;
 		var prevActive = RenderTexture.active;
@@ -311,9 +297,9 @@ public class EditoolsOverlay : ToolbarOverlay
 			h = Mathf.Max(1, (int)(viewport.height * ppp));
 		}
 
-		// Read the gizmo layer from camera.targetTexture (previous frame).
-		// Unity draws gizmos to this RT with a transparent-cleared background,
-		// so non-gizmo pixels have alpha ≈ 0.
+		// Read the gizmo layer from camera.targetTexture.
+		// During Repaint, this RT has fresh content from the built-in gizmo pass
+		// (OnDrawGizmos, OnDrawGizmosSelected, etc.) with transparent-cleared background.
 		Texture2D gizmoTex = null;
 		if (prevTarget != null)
 		{
@@ -360,7 +346,22 @@ public class EditoolsOverlay : ToolbarOverlay
 		RenderTexture.active = prevActive;
 		RenderTexture.ReleaseTemporary(sceneRT);
 
-		return tex;
+		// Commit
+		if (_screenshots.Count >= MaxScreenshots)
+		{
+			if (_activeIndex == 0)
+				_activeIndex = -1;
+			else if (_activeIndex > 0)
+				_activeIndex--;
+
+			Object.DestroyImmediate(_screenshots[0].texture);
+			_screenshots.RemoveAt(0);
+		}
+
+		_screenshots.Add(new ViewCompScreenshot { texture = tex, comment = "" });
+		_lastViewportSize = sceneView.cameraViewport.size;
+
+		_screenshotStrip?.Rebuild();
 	}
 
 	// ---- Screenshot selection ----
@@ -510,6 +511,13 @@ public class EditoolsOverlay : ToolbarOverlay
 	static void OnSceneGUI(SceneView sceneView)
 	{
 		if (!s_instances.TryGetValue(sceneView, out var overlay)) return;
+
+		// Capture during Repaint so the gizmo RT has fresh content from this frame.
+		if (overlay._pendingCapture && Event.current.type == EventType.Repaint)
+		{
+			overlay._pendingCapture = false;
+			overlay.CaptureSceneView(sceneView);
+		}
 
 		overlay.CheckViewportSize(sceneView);
 
