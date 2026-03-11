@@ -13,7 +13,10 @@ using UnityEngine.UIElements;
 /// </summary>
 static class EditoolsLayoutCleaner
 {
-	static readonly string[] s_staleIds = { "view-comp", "advanced-visuals", "advanced-visuals-toolbar" };
+	static readonly string[] s_staleIds = {
+		"view-comp", "advanced-visuals", "advanced-visuals-toolbar",
+		"Editools/Heatmap", "Editools/QuickTransform"
+	};
 	const string k_OverlayId = "editools-toolbar";
 
 	[InitializeOnLoadMethod]
@@ -164,6 +167,20 @@ public class EditoolsOverlay : ToolbarOverlay
 	internal static readonly Dictionary<SceneView, EditoolsOverlay> s_instances = new();
 	static bool s_subscribedToSceneGui;
 
+	/// <summary>
+	/// True when at least one Editools overlay is displayed in a SceneView.
+	/// Subsystems should check this before doing any work.
+	/// </summary>
+	internal static bool IsActive
+	{
+		get
+		{
+			foreach (var kvp in s_instances)
+				if (kvp.Value.displayed) return true;
+			return false;
+		}
+	}
+
 	readonly List<ViewCompScreenshot> _screenshots = new();
 
 	int _activeIndex = -1;
@@ -171,6 +188,7 @@ public class EditoolsOverlay : ToolbarOverlay
 
 	VisualElement _displayRoot;
 	IMGUIContainer _displayIMGUI;
+	bool _pendingCapture;
 
 	// Screenshot strip element reference (for rebuilding dynamic buttons)
 	EditoolsScreenshotStrip _screenshotStrip;
@@ -180,8 +198,7 @@ public class EditoolsOverlay : ToolbarOverlay
 		EditoolsCaptureButton.k_Id,
 		EditoolsMaterialCheckButton.k_Id,
 		EditoolsSelectByMaterialButton.k_Id,
-		EditoolsHeatmapButton.k_Id,
-		EditoolsQuickTransformButton.k_Id
+		EditoolsSettingsButton.k_Id
 	) { }
 
 	// ---- Element registration ----
@@ -211,13 +228,23 @@ public class EditoolsOverlay : ToolbarOverlay
 			s_subscribedToSceneGui = true;
 		}
 
+		displayedChanged += OnDisplayedChanged;
 		AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
 		RestoreScreenshots();
 		MaterialCheckPopup.RestoreAfterReload();
 	}
 
+	void OnDisplayedChanged(bool visible)
+	{
+		// When the overlay is hidden/shown, repaint hierarchy & project windows
+		// so heatmap drawing responds immediately
+		EditorApplication.RepaintHierarchyWindow();
+		EditorApplication.RepaintProjectWindow();
+	}
+
 	public override void OnWillBeDestroyed()
 	{
+		displayedChanged -= OnDisplayedChanged;
 		AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
 
 		var sceneView = containerWindow as SceneView;
@@ -1027,124 +1054,111 @@ class SelectByMaterialPopup : PopupWindowContent
 }
 
 /// <summary>
-/// Hierarchy Heatmap toggle+dropdown — click the icon to toggle on/off,
-/// click the arrow to open settings menu. Mirrors the Gizmos button pattern.
-/// Toggle state is synced across all SceneView instances.
+/// Settings dropdown — opens the central Editools settings popup where all
+/// features can be toggled on/off and their sub-settings accessed.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
-class EditoolsHeatmapButton : VisualElement
+class EditoolsSettingsButton : EditorToolbarDropdown
 {
-	public const string k_Id = "Editools/Heatmap";
+	public const string k_Id = "Editools/Settings";
 
-	static readonly List<EditoolsHeatmapButton> s_instances = new();
-
-	readonly EditorToolbarToggle _toggle;
-
-	public EditoolsHeatmapButton()
+	public EditoolsSettingsButton()
 	{
-		style.flexDirection = FlexDirection.Row;
-		style.alignItems = Align.Center;
-
-		_toggle = new EditorToolbarToggle
-		{
-			icon = EditorGUIUtility.IconContent("d_Grid.Default").image as Texture2D,
-			tooltip = "Toggle Hierarchy Heatmap",
-			value = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false)
-		};
-		_toggle.RegisterValueChangedCallback(evt =>
-		{
-			HierarchyHeatmap.SetEnabled(evt.newValue);
-			// Sync all other instances
-			foreach (var inst in s_instances)
-				if (inst != this)
-					inst._toggle.SetValueWithoutNotify(evt.newValue);
-		});
-		// Fuse right edge with arrow
-		_toggle.style.borderTopRightRadius = 0;
-		_toggle.style.borderBottomRightRadius = 0;
-		_toggle.style.marginRight = 0;
-		_toggle.style.paddingLeft = 2;
-		_toggle.style.paddingRight = 2;
-		Add(_toggle);
-
-		var arrow = new EditorToolbarButton { text = "\u25BE", tooltip = "Heatmap options" };
-		arrow.clicked += ShowMenu;
-		// Fuse left edge with toggle, 1px gap
-		arrow.style.borderTopLeftRadius = 0;
-		arrow.style.borderBottomLeftRadius = 0;
-		arrow.style.marginLeft = 1;
-		arrow.style.paddingLeft = 2;
-		arrow.style.paddingRight = 4;
-		arrow.style.minWidth = StyleKeyword.Auto;
-		Add(arrow);
-
-		RegisterCallback<AttachToPanelEvent>(_ => s_instances.Add(this));
-		RegisterCallback<DetachFromPanelEvent>(_ => s_instances.Remove(this));
-	}
-
-	void ShowMenu()
-	{
-		var menu = new GenericMenu();
-		menu.AddItem(new GUIContent("Settings..."), false, () => HeatmapSettingsWindow.ShowWindow());
-		menu.AddItem(new GUIContent("Reset Recent"), false, () => HierarchyHeatmap.ResetRecent());
-		menu.ShowAsContext();
+		icon = EditorGUIUtility.IconContent("d_Settings").image as Texture2D;
+		tooltip = "Editools Settings";
+		clicked += () => UnityEditor.PopupWindow.Show(worldBound, new EditoolsSettingsPopup());
 	}
 }
 
 /// <summary>
-/// QuickTransform toggle+dropdown — click the icon to toggle the tool on/off,
-/// click the arrow to open a settings popup. Toggle state is synced across all SceneView instances.
+/// Central settings popup — lists all Editools features with checkboxes to
+/// toggle them on/off and arrows to open sub-settings where applicable.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
-class EditoolsQuickTransformButton : VisualElement
+class EditoolsSettingsPopup : PopupWindowContent
 {
-	public const string k_Id = "Editools/QuickTransform";
+	static GUIStyle s_rowButtonStyle;
+	static GUIStyle s_arrowStyle;
 
-	static readonly List<EditoolsQuickTransformButton> s_instances = new();
-
-	readonly EditorToolbarToggle _toggle;
-
-	public EditoolsQuickTransformButton()
+	static void EnsureStyles()
 	{
-		style.flexDirection = FlexDirection.Row;
-		style.alignItems = Align.Center;
-
-		_toggle = new EditorToolbarToggle
+		if (s_rowButtonStyle != null) return;
+		s_rowButtonStyle = new GUIStyle(EditorStyles.label)
 		{
-			icon = EditorGUIUtility.IconContent("d_MoveTool").image as Texture2D,
-			tooltip = "QuickTransform — hold W/E/R + drag to move/rotate/scale without gizmos.\n\n"
-				+ "W = Move: LMB outside → XZ plane, LMB face → face plane, RMB face → face normal\n"
-				+ "E = Rotate: LMB outside → world Y, LMB face → face normal, LMB edge → edge axis, +Ctrl → 15° snap\n"
-				+ "R = Scale: LMB → single-axis (anchor on opposite face), RMB face → uniform from opposite face, RMB outside → uniform from pivot\n\n"
-				+ "Shift + any = duplicate then transform",
-			value = QuickTransform.Enabled
+			alignment = TextAnchor.MiddleLeft,
+			padding = new RectOffset(0, 0, 0, 0),
+			margin = new RectOffset(0, 0, 0, 0)
 		};
-		_toggle.RegisterValueChangedCallback(evt =>
+		s_arrowStyle = new GUIStyle(EditorStyles.label)
 		{
-			QuickTransform.Enabled = evt.newValue;
-			foreach (var inst in s_instances)
-				if (inst != this)
-					inst._toggle.SetValueWithoutNotify(evt.newValue);
-		});
-		_toggle.style.borderTopRightRadius = 0;
-		_toggle.style.borderBottomRightRadius = 0;
-		_toggle.style.marginRight = 0;
-		_toggle.style.paddingLeft = 2;
-		_toggle.style.paddingRight = 2;
-		Add(_toggle);
+			alignment = TextAnchor.MiddleCenter,
+			fontStyle = FontStyle.Normal,
+			padding = new RectOffset(0, 0, 0, 0)
+		};
+	}
 
-		var arrow = new EditorToolbarButton { text = "\u25BE", tooltip = "QuickTransform options" };
-		arrow.clicked += () => UnityEditor.PopupWindow.Show(worldBound, new QuickTransformPopup());
-		arrow.style.borderTopLeftRadius = 0;
-		arrow.style.borderBottomLeftRadius = 0;
-		arrow.style.marginLeft = 1;
-		arrow.style.paddingLeft = 2;
-		arrow.style.paddingRight = 4;
-		arrow.style.minWidth = StyleKeyword.Auto;
-		Add(arrow);
+	public override Vector2 GetWindowSize() => new Vector2(200, 4 * 22 + 4);
 
-		RegisterCallback<AttachToPanelEvent>(_ => s_instances.Add(this));
-		RegisterCallback<DetachFromPanelEvent>(_ => s_instances.Remove(this));
+	public override void OnGUI(Rect rect)
+	{
+		EnsureStyles();
+
+		// Scene View Undo — simple toggle, no submenu
+		DrawToggleRow("Scene View Undo", SceneCameraUndo.Enabled,
+			v => SceneCameraUndo.Enabled = v, null);
+
+		// Hierarchy Heatmap — toggle + submenu
+		DrawToggleRow("Hierarchy Heatmap",
+			EditorPrefs.GetBool("HierarchyHeatmapEnabled", false),
+			v => HierarchyHeatmap.SetEnabled(v),
+			() => ShowHeatmapMenu());
+
+		// QuickTransform — toggle + submenu
+		DrawToggleRow("QuickTransform", QuickTransform.Enabled,
+			v => QuickTransform.Enabled = v,
+			() => UnityEditor.PopupWindow.Show(
+				GUILayoutUtility.GetLastRect(), new QuickTransformPopup()));
+
+		// Quick Access — toggle window on/off
+		DrawToggleRow("Quick Access", QuickAccess.IsOpen,
+			_ => QuickAccess.ToggleWindow(), null);
+	}
+
+	void DrawToggleRow(string label, bool isOn, System.Action<bool> onToggle,
+		System.Action onSubmenu)
+	{
+		EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
+
+		// Checkbox
+		bool newValue = EditorGUILayout.Toggle(isOn, GUILayout.Width(16));
+		if (newValue != isOn)
+			onToggle?.Invoke(newValue);
+
+		// Label — clickable for submenu items, toggles for non-submenu items
+		if (onSubmenu != null)
+		{
+			if (GUILayout.Button(label, s_rowButtonStyle))
+				onSubmenu.Invoke();
+
+			// Arrow indicator
+			GUILayout.Label("\u25B8", s_arrowStyle, GUILayout.Width(16));
+		}
+		else
+		{
+			if (GUILayout.Button(label, s_rowButtonStyle))
+				onToggle?.Invoke(!isOn);
+		}
+
+		EditorGUILayout.EndHorizontal();
+	}
+
+	static void ShowHeatmapMenu()
+	{
+		var menu = new GenericMenu();
+		menu.AddItem(new GUIContent("Settings..."), false,
+			() => HeatmapSettingsWindow.ShowWindow());
+		menu.AddItem(new GUIContent("Reset Recent"), false,
+			() => HierarchyHeatmap.ResetRecent());
+		menu.ShowAsContext();
 	}
 }
 

@@ -266,8 +266,8 @@ static class QuickTransform
 
         UpdateKeyTracking(e);
 
-        // Early-out if disabled via toolbar toggle
-        if (!Enabled)
+        // Early-out if disabled via toolbar toggle or overlay hidden
+        if (!EditoolsOverlay.IsActive || !Enabled)
         {
             wHeld = eHeld = rHeld = false;
             if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }

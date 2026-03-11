@@ -51,15 +51,25 @@ public class QuickAccess : EditorWindow
 		}
 	}
 
-	// ─── Menu ──────────────────────────────────────────────────
+	// ─── Window access ─────────────────────────────────────────
 
-	[MenuItem("Tools/Editools/Quick Access")]
+	internal static bool IsOpen => Resources.FindObjectsOfTypeAll<QuickAccess>().Length > 0;
+
 	public static QuickAccess ShowWindow()
 	{
 		var win = GetWindow<QuickAccess>();
 		win.titleContent = new GUIContent("Quick Access",
 			EditorGUIUtility.IconContent("d_Favorite Icon").image);
 		return win;
+	}
+
+	internal static void ToggleWindow()
+	{
+		var existing = Resources.FindObjectsOfTypeAll<QuickAccess>();
+		if (existing.Length > 0)
+			existing[0].Close();
+		else
+			ShowWindow();
 	}
 
 	// ─── Lifecycle ─────────────────────────────────────────────

@@ -56,6 +56,12 @@ public static class SceneCameraUndo
     private static bool s_isRestoring;
     private static bool s_initialized;
 
+    internal static bool Enabled
+    {
+        get => EditorPrefs.GetBool("SceneCameraUndo_Enabled", true);
+        set => EditorPrefs.SetBool("SceneCameraUndo_Enabled", value);
+    }
+
     [InitializeOnLoadMethod]
     private static void Initialize()
     {
@@ -67,6 +73,7 @@ public static class SceneCameraUndo
     private static void OnUpdate()
     {
         if (s_isRestoring) return;
+        if (!EditoolsOverlay.IsActive || !Enabled) return;
 
         foreach (var view in SceneView.sceneViews)
         {
@@ -139,6 +146,7 @@ public static class SceneCameraUndo
     [Shortcut("Editools/Scene Camera Undo", KeyCode.Z, ShortcutModifiers.Shift)]
     private static void UndoCameraMove()
     {
+        if (!EditoolsOverlay.IsActive || !Enabled) return;
         SceneView view = SceneView.lastActiveSceneView;
         if (view == null) return;
 
@@ -160,6 +168,7 @@ public static class SceneCameraUndo
     [Shortcut("Editools/Scene Camera Redo", KeyCode.Y, ShortcutModifiers.Shift)]
     private static void RedoCameraMove()
     {
+        if (!EditoolsOverlay.IsActive || !Enabled) return;
         SceneView view = SceneView.lastActiveSceneView;
         if (view == null) return;
 

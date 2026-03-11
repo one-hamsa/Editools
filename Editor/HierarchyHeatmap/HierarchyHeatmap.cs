@@ -319,7 +319,7 @@ public static class HierarchyHeatmap
     }
 
     private static void OnUpdate() {
-        if (!enabled) return;
+        if (!EditoolsOverlay.IsActive || !enabled) return;
 
         string currentFolderPath = GetActiveFolderPath();
         if (!string.IsNullOrEmpty(currentFolderPath) && currentFolderPath != lastFolderPath) {
@@ -333,7 +333,7 @@ public static class HierarchyHeatmap
     }
 
     private static void OnSelectionChanged() {
-        if (!enabled) return;
+        if (!EditoolsOverlay.IsActive || !enabled) return;
 
         foreach (var obj in Selection.objects) {
             string path = AssetDatabase.GetAssetPath(obj);
@@ -368,6 +368,7 @@ public static class HierarchyHeatmap
     }
 
     private static void OnHierarchyItemGUI(int instanceID, Rect selectionRect) {
+        if (!EditoolsOverlay.IsActive) return;
         GameObject go = EditorUtility.InstanceIDToObject(instanceID) as GameObject;
         if (go == null) return;
 
@@ -453,6 +454,7 @@ public static class HierarchyHeatmap
     }
 
     private static void OnProjectItemGUI(string guid, Rect selectionRect) {
+        if (!EditoolsOverlay.IsActive) return;
         string path = AssetDatabase.GUIDToAssetPath(guid);
         if (string.IsNullOrEmpty(path)) return;
 
