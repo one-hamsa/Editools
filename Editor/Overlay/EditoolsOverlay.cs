@@ -179,6 +179,7 @@ public class EditoolsOverlay : ToolbarOverlay
 		EditoolsScreenshotStrip.k_Id,
 		EditoolsCaptureButton.k_Id,
 		EditoolsMaterialCheckButton.k_Id,
+		EditoolsSelectByMaterialButton.k_Id,
 		EditoolsHeatmapButton.k_Id,
 		EditoolsQuickTransformButton.k_Id
 	) { }
@@ -762,6 +763,266 @@ class EditoolsMaterialCheckButton : EditorToolbarDropdown
 				MaterialCheckPopup.SetMaterial(mat);
 			}
 		});
+	}
+}
+
+/// <summary>
+/// Select By Material — toolbar dropdown that opens a popup for selecting or
+/// replacing renderers by material. Drag a material onto the button to assign
+/// it as Selection Material or Replacement Material via a context menu.
+/// </summary>
+[EditorToolbarElement(k_Id, typeof(SceneView))]
+class EditoolsSelectByMaterialButton : EditorToolbarDropdown
+{
+	public const string k_Id = "Editools/SelectByMaterial";
+
+	public EditoolsSelectByMaterialButton()
+	{
+		icon = EditorGUIUtility.IconContent("d_FilterByType").image as Texture2D;
+		tooltip = "Select And Replace Material\n\n" +
+			"Click to open settings. Drag a material onto this button\n" +
+			"to assign it as the Selection or Replacement material.";
+		clicked += () => UnityEditor.PopupWindow.Show(worldBound, new SelectByMaterialPopup());
+
+		RegisterCallback<DragEnterEvent>(_ => AcceptMaterialDrag());
+		RegisterCallback<DragUpdatedEvent>(_ => AcceptMaterialDrag());
+		RegisterCallback<DragPerformEvent>(_ =>
+		{
+			if (GetDraggedMaterial() is Material mat)
+			{
+				DragAndDrop.AcceptDrag();
+				ShowSlotMenu(mat);
+			}
+		});
+	}
+
+	static void AcceptMaterialDrag()
+	{
+		if (GetDraggedMaterial() != null)
+			DragAndDrop.visualMode = DragAndDropVisualMode.Link;
+	}
+
+	static Material GetDraggedMaterial()
+	{
+		if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Material mat)
+			return mat;
+		return null;
+	}
+
+	static void ShowSlotMenu(Material mat)
+	{
+		var menu = new GenericMenu();
+		menu.AddItem(new GUIContent("Selection Material"), false, () => SelectByMaterialPopup.SetSelectionMaterial(mat));
+		menu.AddItem(new GUIContent("Replacement Material"), false, () => SelectByMaterialPopup.SetReplacementMaterial(mat));
+		menu.ShowAsContext();
+	}
+}
+
+/// <summary>
+/// Popup for Select And Replace Material. Persists state in static fields
+/// across popup opens, and material GUIDs in EditorPrefs across sessions.
+/// </summary>
+class SelectByMaterialPopup : PopupWindowContent
+{
+	const string k_Pref = "Editools_SelectByMat_";
+	const string k_SelectionGuid  = k_Pref + "SelectionGUID";
+	const string k_ReplacementGuid = k_Pref + "ReplacementGUID";
+	const string k_MeshRenderer   = k_Pref + "MeshRenderer";
+	const string k_SkinnedMesh    = k_Pref + "SkinnedMesh";
+	const string k_SpriteRenderer = k_Pref + "SpriteRenderer";
+	const string k_OnlyActive     = k_Pref + "OnlyActive";
+
+	static Material s_selectionMat;
+	static Material s_replacementMat;
+	static bool s_meshRenderer = true;
+	static bool s_skinnedMesh  = true;
+	static bool s_spriteRenderer = true;
+	static bool s_onlyActive;
+	static bool s_loaded;
+
+	public SelectByMaterialPopup()
+	{
+		EnsureLoaded();
+	}
+
+	static void EnsureLoaded()
+	{
+		if (s_loaded) return;
+		s_loaded = true;
+
+		s_selectionMat  = LoadMaterialPref(k_SelectionGuid);
+		s_replacementMat = LoadMaterialPref(k_ReplacementGuid);
+		s_meshRenderer   = EditorPrefs.GetBool(k_MeshRenderer, true);
+		s_skinnedMesh    = EditorPrefs.GetBool(k_SkinnedMesh, true);
+		s_spriteRenderer = EditorPrefs.GetBool(k_SpriteRenderer, true);
+		s_onlyActive     = EditorPrefs.GetBool(k_OnlyActive, false);
+	}
+
+	static Material LoadMaterialPref(string key)
+	{
+		string guid = EditorPrefs.GetString(key, "");
+		if (string.IsNullOrEmpty(guid)) return null;
+		string path = AssetDatabase.GUIDToAssetPath(guid);
+		if (string.IsNullOrEmpty(path)) return null;
+		return AssetDatabase.LoadAssetAtPath<Material>(path);
+	}
+
+	static void SaveMaterialPref(string key, Material mat)
+	{
+		if (mat != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mat, out string guid, out long _))
+			EditorPrefs.SetString(key, guid);
+		else
+			EditorPrefs.DeleteKey(key);
+	}
+
+	internal static void SetSelectionMaterial(Material mat)
+	{
+		EnsureLoaded();
+		s_selectionMat = mat;
+		SaveMaterialPref(k_SelectionGuid, mat);
+	}
+
+	internal static void SetReplacementMaterial(Material mat)
+	{
+		EnsureLoaded();
+		s_replacementMat = mat;
+		SaveMaterialPref(k_ReplacementGuid, mat);
+	}
+
+	public override Vector2 GetWindowSize() => new Vector2(260, 244);
+
+	public override void OnGUI(Rect rect)
+	{
+		// ── Selection Material ──
+		EditorGUILayout.LabelField("Selection Material", EditorStyles.boldLabel);
+		var newSel = (Material)EditorGUILayout.ObjectField(s_selectionMat, typeof(Material), false);
+		if (newSel != s_selectionMat)
+		{
+			s_selectionMat = newSel;
+			SaveMaterialPref(k_SelectionGuid, s_selectionMat);
+		}
+
+		// ── Renderer type toggles ──
+		EditorGUILayout.Space(2);
+		bool newMR = EditorGUILayout.Toggle("MeshRenderer", s_meshRenderer);
+		if (newMR != s_meshRenderer) { s_meshRenderer = newMR; EditorPrefs.SetBool(k_MeshRenderer, newMR); }
+
+		bool newSMR = EditorGUILayout.Toggle("SkinnedMeshRenderer", s_skinnedMesh);
+		if (newSMR != s_skinnedMesh) { s_skinnedMesh = newSMR; EditorPrefs.SetBool(k_SkinnedMesh, newSMR); }
+
+		bool newSR = EditorGUILayout.Toggle("SpriteRenderer", s_spriteRenderer);
+		if (newSR != s_spriteRenderer) { s_spriteRenderer = newSR; EditorPrefs.SetBool(k_SpriteRenderer, newSR); }
+
+		bool newOA = EditorGUILayout.Toggle("Only Active Objects", s_onlyActive);
+		if (newOA != s_onlyActive) { s_onlyActive = newOA; EditorPrefs.SetBool(k_OnlyActive, newOA); }
+
+		// ── Select button ──
+		EditorGUILayout.Space(2);
+		using (new EditorGUI.DisabledScope(s_selectionMat == null))
+		{
+			if (GUILayout.Button("Select"))
+			{
+				DoSelect();
+				editorWindow.Close();
+			}
+		}
+
+		// ── Separator ──
+		EditorGUILayout.Space(4);
+		var sepRect = EditorGUILayout.GetControlRect(false, 1);
+		EditorGUI.DrawRect(sepRect, new Color(0.5f, 0.5f, 0.5f, 0.5f));
+		EditorGUILayout.Space(2);
+
+		// ── Replacement Material ──
+		EditorGUILayout.LabelField("Replacement Material", EditorStyles.boldLabel);
+		var newRep = (Material)EditorGUILayout.ObjectField(s_replacementMat, typeof(Material), false);
+		if (newRep != s_replacementMat)
+		{
+			s_replacementMat = newRep;
+			SaveMaterialPref(k_ReplacementGuid, s_replacementMat);
+		}
+
+		// ── Replace button ──
+		using (new EditorGUI.DisabledScope(s_selectionMat == null || s_replacementMat == null))
+		{
+			if (GUILayout.Button("Replace"))
+			{
+				DoReplace();
+				editorWindow.Close();
+			}
+		}
+	}
+
+	// ── Shared: collect matching renderers ──
+
+	static List<Renderer> CollectMatchingRenderers(Material mat)
+	{
+		var results = new List<Renderer>();
+		var findMode = s_onlyActive ? FindObjectsInactive.Exclude : FindObjectsInactive.Include;
+
+		if (s_meshRenderer)
+			foreach (var r in Object.FindObjectsByType<MeshRenderer>(findMode, FindObjectsSortMode.None))
+				if (HasMaterial(r, mat)) results.Add(r);
+
+		if (s_skinnedMesh)
+			foreach (var r in Object.FindObjectsByType<SkinnedMeshRenderer>(findMode, FindObjectsSortMode.None))
+				if (HasMaterial(r, mat)) results.Add(r);
+
+		if (s_spriteRenderer)
+			foreach (var r in Object.FindObjectsByType<SpriteRenderer>(findMode, FindObjectsSortMode.None))
+				if (HasMaterial(r, mat)) results.Add(r);
+
+		return results;
+	}
+
+	static bool HasMaterial(Renderer r, Material mat)
+	{
+		var mats = r.sharedMaterials;
+		for (int i = 0; i < mats.Length; i++)
+			if (mats[i] == mat) return true;
+		return false;
+	}
+
+	// ── Select ──
+
+	static void DoSelect()
+	{
+		var renderers = CollectMatchingRenderers(s_selectionMat);
+		var objects = new Object[renderers.Count];
+		for (int i = 0; i < renderers.Count; i++)
+			objects[i] = renderers[i].gameObject;
+		Selection.objects = objects;
+		Debug.Log($"[Editools] Select By Material: {renderers.Count} object(s) using '{s_selectionMat.name}'");
+	}
+
+	// ── Replace ──
+
+	static void DoReplace()
+	{
+		var renderers = CollectMatchingRenderers(s_selectionMat);
+		int replaced = 0;
+
+		foreach (var r in renderers)
+		{
+			Undo.RegisterCompleteObjectUndo(r, "Replace Material");
+			var mats = r.sharedMaterials;
+			bool changed = false;
+			for (int i = 0; i < mats.Length; i++)
+			{
+				if (mats[i] == s_selectionMat)
+				{
+					mats[i] = s_replacementMat;
+					changed = true;
+				}
+			}
+			if (changed)
+			{
+				r.sharedMaterials = mats;
+				replaced++;
+			}
+		}
+
+		Debug.Log($"[Editools] Replace Material: replaced '{s_selectionMat.name}' → '{s_replacementMat.name}' on {replaced} renderer(s)");
 	}
 }
 
