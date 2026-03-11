@@ -37,10 +37,17 @@ public class QuickAccess : EditorWindow
 	bool    isDragActive;
 	VisualElement currentSwapTarget;
 
+	// ─── Selection Groups ──────────────────────────────────────
+
+	/// <summary>QuickAccess item ID → selection group index (0-9).</summary>
+	Dictionary<string, int> selectionGroupMap = new Dictionary<string, int>();
+	double lastProbeTime;
+
 	// ─── Prefs Keys ────────────────────────────────────────────
 
-	static string PrefKeyProject => Application.dataPath + "QuickAccess_Project";
-	static string PrefKeyScene   => Application.dataPath + "QuickAccess_Scene_" + ActiveSceneName;
+	static string PrefKeyProject         => Application.dataPath + "QuickAccess_Project";
+	static string PrefKeyScene           => Application.dataPath + "QuickAccess_Scene_" + ActiveSceneName;
+	static string PrefKeySelectionGroups => Application.dataPath + "QuickAccess_SelectionGroups";
 
 	static string ActiveSceneName
 	{
@@ -72,6 +79,47 @@ public class QuickAccess : EditorWindow
 			ShowWindow();
 	}
 
+	// ─── Startup Restoration ───────────────────────────────────
+
+	[InitializeOnLoadMethod]
+	static void RestoreSelectionGroupsOnStartup()
+	{
+		EditorApplication.delayCall += () =>
+		{
+			var data = EditorPrefs.GetString(
+				Application.dataPath + "QuickAccess_SelectionGroups", "");
+			if (string.IsNullOrEmpty(data)) return;
+
+			var map = new Dictionary<string, int>();
+			ParseSelectionGroupData(data, map);
+			if (map.Count == 0) return;
+
+			// Invert: group index → list of objects
+			var groupObjects = new Dictionary<int, List<Object>>();
+			foreach (var kvp in map)
+			{
+				var obj = ObjectFromID(kvp.Key);
+				if (obj == null) continue;
+				if (!groupObjects.TryGetValue(kvp.Value, out var list))
+				{
+					list = new List<Object>();
+					groupObjects[kvp.Value] = list;
+				}
+				list.Add(obj);
+			}
+			if (groupObjects.Count == 0) return;
+
+			var originalSelection = Selection.objects;
+			foreach (var kvp in groupObjects)
+			{
+				Selection.objects = kvp.Value.ToArray();
+				EditorApplication.ExecuteMenuItem(
+					$"Edit/Selection/Save Selection {kvp.Key}");
+			}
+			Selection.objects = originalSelection;
+		};
+	}
+
 	// ─── Lifecycle ─────────────────────────────────────────────
 
 	void OnEnable()
@@ -86,6 +134,15 @@ public class QuickAccess : EditorWindow
 		Undo.undoRedoPerformed += OnUndoRedo;
 		Selection.selectionChanged += OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+	}
+
+	void OnFocus()
+	{
+		// Probe selection groups at most once every 2 seconds
+		double now = EditorApplication.timeSinceStartup;
+		if (now - lastProbeTime < 2.0) return;
+		lastProbeTime = now;
+		ProbeSelectionGroups();
 	}
 
 	void OnDisable()
@@ -378,7 +435,14 @@ public class QuickAccess : EditorWindow
 		title.Add(label);
 
 		row.Add(title);
+
+		var badge = new Label();
+		badge.AddToClassList("selection-badge");
+		badge.style.display = DisplayStyle.None;
+		row.Add(badge);
+
 		RefreshRowDetails(row, obj, id);
+		UpdateSelectionBadge(row, id);
 
 		// Click to select / double-click to open
 		row.RegisterCallback<ClickEvent>(HandleRowClick);
@@ -389,8 +453,10 @@ public class QuickAccess : EditorWindow
 			var ids = isScene ? sceneIds : projectIds;
 			Undo.RecordObject(this, "Remove from Quick Access");
 			ids.Remove(id);
+			selectionGroupMap.Remove(id);
 			RebuildRows(isScene);
 			SaveToPrefs();
+			SaveSelectionGroupsToPrefs();
 			evt.StopPropagation();
 		});
 
@@ -516,6 +582,7 @@ public class QuickAccess : EditorWindow
 		sceneIds.Clear();
 		LoadListFromPrefs(projectIds, PrefKeyProject);
 		LoadListFromPrefs(sceneIds, PrefKeyScene);
+		LoadSelectionGroupsFromPrefs();
 	}
 
 	void LoadListFromPrefs(List<string> ids, string key)
@@ -532,6 +599,102 @@ public class QuickAccess : EditorWindow
 	{
 		EditorPrefs.SetString(PrefKeyProject, string.Join(",", projectIds));
 		EditorPrefs.SetString(PrefKeyScene, string.Join(",", sceneIds));
+	}
+
+	// ─── Selection Group Persistence ───────────────────────────
+
+	void SaveSelectionGroupsToPrefs()
+	{
+		if (selectionGroupMap.Count == 0)
+		{
+			EditorPrefs.DeleteKey(PrefKeySelectionGroups);
+			return;
+		}
+		var parts = new List<string>(selectionGroupMap.Count);
+		foreach (var kvp in selectionGroupMap)
+			parts.Add($"{kvp.Key}={kvp.Value}");
+		EditorPrefs.SetString(PrefKeySelectionGroups, string.Join(";", parts));
+	}
+
+	void LoadSelectionGroupsFromPrefs()
+	{
+		selectionGroupMap.Clear();
+		var data = EditorPrefs.GetString(PrefKeySelectionGroups, "");
+		if (string.IsNullOrEmpty(data)) return;
+		ParseSelectionGroupData(data, selectionGroupMap);
+	}
+
+	static void ParseSelectionGroupData(string data, Dictionary<string, int> target)
+	{
+		foreach (var entry in data.Split(';'))
+		{
+			if (string.IsNullOrEmpty(entry)) continue;
+			int eq = entry.LastIndexOf('=');
+			if (eq <= 0) continue;
+			var id = entry.Substring(0, eq);
+			if (int.TryParse(entry.Substring(eq + 1), out int group) && group >= 0 && group <= 9)
+				target[id] = group;
+		}
+	}
+
+	// ─── Selection Group Probing ───────────────────────────────
+
+	/// <summary>
+	/// Loads each of Unity's 10 selection groups, checks which QuickAccess items
+	/// are in each, then restores the original selection. Updates badges + prefs.
+	/// </summary>
+	void ProbeSelectionGroups()
+	{
+		// Build lookup: Object instance → QuickAccess ID
+		var objectToId = new Dictionary<Object, string>();
+		foreach (var id in sceneIds.Concat(projectIds))
+		{
+			var obj = ObjectFromID(id);
+			if (obj != null && !objectToId.ContainsKey(obj))
+				objectToId[obj] = id;
+		}
+		if (objectToId.Count == 0) return;
+
+		Selection.selectionChanged -= OnSelectionChanged;
+		try
+		{
+			var originalSelection = Selection.objects;
+			selectionGroupMap.Clear();
+
+			for (int group = 0; group < 10; group++)
+			{
+				Selection.objects = new Object[0];
+				EditorApplication.ExecuteMenuItem(
+					$"Edit/Selection/Load Selection {group}");
+
+				foreach (var obj in Selection.objects)
+				{
+					if (objectToId.TryGetValue(obj, out string id))
+						selectionGroupMap[id] = group;
+				}
+			}
+
+			Selection.objects = originalSelection;
+		}
+		finally
+		{
+			Selection.selectionChanged += OnSelectionChanged;
+		}
+
+		SaveSelectionGroupsToPrefs();
+		RefreshAllBadges();
+	}
+
+	void RefreshAllBadges()
+	{
+		RefreshBadges(sceneRows);
+		RefreshBadges(projectRows);
+	}
+
+	void RefreshBadges(ScrollView rows)
+	{
+		foreach (var row in rows.Children())
+			UpdateSelectionBadge(row, row.userData as string);
 	}
 
 	// ─── Row Rebuild ───────────────────────────────────────────
@@ -570,13 +733,30 @@ public class QuickAccess : EditorWindow
 	{
 		row.EnableInClassList("unavailable", obj == null);
 
-		var label = row.Q<Label>();
-		if (label != null)
-			label.text = obj != null ? obj.name : "(Missing)";
+		// Update the label inside .title (skip the badge label)
+		var titleLabel = row.Q(className: "title")?.Q<Label>();
+		if (titleLabel != null)
+			titleLabel.text = obj != null ? obj.name : "(Missing)";
 
 		var icon = row.Q<Image>(className: "icon");
 		if (icon != null)
 			icon.image = GetObjectIcon(obj);
+	}
+
+	void UpdateSelectionBadge(VisualElement row, string id)
+	{
+		var badge = row.Q<Label>(className: "selection-badge");
+		if (badge == null) return;
+
+		if (id != null && selectionGroupMap.TryGetValue(id, out int group))
+		{
+			badge.text = (group + 1).ToString();
+			badge.style.display = DisplayStyle.Flex;
+		}
+		else
+		{
+			badge.style.display = DisplayStyle.None;
+		}
 	}
 
 	// ─── Object ID Encoding (same pattern as LRUAssets) ────────

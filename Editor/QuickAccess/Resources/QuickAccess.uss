@@ -76,6 +76,18 @@
     color: rgba(255, 255, 255, 0.35);
 }
 
+.selection-badge {
+    font-size: 9px;
+    color: rgba(255, 255, 255, 0.5);
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    padding: 0 3px;
+    margin-right: 2px;
+    flex-shrink: 0;
+    -unity-text-align: middle-center;
+    height: 14px;
+}
+
 .empty-hint {
     padding: 4px 6px;
     font-size: 10px;
