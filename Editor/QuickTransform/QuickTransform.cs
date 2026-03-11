@@ -8,25 +8,29 @@ using UnityEngine;
 ///
 /// While any mode key is held, a wireframe bounding box wraps the selection
 /// (including all child MeshRenderers and SkinnedMeshRenderers).
-/// Hover state determines behavior:
+/// Hover state and mouse button determine behavior:
 ///
 /// W = Move
-///   Outside box   → wireframe only, world XZ plane movement (gizmo preview)
-///   LMB face      → face highlights, movement locked to face plane
-///   RMB face      → movement locked along face normal
+///   LMB outside box  → world XZ plane movement (gizmo preview)
+///   LMB face         → movement locked to that face's plane
+///   RMB face         → movement locked along face normal (push/pull)
 ///
 /// E = Rotate
-///   Outside box   → wireframe only, rotate around world Y with center pivot (gizmo preview)
-///   Hover face    → face highlights, rotate around face normal, pivot = face center
-///   Hover edge    → edge highlights (incl. backface), rotate around edge dir, pivot = grab point
-///   Ctrl held     → snap to 15° increments
+///   LMB outside box  → rotate around world Y axis, pivot = bounds center (gizmo preview)
+///   LMB face         → rotate around face normal, pivot = face center
+///   LMB edge         → rotate around edge direction, pivot = grab point on edge
+///   Ctrl held        → snap to 15° increments
 ///
 /// R = Scale
-///   Quadrant      → side face by screen direction, scale along face normal
-///   Hover Y face  → top/bottom face, scale along Y
-///   Anchor = opposite face, stays fixed; group scales as one unit
+///   LMB anywhere     → single-axis scale along the hovered face's normal
+///                       (quadrant picks nearest side face when outside box)
+///                       Anchor = opposite face, stays fixed
+///   RMB face         → uniform scale from opposite face center (all axes)
+///   RMB outside box  → uniform scale from selection pivot (all axes)
 ///
-/// Shift + W/E/R = Duplicate then transform
+/// Modifiers:
+///   Shift + W/E/R    → duplicate selection, then transform the copies
+///   Leaving the Scene View window during a drag commits the operation
 ///
 /// Toggle on/off via the Editools toolbar button.
 /// Configure per-project via a QuickTransformConfig ScriptableObject asset.
@@ -173,6 +177,8 @@ static class QuickTransform
     static Vector3 scaleNormalWorld;
     static float   scaleStartFaceDist;
     static float   scaleStartMouseDist;
+    static bool    scaleUniform;                // RMB = uniform scale
+    static float   scaleUniformStartScreenDist; // starting screen-space distance from anchor to mouse
 
     // ─── Undo ─────────────────────────────────────────────────
 
@@ -372,8 +378,8 @@ static class QuickTransform
         if (e.type != EventType.MouseDown) return;
         if (e.button != 0 && e.button != 1) return;
 
-        // RMB is only used for face-normal movement in Move mode
-        if (e.button == 1 && heldMode != Mode.Move) return;
+        // RMB is used for face-normal movement (Move) and uniform scaling (Scale)
+        if (e.button == 1 && heldMode != Mode.Move && heldMode != Mode.Scale) return;
 
         activeMode = heldMode;
         dragTargets = selected;
@@ -386,19 +392,35 @@ static class QuickTransform
         lockedKind  = hoveredKind;
         lockedIndex = hoveredIndex;
 
-        // RMB drag requires a face to lock onto — otherwise let Unity handle scene nav
+        // RMB drag requires a face to lock onto — except Scale which allows outside-box
         if (e.button == 1 && lockedKind != HoverKind.Face)
         {
-            activeMode = Mode.None;
-            dragTargets = null;
-            startPositions = null;
-            startRotations = null;
-            startScales = null;
-            return;
+            if (heldMode != Mode.Scale)
+            {
+                activeMode = Mode.None;
+                dragTargets = null;
+                startPositions = null;
+                startRotations = null;
+                startScales = null;
+                return;
+            }
+        }
+
+        // For Scale RMB, determine if mouse is actually on a face or outside the box
+        if (e.button == 1 && heldMode == Mode.Scale && lockedKind == HoverKind.Face)
+        {
+            // DetectScaleHover always returns Face via quadrant — check if truly inside a face
+            if (CheckYFaceHover(sv, e.mousePosition) < 0
+                && CheckYFaceProximity(sv, e.mousePosition) < 0
+                && CheckSideFaceHover(sv, e.mousePosition) < 0)
+            {
+                lockedKind = HoverKind.AllSideFaces; // outside box
+            }
         }
 
         dragButton = e.button;
         moveAlongNormal = e.button == 1;
+        scaleUniform    = e.button == 1 && heldMode == Mode.Scale;
         phase = Phase.Ready;
         mousePressPos = e.mousePosition;
         shiftHeldOnPress = e.shift;
@@ -507,7 +529,20 @@ static class QuickTransform
 
     static void InitScale(SceneView sv, Vector2 mousePos)
     {
-        // lockedIndex is the face index (always Face kind for scale)
+        if (scaleUniform)
+        {
+            // RMB uniform scale — anchor is opposite face center (on face) or selection pivot (outside)
+            if (lockedKind == HoverKind.Face)
+                scaleAnchorWorld = GetFaceCenter(lockedIndex ^ 1); // opposite face
+            else
+                scaleAnchorWorld = selectionPivot;
+
+            Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(scaleAnchorWorld);
+            scaleUniformStartScreenDist = Mathf.Max(Vector2.Distance(mousePos, anchorScreen), 1f);
+            return;
+        }
+
+        // LMB single-axis scale — lockedIndex is the face index (always Face kind)
         int face = lockedIndex;
         int axisIdx = face / 2;
         float sign = (face % 2 == 0) ? 1f : -1f;
@@ -545,13 +580,18 @@ static class QuickTransform
 
                 phase = Phase.Dragging;
 
-                // Re-sync rotation reference to current cursor position.
+                // Re-sync references to current cursor position.
                 // Prevents a jump from cursor-warp latency or drag-threshold offset.
                 if (activeMode == Mode.Rotate)
                 {
                     rotatePrevScreenAngle = ScreenAngleFrom(e.mousePosition, rotatePivot);
                     rotateAccumAngle = 0f;
                     rotateLinearStartPos = e.mousePosition;
+                }
+                if (scaleUniform)
+                {
+                    Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(scaleAnchorWorld);
+                    scaleUniformStartScreenDist = Mathf.Max(Vector2.Distance(e.mousePosition, anchorScreen), 1f);
                 }
 
                 ApplyDrag(e, sv);
@@ -672,6 +712,12 @@ static class QuickTransform
 
     static void ApplyScale(SceneView sv, Vector2 mousePos)
     {
+        if (scaleUniform)
+        {
+            ApplyUniformScale(sv, mousePos);
+            return;
+        }
+
         Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
         float mouseDist  = ProjectRayOntoLine(mouseRay, scaleAnchorWorld, scaleNormalWorld);
         float mouseDelta = mouseDist - scaleStartMouseDist;
@@ -708,6 +754,22 @@ static class QuickTransform
         {
             for (int i = 0; i < dragTargets.Length; i++)
                 dragTargets[i].position += correction;
+        }
+    }
+
+    static void ApplyUniformScale(SceneView sv, Vector2 mousePos)
+    {
+        Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(scaleAnchorWorld);
+        float currentDist = Vector2.Distance(mousePos, anchorScreen);
+        float factor = Mathf.Max(currentDist / scaleUniformStartScreenDist, 0.01f);
+
+        for (int i = 0; i < dragTargets.Length; i++)
+        {
+            dragTargets[i].localScale = startScales[i] * factor;
+
+            // Reposition: scale distance from anchor uniformly
+            Vector3 offset = startPositions[i] - scaleAnchorWorld;
+            dragTargets[i].position = scaleAnchorWorld + offset * factor;
         }
     }
 
@@ -973,6 +1035,11 @@ static class QuickTransform
         int yProx = CheckYFaceProximity(sv, mousePos);
         if (yProx >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yProx; return; }
 
+        // Y face expanded — inflated screen-space quad gives Y faces generous priority
+        // since side faces are always reachable via quadrant from outside the box.
+        int yExpanded = CheckYFaceExpandedHover(sv, mousePos);
+        if (yExpanded >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yExpanded; return; }
+
         // Quadrant for side faces (always picks one)
         hoveredKind  = HoverKind.Face;
         hoveredIndex = GetQuadrantFace(sv, mousePos);
@@ -999,6 +1066,49 @@ static class QuickTransform
                 float dist = DistPointToSegment2D(mousePos, screen[i], screen[(i + 1) % 4]);
                 if (dist < threshold) return face;
             }
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Check if mouse falls within an expanded screen-space projection of a Y face.
+    /// Each corner of the screen quad is pushed outward from the polygon center,
+    /// effectively inflating the selectable area by ~30% of the face diagonal.
+    /// </summary>
+    static int CheckYFaceExpandedHover(SceneView sv, Vector2 mousePos)
+    {
+        Vector3 camFwd = sv.camera.transform.forward;
+        for (int face = 2; face <= 3; face++)
+        {
+            Vector3 normal = GetFaceNormal(face);
+            if (Vector3.Dot(normal, camFwd) > 0f) continue;
+
+            Vector3[] corners = GetFaceWorldCorners(face);
+            Vector2[] screen = new Vector2[4];
+            Vector2 center = Vector2.zero;
+            for (int i = 0; i < 4; i++)
+            {
+                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+                center += screen[i];
+            }
+            center *= 0.25f;
+
+            // Expand proportional to face size on screen (~30% of half-diagonal)
+            float halfDiag = 0f;
+            for (int i = 0; i < 4; i++)
+                halfDiag = Mathf.Max(halfDiag, Vector2.Distance(screen[i], center));
+            float expand = halfDiag * 0.3f;
+
+            Vector2[] expanded = new Vector2[4];
+            for (int i = 0; i < 4; i++)
+            {
+                Vector2 dir = screen[i] - center;
+                float len = dir.magnitude;
+                expanded[i] = len > 0.001f ? screen[i] + dir * (expand / len) : screen[i];
+            }
+
+            if (IsPointInScreenQuad(mousePos, expanded))
+                return face;
         }
         return -1;
     }
@@ -1308,6 +1418,7 @@ static class QuickTransform
         lockedIndex  = 0;
         movePlaneNormal = Vector3.up;
         moveAlongNormal = false;
+        scaleUniform = false;
         dragButton = 0;
         shiftHeldOnPress = false;
         didDuplicate = false;

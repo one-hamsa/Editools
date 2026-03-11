@@ -1112,7 +1112,11 @@ class EditoolsQuickTransformButton : VisualElement
 		_toggle = new EditorToolbarToggle
 		{
 			icon = EditorGUIUtility.IconContent("d_MoveTool").image as Texture2D,
-			tooltip = "Toggle QuickTransform (hold W/E/R + drag)",
+			tooltip = "QuickTransform — hold W/E/R + drag to move/rotate/scale without gizmos.\n\n"
+				+ "W = Move: LMB outside → XZ plane, LMB face → face plane, RMB face → face normal\n"
+				+ "E = Rotate: LMB outside → world Y, LMB face → face normal, LMB edge → edge axis, +Ctrl → 15° snap\n"
+				+ "R = Scale: LMB → single-axis (anchor on opposite face), RMB face → uniform from opposite face, RMB outside → uniform from pivot\n\n"
+				+ "Shift + any = duplicate then transform",
 			value = QuickTransform.Enabled
 		};
 		_toggle.RegisterValueChangedCallback(evt =>
