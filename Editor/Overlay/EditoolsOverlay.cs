@@ -188,7 +188,6 @@ public class EditoolsOverlay : ToolbarOverlay
 
 	VisualElement _displayRoot;
 	IMGUIContainer _displayIMGUI;
-	bool _pendingCapture;
 
 	// Screenshot strip element reference (for rebuilding dynamic buttons)
 	EditoolsScreenshotStrip _screenshotStrip;
@@ -293,29 +292,73 @@ public class EditoolsOverlay : ToolbarOverlay
 		Camera cam = sceneView.camera;
 		if (cam == null) return null;
 
-		Rect viewport = sceneView.cameraViewport;
-		float ppp = EditorGUIUtility.pixelsPerPoint;
-		int w = Mathf.Max(1, (int)(viewport.width * ppp));
-		int h = Mathf.Max(1, (int)(viewport.height * ppp));
-
-		var rt = RenderTexture.GetTemporary(w, h, 24, RenderTextureFormat.Default);
 		var prevTarget = cam.targetTexture;
 		var prevActive = RenderTexture.active;
 
-		cam.targetTexture = rt;
-		cam.Render();
+		// Use the camera's existing RT dimensions if available
+		// (guarantees matching gizmo layer size). Otherwise fall back to viewport * DPI.
+		int w, h;
+		if (prevTarget != null)
+		{
+			w = prevTarget.width;
+			h = prevTarget.height;
+		}
+		else
+		{
+			Rect viewport = sceneView.cameraViewport;
+			float ppp = EditorGUIUtility.pixelsPerPoint;
+			w = Mathf.Max(1, (int)(viewport.width * ppp));
+			h = Mathf.Max(1, (int)(viewport.height * ppp));
+		}
 
-		RenderTexture.active = rt;
+		// Read the gizmo layer from camera.targetTexture (previous frame).
+		// Unity draws gizmos to this RT with a transparent-cleared background,
+		// so non-gizmo pixels have alpha ≈ 0.
+		Texture2D gizmoTex = null;
+		if (prevTarget != null)
+		{
+			RenderTexture.active = prevTarget;
+			gizmoTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+			gizmoTex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+			gizmoTex.Apply();
+		}
+
+		// Render 3D scene (no gizmos) to our own RT at matching dimensions.
+		var sceneRT = RenderTexture.GetTemporary(w, h, 24, RenderTextureFormat.Default);
+		cam.targetTexture = sceneRT;
+		cam.Render();
+		cam.targetTexture = prevTarget;
+
+		// Read scene pixels
+		RenderTexture.active = sceneRT;
 		var tex = new Texture2D(w, h, TextureFormat.RGB24, false)
 		{
 			hideFlags = HideFlags.HideAndDontSave
 		};
 		tex.ReadPixels(new Rect(0, 0, w, h), 0, 0);
-		tex.Apply();
 
-		cam.targetTexture = prevTarget;
+		// Alpha-composite gizmo layer over scene
+		if (gizmoTex != null)
+		{
+			var scenePixels = tex.GetPixels32();
+			var gizmoPixels = gizmoTex.GetPixels32();
+			for (int i = 0; i < scenePixels.Length; i++)
+			{
+				byte a = gizmoPixels[i].a;
+				if (a < 2) continue;
+				float t = a / 255f;
+				float inv = 1f - t;
+				scenePixels[i].r = (byte)(scenePixels[i].r * inv + gizmoPixels[i].r * t);
+				scenePixels[i].g = (byte)(scenePixels[i].g * inv + gizmoPixels[i].g * t);
+				scenePixels[i].b = (byte)(scenePixels[i].b * inv + gizmoPixels[i].b * t);
+			}
+			tex.SetPixels32(scenePixels);
+			Object.DestroyImmediate(gizmoTex);
+		}
+
+		tex.Apply();
 		RenderTexture.active = prevActive;
-		RenderTexture.ReleaseTemporary(rt);
+		RenderTexture.ReleaseTemporary(sceneRT);
 
 		return tex;
 	}
