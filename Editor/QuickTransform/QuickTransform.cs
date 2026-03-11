@@ -242,8 +242,19 @@ static class QuickTransform
         if (e.type == EventType.MouseLeaveWindow)
         {
             wHeld = eHeld = rHeld = false;
-            if (phase == Phase.Dragging) RevertToSnapshot();
-            if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
+            if (phase == Phase.Dragging)
+            {
+                // Commit the drag — treat leaving the window as a normal release
+                Undo.CollapseUndoOperations(undoGroup);
+                GUIUtility.hotControl = 0;
+                suppressKeyUpFor = activeMode;
+                ResetState();
+            }
+            else if (phase != Phase.Idle)
+            {
+                GUIUtility.hotControl = 0;
+                ResetState();
+            }
             return;
         }
 
