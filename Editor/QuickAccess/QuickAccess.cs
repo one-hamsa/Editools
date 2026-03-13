@@ -84,40 +84,132 @@ public class QuickAccess : EditorWindow
 	[InitializeOnLoadMethod]
 	static void RestoreSelectionGroupsOnStartup()
 	{
-		EditorApplication.delayCall += () =>
+		EditorApplication.quitting -= ProbeAndSaveSelectionGroupsOnQuit;
+		EditorApplication.quitting += ProbeAndSaveSelectionGroupsOnQuit;
+
+		EditorSceneManager.sceneOpened -= OnSceneOpenedRestoreSelectionGroups;
+		EditorSceneManager.sceneOpened += OnSceneOpenedRestoreSelectionGroups;
+
+		EditorApplication.delayCall += RestoreSelectionGroupsFromPrefs;
+	}
+
+	static void OnSceneOpenedRestoreSelectionGroups(Scene scene, OpenSceneMode mode)
+	{
+		// Scene objects that couldn't resolve at startup can now be found.
+		EditorApplication.delayCall += RestoreSelectionGroupsFromPrefs;
+	}
+
+	/// <summary>
+	/// Reads saved selection-group mappings from EditorPrefs, resolves each item
+	/// to an Object, and calls Save Selection N so Unity's built-in groups match.
+	/// Items that can't resolve yet (scene not loaded) are silently skipped —
+	/// they'll be picked up the next time a scene opens.
+	/// </summary>
+	static void RestoreSelectionGroupsFromPrefs()
+	{
+		var data = EditorPrefs.GetString(PrefKeySelectionGroups, "");
+		if (string.IsNullOrEmpty(data)) return;
+
+		var map = new Dictionary<string, int>();
+		ParseSelectionGroupData(data, map);
+		if (map.Count == 0) return;
+
+		// Invert: group index → list of objects
+		var groupObjects = new Dictionary<int, List<Object>>();
+		foreach (var kvp in map)
 		{
-			var data = EditorPrefs.GetString(
-				Application.dataPath + "QuickAccess_SelectionGroups", "");
-			if (string.IsNullOrEmpty(data)) return;
-
-			var map = new Dictionary<string, int>();
-			ParseSelectionGroupData(data, map);
-			if (map.Count == 0) return;
-
-			// Invert: group index → list of objects
-			var groupObjects = new Dictionary<int, List<Object>>();
-			foreach (var kvp in map)
+			var obj = ObjectFromID(kvp.Key);
+			if (obj == null) continue;
+			if (!groupObjects.TryGetValue(kvp.Value, out var list))
 			{
-				var obj = ObjectFromID(kvp.Key);
-				if (obj == null) continue;
-				if (!groupObjects.TryGetValue(kvp.Value, out var list))
-				{
-					list = new List<Object>();
-					groupObjects[kvp.Value] = list;
-				}
-				list.Add(obj);
+				list = new List<Object>();
+				groupObjects[kvp.Value] = list;
 			}
-			if (groupObjects.Count == 0) return;
+			list.Add(obj);
+		}
+		if (groupObjects.Count == 0) return;
 
+		var originalSelection = Selection.objects;
+		foreach (var kvp in groupObjects)
+		{
+			Selection.objects = kvp.Value.ToArray();
+			EditorApplication.ExecuteMenuItem(
+				$"Edit/Selection/Save Selection {kvp.Key}");
+		}
+		Selection.objects = originalSelection;
+	}
+
+	/// <summary>
+	/// Probes all 10 selection groups and saves mappings to EditorPrefs right before
+	/// Unity closes. Works without a QuickAccess window by loading item IDs from prefs.
+	/// </summary>
+	static void ProbeAndSaveSelectionGroupsOnQuit()
+	{
+		// Start from existing prefs so entries for unloaded scenes are preserved.
+		var map = new Dictionary<string, int>();
+		var existingData = EditorPrefs.GetString(PrefKeySelectionGroups, "");
+		if (!string.IsNullOrEmpty(existingData))
+			ParseSelectionGroupData(existingData, map);
+
+		// Gather all QuickAccess item IDs from EditorPrefs
+		var allIds = new List<string>();
+
+		var projectData = EditorPrefs.GetString(PrefKeyProject, "");
+		if (!string.IsNullOrEmpty(projectData))
+			foreach (var id in projectData.Split(','))
+				if (!string.IsNullOrEmpty(id))
+					allIds.Add(id);
+
+		var sceneData = EditorPrefs.GetString(PrefKeyScene, "");
+		if (!string.IsNullOrEmpty(sceneData))
+			foreach (var id in sceneData.Split(','))
+				if (!string.IsNullOrEmpty(id))
+					allIds.Add(id);
+
+		var objectToId = new Dictionary<Object, string>();
+		foreach (var id in allIds)
+		{
+			var obj = ObjectFromID(id);
+			if (obj != null && !objectToId.ContainsKey(obj))
+				objectToId[obj] = id;
+		}
+
+		// Clear entries for resolvable items — they'll be re-probed below.
+		foreach (var id in objectToId.Values)
+			map.Remove(id);
+
+		if (objectToId.Count > 0)
+		{
+			// Probe all 10 selection groups
 			var originalSelection = Selection.objects;
-			foreach (var kvp in groupObjects)
+
+			for (int group = 0; group < 10; group++)
 			{
-				Selection.objects = kvp.Value.ToArray();
+				Selection.objects = new Object[0];
 				EditorApplication.ExecuteMenuItem(
-					$"Edit/Selection/Save Selection {kvp.Key}");
+					$"Edit/Selection/Load Selection {group}");
+
+				foreach (var obj in Selection.objects)
+				{
+					if (objectToId.TryGetValue(obj, out string id))
+						map[id] = group;
+				}
 			}
+
 			Selection.objects = originalSelection;
-		};
+		}
+
+		// Persist
+		if (map.Count == 0)
+		{
+			EditorPrefs.DeleteKey(PrefKeySelectionGroups);
+			return;
+		}
+
+		var parts = new List<string>(map.Count);
+		foreach (var kvp in map)
+			parts.Add($"{kvp.Key}={kvp.Value}");
+		EditorPrefs.SetString(PrefKeySelectionGroups, string.Join(";", parts));
 	}
 
 	// ─── Lifecycle ─────────────────────────────────────────────
@@ -134,10 +226,14 @@ public class QuickAccess : EditorWindow
 		Undo.undoRedoPerformed += OnUndoRedo;
 		Selection.selectionChanged += OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+		EditorSceneManager.sceneOpened += OnSceneOpened;
 	}
 
 	void OnFocus()
 	{
+		// OnFocus can fire during OnEnable before the layout is built.
+		if (sceneRows == null) return;
+
 		// Probe selection groups at most once every 2 seconds
 		double now = EditorApplication.timeSinceStartup;
 		if (now - lastProbeTime < 2.0) return;
@@ -150,6 +246,7 @@ public class QuickAccess : EditorWindow
 		Undo.undoRedoPerformed -= OnUndoRedo;
 		Selection.selectionChanged -= OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+		EditorSceneManager.sceneOpened -= OnSceneOpened;
 	}
 
 	void OnUndoRedo()
@@ -569,8 +666,22 @@ public class QuickAccess : EditorWindow
 
 	void OnActiveSceneChanged(Scene oldScene, Scene newScene)
 	{
+		ReloadSceneItems(newScene);
+	}
+
+	void OnSceneOpened(Scene scene, OpenSceneMode mode)
+	{
+		// Safety net: activeSceneChangedInEditMode may not fire for all scene opens.
+		if (scene == SceneManager.GetActiveScene())
+			ReloadSceneItems(scene);
+	}
+
+	void ReloadSceneItems(Scene scene)
+	{
 		sceneIds.Clear();
-		LoadListFromPrefs(sceneIds, PrefKeyScene);
+		var sceneName = scene.IsValid() ? scene.name : "";
+		LoadListFromPrefs(sceneIds,
+			Application.dataPath + "QuickAccess_Scene_" + sceneName);
 		RebuildRows(isScene: true);
 	}
 
@@ -659,7 +770,11 @@ public class QuickAccess : EditorWindow
 		try
 		{
 			var originalSelection = Selection.objects;
-			selectionGroupMap.Clear();
+
+			// Only clear entries for items we can currently resolve.
+			// Entries for unresolvable items (e.g. unloaded scenes) are preserved.
+			foreach (var id in objectToId.Values)
+				selectionGroupMap.Remove(id);
 
 			for (int group = 0; group < 10; group++)
 			{
