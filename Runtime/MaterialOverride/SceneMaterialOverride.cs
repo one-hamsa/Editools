@@ -109,6 +109,41 @@ public static class SceneMaterialOverride
 		}
 	}
 
+	/// <summary>
+	/// Permanently applies the current override material to all affected renderers.
+	/// Registers Undo so the operation can be reverted with Ctrl+Z.
+	/// Then exits the override mode (since materials are now permanently set).
+	/// </summary>
+	public static void ApplyPermanently()
+	{
+		if (!_isActive || _backupMaterials == null || _activeMaterial == null) return;
+
+		// First restore originals so Undo snapshots the correct state
+		RestoreMaterials();
+
+		Undo.IncrementCurrentGroup();
+		int undoGroup = Undo.GetCurrentGroup();
+
+		foreach (var kvp in _backupMaterials)
+		{
+			if (kvp.Key == null) continue;
+
+			Undo.RegisterCompleteObjectUndo(kvp.Key, "Apply Material Check");
+
+			int count = kvp.Value.Length;
+			Material[] mats = new Material[count];
+			for (int i = 0; i < count; i++)
+				mats[i] = _activeMaterial;
+			kvp.Key.sharedMaterials = mats;
+		}
+
+		Undo.CollapseUndoOperations(undoGroup);
+
+		// Clear backup so Exit() won't restore original materials
+		_backupMaterials = null;
+		Exit();
+	}
+
 	// ---- Internal ----
 
 	/// <summary>

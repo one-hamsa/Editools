@@ -1345,7 +1345,7 @@ class MaterialCheckPopup : PopupWindowContent
 			EditorPrefs.DeleteKey(k_MaterialGuidKey);
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(220, 58);
+	public override Vector2 GetWindowSize() => new Vector2(220, 80);
 
 	public override void OnGUI(Rect rect)
 	{
@@ -1379,6 +1379,16 @@ class MaterialCheckPopup : PopupWindowContent
 		}
 
 		EditorGUILayout.EndHorizontal();
+
+		using (new EditorGUI.DisabledScope(!s_isOn))
+		{
+			if (GUILayout.Button("Apply"))
+			{
+				SceneMaterialOverride.ApplyPermanently();
+				s_isOn = false;
+				SessionState.SetBool(k_IsOnSessionKey, false);
+			}
+		}
 	}
 }
 
