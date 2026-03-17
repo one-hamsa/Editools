@@ -22,9 +22,13 @@ static class EditoolsLayoutCleaner
 	[InitializeOnLoadMethod]
 	static void CleanOnStartup()
 	{
-		var dir = Path.Combine("UserSettings", "Layouts");
-		CleanLayoutDir(dir);
-		EnsureToolbarMode(dir);
+		// Defer file I/O to avoid blocking domain reload
+		EditorApplication.delayCall += () =>
+		{
+			var dir = Path.Combine("UserSettings", "Layouts");
+			CleanLayoutDir(dir);
+			EnsureToolbarMode(dir);
+		};
 	}
 
 	static void CleanLayoutDir(string dir)
