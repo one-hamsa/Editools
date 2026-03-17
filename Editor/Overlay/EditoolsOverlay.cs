@@ -1147,34 +1147,81 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 4 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 5 * 22 + 4);
+
+	static readonly GUIContent k_SceneViewUndo = new GUIContent(
+		"Scene View Undo",
+		"Tracks Scene View camera movements and lets you step back/forward through them. " +
+		"Use Shift+Z to undo and Shift+Y to redo camera navigation. " +
+		"Stores up to 32 positions per Scene View.");
+
+	static readonly GUIContent k_HierarchyHeatmap = new GUIContent(
+		"Hierarchy Heatmap",
+		"Color-codes recently selected objects in the Hierarchy window. " +
+		"Most recently selected objects appear warmer. " +
+		"Click the arrow for settings (max tracked items, color range) or to reset the history.");
+
+	static readonly GUIContent k_QuickTransform = new GUIContent(
+		"QuickTransform",
+		"Hold W / E / R and drag in the Scene View to transform without gizmo handles.\n" +
+		"A wireframe bounding box appears around the selection.\n" +
+		"\n" +
+		"W — Move\n" +
+		"  LMB outside box: slide on world XZ plane\n" +
+		"  LMB on face: slide on that face's plane\n" +
+		"  RMB on face: push/pull along face normal\n" +
+		"\n" +
+		"E — Rotate\n" +
+		"  LMB outside box: rotate around world Y, pivot at center\n" +
+		"  LMB on face: rotate around face normal\n" +
+		"  LMB on edge: rotate around the edge axis\n" +
+		"  Ctrl: snap to angle increments (default 15°)\n" +
+		"\n" +
+		"R — Scale\n" +
+		"  LMB on face: single-axis scale, opposite face anchored\n" +
+		"  LMB outside box: nearest-side axis scale\n" +
+		"  RMB on face: uniform scale from opposite face\n" +
+		"  RMB outside box: uniform scale from pivot\n" +
+		"\n" +
+		"Shift + W/E/R: duplicate first, then transform the copies.\n" +
+		"\n" +
+		"Click ▸ for settings (edge detection threshold, rotation circle size, snap angle, linear rotation mode).");
+
+	static readonly GUIContent k_SceneViewRoll = new GUIContent(
+		"Scene View Roll",
+		"Roll the Scene View camera by holding Alt and dragging the middle mouse button left or right. " +
+		"Alt + middle-mouse click (without dragging) resets the camera roll back to zero.");
+
+	static readonly GUIContent k_QuickAccess = new GUIContent(
+		"Quick Access",
+		"Opens a dockable panel for pinning frequently used scene objects and project assets. " +
+		"Drag items from the Hierarchy or Project window into the panel for quick one-click selection.");
 
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
 
-		// Scene View Undo — simple toggle, no submenu
-		DrawToggleRow("Scene View Undo", SceneCameraUndo.Enabled,
+		DrawToggleRow(k_SceneViewUndo, SceneCameraUndo.Enabled,
 			v => SceneCameraUndo.Enabled = v, null);
 
-		// Hierarchy Heatmap — toggle + submenu
-		DrawToggleRow("Hierarchy Heatmap",
+		DrawToggleRow(k_HierarchyHeatmap,
 			EditorPrefs.GetBool("HierarchyHeatmapEnabled", false),
 			v => HierarchyHeatmap.SetEnabled(v),
 			() => ShowHeatmapMenu());
 
-		// QuickTransform — toggle + submenu
-		DrawToggleRow("QuickTransform", QuickTransform.Enabled,
+		DrawToggleRow(k_QuickTransform, QuickTransform.Enabled,
 			v => QuickTransform.Enabled = v,
 			() => UnityEditor.PopupWindow.Show(
 				GUILayoutUtility.GetLastRect(), new QuickTransformPopup()));
 
-		// Quick Access — toggle window on/off
-		DrawToggleRow("Quick Access", QuickAccess.IsOpen,
+		DrawToggleRow(k_SceneViewRoll, SceneViewRoll.Enabled,
+			v => SceneViewRoll.Enabled = v, null);
+
+		DrawToggleRow(k_QuickAccess, QuickAccess.IsOpen,
 			_ => QuickAccess.ToggleWindow(), null);
 	}
 
-	void DrawToggleRow(string label, bool isOn, System.Action<bool> onToggle,
+	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,
 		System.Action onSubmenu)
 	{
 		EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
