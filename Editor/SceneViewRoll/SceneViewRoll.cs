@@ -3,8 +3,8 @@ using UnityEditor;
 
 /// <summary>
 /// Adds camera roll control to the Scene View.
-/// Alt + middle-mouse drag rolls the camera (left/right movement).
-/// Alt + middle-mouse click (no drag) resets the roll to zero.
+/// Ctrl + Alt + middle-mouse drag rolls the camera (left/right movement).
+/// Ctrl + Alt + middle-mouse click (no drag) resets the roll to zero.
 /// </summary>
 [InitializeOnLoad]
 static class SceneViewRoll
@@ -36,8 +36,8 @@ static class SceneViewRoll
 		Event e = Event.current;
 		if (e == null) return;
 
-		// Alt + middle mouse button
-		if (e.type == EventType.MouseDown && e.button == 2 && e.alt)
+		// Ctrl + Alt + middle mouse button
+		if (e.type == EventType.MouseDown && e.button == 2 && e.control && e.alt)
 		{
 			s_dragging = true;
 			s_mouseStart = e.mousePosition;
