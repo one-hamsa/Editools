@@ -227,6 +227,7 @@ public class QuickAccess : EditorWindow
 		Selection.selectionChanged += OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
 		EditorSceneManager.sceneOpened += OnSceneOpened;
+		EditorApplication.update += OnUpdate;
 	}
 
 	void OnFocus()
@@ -234,11 +235,37 @@ public class QuickAccess : EditorWindow
 		// OnFocus can fire during OnEnable before the layout is built.
 		if (sceneRows == null) return;
 
-		// Probe selection groups at most once every 2 seconds
+		// Probe immediately on focus (respecting throttle)
+		ProbeSelectionGroupsThrottled();
+	}
+
+	void OnUpdate()
+	{
+		// Periodically re-probe selection groups to catch saves (Ctrl+Shift+0–9)
+		// that happen while the window is already open.
+		ProbeSelectionGroupsThrottled();
+	}
+
+	void ProbeSelectionGroupsThrottled()
+	{
 		double now = EditorApplication.timeSinceStartup;
 		if (now - lastProbeTime < 2.0) return;
 		lastProbeTime = now;
+
+		// Don't probe if the active selection has an AssetImporter inspector open —
+		// probing temporarily swaps Selection.objects, which triggers the importer's
+		// unapplied-changes dialog (save/discard).
+		if (SelectionHasImporter()) return;
+
 		ProbeSelectionGroups();
+	}
+
+	static bool SelectionHasImporter()
+	{
+		if (Selection.activeObject == null) return false;
+		var path = AssetDatabase.GetAssetPath(Selection.activeObject);
+		if (string.IsNullOrEmpty(path)) return false;
+		return AssetImporter.GetAtPath(path) != null;
 	}
 
 	void OnDisable()
@@ -247,6 +274,7 @@ public class QuickAccess : EditorWindow
 		Selection.selectionChanged -= OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
 		EditorSceneManager.sceneOpened -= OnSceneOpened;
+		EditorApplication.update -= OnUpdate;
 	}
 
 	void OnUndoRedo()
@@ -293,6 +321,7 @@ public class QuickAccess : EditorWindow
 
 		var projectContainer = new VisualElement();
 		projectContainer.AddToClassList("section");
+		projectContainer.style.flexGrow = 1;    // Fill remaining window space
 
 		projectRows = new ScrollView();
 		projectContainer.Add(projectRows);
