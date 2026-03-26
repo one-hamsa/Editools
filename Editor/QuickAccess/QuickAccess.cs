@@ -41,7 +41,6 @@ public class QuickAccess : EditorWindow
 
 	/// <summary>QuickAccess item ID → selection group index (0-9).</summary>
 	Dictionary<string, int> selectionGroupMap = new Dictionary<string, int>();
-	double lastProbeTime;
 
 	// ─── Prefs Keys ────────────────────────────────────────────
 
@@ -129,6 +128,7 @@ public class QuickAccess : EditorWindow
 		}
 		if (groupObjects.Count == 0) return;
 
+		int undoGroup = Undo.GetCurrentGroup();
 		var originalSelection = Selection.objects;
 		foreach (var kvp in groupObjects)
 		{
@@ -137,6 +137,7 @@ public class QuickAccess : EditorWindow
 				$"Edit/Selection/Save Selection {kvp.Key}");
 		}
 		Selection.objects = originalSelection;
+		Undo.CollapseUndoOperations(undoGroup);
 	}
 
 	/// <summary>
@@ -227,7 +228,10 @@ public class QuickAccess : EditorWindow
 		Selection.selectionChanged += OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
 		EditorSceneManager.sceneOpened += OnSceneOpened;
-		EditorApplication.update += OnUpdate;
+		// One-time probe to catch selection group changes since last session.
+		// Wrapped with CollapseUndoOperations so the Selection.objects swaps
+		// during probing don't pollute the undo stack.
+		ProbeSelectionGroupsSilent();
 	}
 
 	void OnFocus()
@@ -235,37 +239,8 @@ public class QuickAccess : EditorWindow
 		// OnFocus can fire during OnEnable before the layout is built.
 		if (sceneRows == null) return;
 
-		// Probe immediately on focus (respecting throttle)
-		ProbeSelectionGroupsThrottled();
-	}
-
-	void OnUpdate()
-	{
-		// Periodically re-probe selection groups to catch saves (Ctrl+Shift+0–9)
-		// that happen while the window is already open.
-		ProbeSelectionGroupsThrottled();
-	}
-
-	void ProbeSelectionGroupsThrottled()
-	{
-		double now = EditorApplication.timeSinceStartup;
-		if (now - lastProbeTime < 2.0) return;
-		lastProbeTime = now;
-
-		// Don't probe if the active selection has an AssetImporter inspector open —
-		// probing temporarily swaps Selection.objects, which triggers the importer's
-		// unapplied-changes dialog (save/discard).
-		if (SelectionHasImporter()) return;
-
-		ProbeSelectionGroups();
-	}
-
-	static bool SelectionHasImporter()
-	{
-		if (Selection.activeObject == null) return false;
-		var path = AssetDatabase.GetAssetPath(Selection.activeObject);
-		if (string.IsNullOrEmpty(path)) return false;
-		return AssetImporter.GetAtPath(path) != null;
+		// Re-probe on focus to catch changes made while the window was backgrounded.
+		ProbeSelectionGroupsSilent();
 	}
 
 	void OnDisable()
@@ -274,7 +249,37 @@ public class QuickAccess : EditorWindow
 		Selection.selectionChanged -= OnSelectionChanged;
 		EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
 		EditorSceneManager.sceneOpened -= OnSceneOpened;
-		EditorApplication.update -= OnUpdate;
+	}
+
+	// ─── Selection Group: on-focus detection ──────────
+
+	/// <summary>
+	/// Called right after the user saves a selection group (Ctrl+Shift+0–9).
+	/// Maps the current Selection.objects to the given group without touching
+	/// the undo stack at all — no probing, no Selection swaps.
+	/// </summary>
+	void UpdateGroupFromCurrentSelection(int group)
+	{
+		var currentSelection = new HashSet<Object>(Selection.objects);
+
+		// Clear old entries for this group
+		var staleKeys = selectionGroupMap
+			.Where(kv => kv.Value == group)
+			.Select(kv => kv.Key)
+			.ToList();
+		foreach (var key in staleKeys)
+			selectionGroupMap.Remove(key);
+
+		// Map QuickAccess items that are in the saved selection
+		foreach (var id in sceneIds.Concat(projectIds))
+		{
+			var obj = ObjectFromID(id);
+			if (obj != null && currentSelection.Contains(obj))
+				selectionGroupMap[id] = group;
+		}
+
+		SaveSelectionGroupsToPrefs();
+		RefreshAllBadges();
 	}
 
 	void OnUndoRedo()
@@ -782,8 +787,10 @@ public class QuickAccess : EditorWindow
 	/// <summary>
 	/// Loads each of Unity's 10 selection groups, checks which QuickAccess items
 	/// are in each, then restores the original selection. Updates badges + prefs.
+	/// All Selection.objects swaps are collapsed into a single undo operation
+	/// so they don't pollute the undo stack.
 	/// </summary>
-	void ProbeSelectionGroups()
+	void ProbeSelectionGroupsSilent()
 	{
 		// Build lookup: Object instance → QuickAccess ID
 		var objectToId = new Dictionary<Object, string>();
@@ -795,6 +802,17 @@ public class QuickAccess : EditorWindow
 		}
 		if (objectToId.Count == 0) return;
 
+		// Don't probe if the active selection has an AssetImporter inspector open —
+		// probing temporarily swaps Selection.objects, which triggers the importer's
+		// unapplied-changes dialog (save/discard).
+		if (Selection.activeObject != null)
+		{
+			var assetPath = AssetDatabase.GetAssetPath(Selection.activeObject);
+			if (!string.IsNullOrEmpty(assetPath) && AssetImporter.GetAtPath(assetPath) != null)
+				return;
+		}
+
+		int undoGroup = Undo.GetCurrentGroup();
 		Selection.selectionChanged -= OnSelectionChanged;
 		try
 		{
@@ -824,6 +842,9 @@ public class QuickAccess : EditorWindow
 		{
 			Selection.selectionChanged += OnSelectionChanged;
 		}
+
+		// Collapse all the Selection.objects undo records into a single no-op.
+		Undo.CollapseUndoOperations(undoGroup);
 
 		SaveSelectionGroupsToPrefs();
 		RefreshAllBadges();
