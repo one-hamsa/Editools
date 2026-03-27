@@ -224,20 +224,42 @@ Opens via `Tools > Editools > Quick Access`.
 - Drag from Hierarchy/Project → drops anywhere in the window, auto-classified into the
   appropriate section (bottom of list). Root-level handler catches external drops;
   section handlers only handle internal reorder (with `StopPropagation`).
-- Click → selects and pings the object. Folders: navigates the Project window (selects
-  folder in left tree with yellow ping, shows contents in right column) via reflection
-  into `ProjectBrowser.ShowFolderContents` + `m_FolderTree.Frame(id, true, ping: true)`.
+  Multiple objects dragged together → single multi-object item ("N Objects").
+- Click → selects and pings the object. Multi-object items: selects all objects.
+  Folders: navigates the Project window (selects folder in left tree with yellow ping,
+  shows contents in right column) via reflection into
+  `ProjectBrowser.ShowFolderContents` + `m_FolderTree.Frame(id, true, ping: true)`.
   `PingObject` is avoided — it navigates to the parent folder instead.
 - Double-click → opens the asset (`AssetDatabase.OpenAsset`)
-- Right-click → removes from list (undoable)
+- Right-click → removes from list (undoable). Also removes associated selection group.
 - Drag within section → swaps position with hovered item (two-item swap, not list shift)
 - Drag outside window → standard Unity `DragAndDrop` (like dragging from Hierarchy/Project)
-- Ctrl/Cmd+click → additive selection
+- Ctrl/Cmd+click → additive selection (multi items: toggle all objects in/out)
+
+**Multi-Object Items:**
+- ID format: `multi:subid1|subid2|subid3` where each sub-id uses standard encoding
+- Display: italic "N Objects" label with first object's icon; tooltip lists first 5 names
+- Created when: dragging multiple objects to QuickAccess, or saving a selection group (Ctrl+N)
+
+**Selection Groups (0-9):**
+QuickAccess owns its own selection groups — no interaction with Unity's built-in
+Save/Load Selection. Groups are stored directly in EditorPrefs (no probing, no undo pollution).
+- **Ctrl+1..0** → save current `Selection.objects` to group slot 1-10
+  - Creates multi-object item if multiple objects selected
+  - Mixed selections (scene + project) split into two items, both get same badge
+  - Automatically adds item(s) to QuickAccess lists
+  - Clearing an empty selection on a slot removes the group
+- **1..0** → recall group (sets `Selection.objects`). Suppressed when editing text fields.
+- Both shortcuts work globally via `[Shortcut]` attributes, even when QuickAccess is closed.
+- Badge display: slot 0→"1", slot 8→"9", slot 9→"0" (matches keyboard layout).
+- Deleting a QuickAccess item also removes its selection group.
 
 **Persistence:**
 - `EditorPrefs` keyed with `Application.dataPath` prefix (per-project, per-machine, git-ignored)
 - Scene list key: `Application.dataPath + "QuickAccess_Scene_" + sceneName`
 - Project list key: `Application.dataPath + "QuickAccess_Project"`
+- Selection groups key: `Application.dataPath + "QuickAccess_SelectionGroups_V2"`
+  Format: `slot=itemId1\titemId2;slot=itemId3` (tab separates items per slot, semicolon between slots)
 - Scene objects stored via `GlobalObjectId` (survives renames — uses scene GUID + local file ID).
   Falls back to path-based `gameObject:` format for unserialized objects. Project assets use
   `guid:` prefix (same as LRUAssets). Legacy `gameObject:` entries still resolve for backward compat.
