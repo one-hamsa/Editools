@@ -1402,14 +1402,12 @@ public class QuickAccess : EditorWindow
 			result = GetGameObjectFromPath(id.Substring("gameObject:".Length));
 		else if (id.StartsWith("instance:") &&
 		    int.TryParse(id.Substring("instance:".Length), out int iid))
-			result = EditorUtility.InstanceIDToObject(iid);
+			result = EditorUtility.EntityIdToObject(iid);
 
 		if (result != null)
 			s_singleCache[id] = result;
 
 		return result;
-
-		return null;
 	}
 
 	static string GetGameObjectPath(GameObject obj)
