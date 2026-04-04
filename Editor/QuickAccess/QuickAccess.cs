@@ -1086,85 +1086,26 @@ public class QuickAccess : EditorWindow
 	[Shortcut("Editools/QuickAccess Save Group 0", KeyCode.Alpha0, ShortcutModifiers.Action)]
 	static void SaveGroup0() => DoSaveSelectionGroup(9);
 
-	// Recall shortcuts use globalEventHandler instead of [Shortcut] because bare
-	// number keys are unreliable with [Shortcut] — many Unity windows (Scene view,
-	// Hierarchy, Inspector) consume key events before the shortcut system sees them.
-
-	[InitializeOnLoadMethod]
-	static void RegisterRecallGlobalHandler()
-	{
-		// globalEventHandler fires before individual window event processing.
-		var fi = typeof(EditorApplication).GetField("globalEventHandler",
-			System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
-		if (fi == null) return;
-
-		var handler = (EditorApplication.CallbackFunction)HandleRecallKeyEvent;
-		// Remove first to avoid double registration on domain reload
-		fi.SetValue(null, (EditorApplication.CallbackFunction)fi.GetValue(null) - handler);
-		fi.SetValue(null, (EditorApplication.CallbackFunction)fi.GetValue(null) + handler);
-	}
-
-	/// <summary>
-	/// Returns true if an IMGUI or UIToolkit text field actually has keyboard focus.
-	/// More reliable than EditorGUIUtility.editingTextField which can get stuck.
-	/// </summary>
-	static bool IsTextFieldFocused()
-	{
-		// IMGUI: keyboardControl > 0 means some control has focus
-		if (GUIUtility.keyboardControl != 0 && EditorGUIUtility.editingTextField)
-			return true;
-
-		// UIToolkit: check if a text input element is focused in the active window
-		var win = EditorWindow.focusedWindow;
-		if (win != null)
-		{
-			var focused = win.rootVisualElement?.focusController?.focusedElement;
-			if (focused is TextField || focused is TextElement { enableRichText: false })
-				return true;
-			// Also catch the inner TextInput child of TextField
-			if (focused?.GetType().Name == "TextInput")
-				return true;
-		}
-		return false;
-	}
-
-	static void HandleRecallKeyEvent()
-	{
-		var evt = Event.current;
-		if (evt == null || evt.type != EventType.KeyDown) return;
-		if (evt.shift || evt.control || evt.command || evt.alt) return;
-		if (IsTextFieldFocused()) return;
-
-		int slot = -1;
-		switch (evt.keyCode)
-		{
-			case KeyCode.Alpha1: slot = 0; break;
-			case KeyCode.Alpha2: slot = 1; break;
-			case KeyCode.Alpha3: slot = 2; break;
-			case KeyCode.Alpha4: slot = 3; break;
-			case KeyCode.Alpha5: slot = 4; break;
-			case KeyCode.Alpha6: slot = 5; break;
-			case KeyCode.Alpha7: slot = 6; break;
-			case KeyCode.Alpha8: slot = 7; break;
-			case KeyCode.Alpha9: slot = 8; break;
-			case KeyCode.Alpha0: slot = 9; break;
-		}
-		if (slot < 0) return;
-
-		// Only consume the event if this slot actually has a group
-		List<string> itemIds = null;
-		if (s_instance != null)
-			s_instance.selectionGroups.TryGetValue(slot, out itemIds);
-		else
-		{
-			var groups = LoadSelectionGroupsFromPrefsStatic();
-			groups.TryGetValue(slot, out itemIds);
-		}
-		if (itemIds == null || itemIds.Count == 0) return;
-
-		evt.Use(); // Consume the event so no other handler sees it
-		DoRecallSelectionGroup(slot);
-	}
+	[Shortcut("Editools/QuickAccess Recall Group 1", KeyCode.Alpha1)]
+	static void RecallGroup1() => DoRecallSelectionGroup(0);
+	[Shortcut("Editools/QuickAccess Recall Group 2", KeyCode.Alpha2)]
+	static void RecallGroup2() => DoRecallSelectionGroup(1);
+	[Shortcut("Editools/QuickAccess Recall Group 3", KeyCode.Alpha3)]
+	static void RecallGroup3() => DoRecallSelectionGroup(2);
+	[Shortcut("Editools/QuickAccess Recall Group 4", KeyCode.Alpha4)]
+	static void RecallGroup4() => DoRecallSelectionGroup(3);
+	[Shortcut("Editools/QuickAccess Recall Group 5", KeyCode.Alpha5)]
+	static void RecallGroup5() => DoRecallSelectionGroup(4);
+	[Shortcut("Editools/QuickAccess Recall Group 6", KeyCode.Alpha6)]
+	static void RecallGroup6() => DoRecallSelectionGroup(5);
+	[Shortcut("Editools/QuickAccess Recall Group 7", KeyCode.Alpha7)]
+	static void RecallGroup7() => DoRecallSelectionGroup(6);
+	[Shortcut("Editools/QuickAccess Recall Group 8", KeyCode.Alpha8)]
+	static void RecallGroup8() => DoRecallSelectionGroup(7);
+	[Shortcut("Editools/QuickAccess Recall Group 9", KeyCode.Alpha9)]
+	static void RecallGroup9() => DoRecallSelectionGroup(8);
+	[Shortcut("Editools/QuickAccess Recall Group 0", KeyCode.Alpha0)]
+	static void RecallGroup0() => DoRecallSelectionGroup(9);
 
 	// ─── Badge Refresh ─────────────────────────────────────────
 
