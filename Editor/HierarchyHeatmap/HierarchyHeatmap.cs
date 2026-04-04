@@ -369,7 +369,7 @@ public static class HierarchyHeatmap
 
     private static void OnHierarchyItemGUI(int instanceID, Rect selectionRect) {
         if (!EditoolsOverlay.IsActive) return;
-        GameObject go = EditorUtility.EntityIdToObject(instanceID) as GameObject;
+        GameObject go = EditorUtility.InstanceIDToObject(instanceID) as GameObject;
         if (go == null) return;
 
         if (!hierarchyReflectionSetup) {
@@ -398,7 +398,7 @@ public static class HierarchyHeatmap
         if (hasChildren && !isExpanded && !isMarked) {
             foreach (int markedID in markedHierarchyItems) {
                 if (markedID == instanceID) continue; // Skip self
-                GameObject markedGO = EditorUtility.EntityIdToObject(markedID) as GameObject;
+                GameObject markedGO = EditorUtility.InstanceIDToObject(markedID) as GameObject;
                 if (markedGO != null && markedGO.transform.IsChildOf(go.transform)) {
                     isMarked = true;
                     break;
@@ -424,7 +424,7 @@ public static class HierarchyHeatmap
             {
                 int recentID = recentHierarchySelections[i];
                 if (recentID == instanceID) continue; // Skip self
-                GameObject recentGO = EditorUtility.EntityIdToObject(recentID) as GameObject;
+                GameObject recentGO = EditorUtility.InstanceIDToObject(recentID) as GameObject;
                 if (recentGO != null && recentGO.transform.IsChildOf(go.transform)) {
                     int childTier = GetHierarchyRecencyTier(recentID);
                     if (childTier > subtreeMax) {

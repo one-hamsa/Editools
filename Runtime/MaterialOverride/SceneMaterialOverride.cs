@@ -181,7 +181,7 @@ public static class SceneMaterialOverride
 	{
 		_backupMaterials = new Dictionary<Renderer, Material[]>();
 
-		var renderers = UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+		var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>(false);
 
 		foreach (var renderer in renderers)
 		{

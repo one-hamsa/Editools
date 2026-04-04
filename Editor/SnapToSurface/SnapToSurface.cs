@@ -77,7 +77,7 @@ public class SnapToSurface : EditorWindow
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePosition);
 
         // Find all mesh filters in the scene
-        MeshFilter[] allMeshFilters = GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
+        MeshFilter[] allMeshFilters = GameObject.FindObjectsOfType<MeshFilter>();
 
         float closestDistance = float.MaxValue;
         Vector3 closestHitPoint = Vector3.zero;

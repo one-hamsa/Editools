@@ -571,7 +571,8 @@ public class EditoolsOverlay : ToolbarOverlay
 			_displayRoot.pickingMode = PickingMode.Position;
 			_displayRoot.RegisterCallback<WheelEvent>(e =>
 			{
-				e.StopImmediatePropagation();
+				e.StopPropagation();
+				e.PreventDefault();
 			});
 
 			_displayRoot.RegisterCallback<PointerDownEvent>(e =>
