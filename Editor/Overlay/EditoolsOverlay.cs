@@ -1201,6 +1201,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Opens a dockable panel for pinning frequently used scene objects and project assets. " +
 		"Drag items from the Hierarchy or Project window into the panel for quick one-click selection.");
 
+	static readonly GUIContent k_MassRename = new GUIContent(
+		"Mass Rename",
+		"Batch-rename multiple selected objects or assets with F2. " +
+		"Supports find/replace with wildcards, prefix/suffix removal, and auto-numbering.");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1223,6 +1228,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawToggleRow(k_QuickAccess, QuickAccess.IsOpen,
 			_ => QuickAccess.ToggleWindow(), null);
+
+		DrawToggleRow(k_MassRename, MassRename.Enabled,
+			v => MassRename.Enabled = v, null);
 	}
 
 	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,

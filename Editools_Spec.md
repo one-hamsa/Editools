@@ -23,6 +23,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/SnapToSurface/SnapToSurface.cs` — Alt+A snap-to-surface mode
 - `Editor/SceneCameraUndo/SceneCameraUndo.cs` — Shift+Z/Y scene camera undo/redo
 - `Editor/CopyPasteTransform/CopyPasteTransformComponent.cs` — Alt+Ctrl+C/V/X transform clipboard
+- `Editor/MassRename/MassRename.cs` — F2 batch rename for multiple selected objects/assets
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -211,7 +212,46 @@ Transform clipboard operations:
 - `Alt+Ctrl+V` — paste (with undo support)
 - `Alt+Ctrl+X` — reset transform to identity (with undo support)
 
-### 8. QuickAccess (EditorWindow)
+### 8. MassRename (Editor, `F2`)
+
+Batch-rename multiple selected objects (Hierarchy) or assets (Project view).
+Triggered by `F2` when two or more items are selected. Single-item F2 falls
+through to Unity's default inline rename.
+
+**Workflow:**
+1. Select multiple items in Hierarchy or Project view
+2. Press F2 → Mass Rename window opens
+3. Configure rename settings → live preview updates
+4. Click Rename → changes applied with full Undo support
+
+**Settings (applied in order on original alphabetical sort):**
+
+| Setting | Description | Default |
+|---|---|---|
+| Replace A with B | Find/replace with glob wildcard support (`*` = any chars) | Auto-detected shared prefix |
+| Remove Prefix | Trim N characters from start | 0 |
+| Remove Suffix | Trim N characters from end | 0 |
+| Add Numbering | Append zero-padded index (by count of items) | Off |
+
+**Order of operations:**
+1. Sort items alphabetically (original names)
+2. Apply find/replace (step 1)
+3. Apply prefix removal (step 2)
+4. Apply suffix removal (step 3)
+5. Re-sort alphabetically by new names
+6. Apply numbering (step 4) — zero-padded to fit item count (e.g. 001 for 453 items)
+
+**Auto-prefix detection:** On open, scans selected names for the longest shared
+prefix, trimmed to the last word boundary (space, underscore, dash). Pre-fills
+both find and replace fields. If no shared prefix exists, both fields start empty.
+
+**Undo:** All renames (both hierarchy and asset) are grouped into a single undo
+operation via `Undo.CollapseUndoOperations`. Asset renames use
+`AssetDatabase.RenameAsset` wrapped in `StartAssetEditing/StopAssetEditing`.
+
+**EditorPrefs:** `MassRename_Enabled` (default: true). Toggle in Editools overlay.
+
+### 9. QuickAccess (EditorWindow)
 
 User-curated quick-access panel for frequently used scene objects and project assets.
 Opens via `Tools > Editools > Quick Access`.
