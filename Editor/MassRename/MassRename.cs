@@ -301,7 +301,8 @@ public class MassRename : EditorWindow
             return name;
 
         // Convert glob pattern to regex: escape everything, then replace \* with .*
-        string pattern = Regex.Escape(_findString).Replace("\\*", ".*");
+        // Anchor with ^...$ so globs match the full name (prevents .* double-matching)
+        string pattern = "^" + Regex.Escape(_findString).Replace("\\*", ".*") + "$";
         return Regex.Replace(name, pattern, _replaceString, RegexOptions.IgnoreCase);
     }
 
