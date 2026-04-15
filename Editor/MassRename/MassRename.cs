@@ -40,6 +40,8 @@ public class MassRename : EditorWindow
     string _replaceString = "";
     int _removePrefix;
     int _removeSuffix;
+    string _addPrefix = "";
+    string _addSuffix = "";
     bool _addNumbering;
     string _numberingSeparator = " ";
 
@@ -118,6 +120,8 @@ public class MassRename : EditorWindow
 
         _removePrefix = 0;
         _removeSuffix = 0;
+        _addPrefix = "";
+        _addSuffix = "";
         _addNumbering = false;
         _numberingSeparator = " ";
 
@@ -199,7 +203,17 @@ public class MassRename : EditorWindow
             new GUIContent("Remove Suffix", "Number of characters to remove from the end of each name"),
             _removeSuffix));
 
-        // 4) Add numbering — separator field appears inline to the right of the checkbox
+        // 4) Add prefix
+        _addPrefix = EditorGUILayout.TextField(
+            new GUIContent("Add Prefix", "String to prepend to each name"),
+            _addPrefix);
+
+        // 5) Add suffix
+        _addSuffix = EditorGUILayout.TextField(
+            new GUIContent("Add Suffix", "String to append to each name"),
+            _addSuffix);
+
+        // 6) Add numbering — separator field appears inline to the right of the checkbox
         EditorGUILayout.BeginHorizontal();
         _addNumbering = EditorGUILayout.Toggle(
             new GUIContent("Add Numbering", "Appends a zero-padded number to each name based on alphabetical order"),
@@ -276,6 +290,8 @@ public class MassRename : EditorWindow
             string result = ApplyFindReplace(name);
             result = ApplyRemovePrefix(result);
             result = ApplyRemoveSuffix(result);
+            if (!string.IsNullOrEmpty(_addPrefix)) result = _addPrefix + result;
+            if (!string.IsNullOrEmpty(_addSuffix)) result = result + _addSuffix;
             items.Add((obj, name, result));
         }
 
@@ -342,6 +358,8 @@ public class MassRename : EditorWindow
             string result = ApplyFindReplace(name);
             result = ApplyRemovePrefix(result);
             result = ApplyRemoveSuffix(result);
+            if (!string.IsNullOrEmpty(_addPrefix)) result = _addPrefix + result;
+            if (!string.IsNullOrEmpty(_addSuffix)) result = result + _addSuffix;
             items.Add((obj, name, result));
         }
 

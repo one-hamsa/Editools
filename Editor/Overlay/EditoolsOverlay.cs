@@ -1151,7 +1151,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 5 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 7 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1206,6 +1206,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Batch-rename multiple selected objects or assets with F2. " +
 		"Supports find/replace with wildcards, prefix/suffix removal, and auto-numbering.");
 
+	static readonly GUIContent k_SelectMaterial = new GUIContent(
+		"Select Material",
+		"Alt + left-click in the Scene View to select the material of the object under the cursor " +
+		"(first material slot). The material is highlighted in the Project window.");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1231,6 +1236,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawToggleRow(k_MassRename, MassRename.Enabled,
 			v => MassRename.Enabled = v, null);
+
+		DrawToggleRow(k_SelectMaterial, SelectMaterial.Enabled,
+			v => SelectMaterial.Enabled = v, null);
 	}
 
 	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,
@@ -1490,4 +1498,5 @@ public class ViewCompCommentPopup : PopupWindowContent
 		_screenshot.comment = _text;
 	}
 }
+
 #endif

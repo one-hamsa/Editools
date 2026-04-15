@@ -24,6 +24,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/SceneCameraUndo/SceneCameraUndo.cs` — Shift+Z/Y scene camera undo/redo
 - `Editor/CopyPasteTransform/CopyPasteTransformComponent.cs` — Alt+Ctrl+C/V/X transform clipboard
 - `Editor/MassRename/MassRename.cs` — F2 batch rename for multiple selected objects/assets
+- `Editor/SelectMaterial/SelectMaterial.cs` — I+click to select material under cursor
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -195,7 +196,18 @@ Enters a modal snap mode for placing objects on surfaces.
 5. Left-click confirms placement
 6. Right-click cancels (performs `Undo.PerformUndo` to revert)
 
-### 6. SceneCameraUndo (Editor, `Shift+Z` / `Shift+Y`)
+### 6. SelectMaterial (Editor, `I+Click`)
+
+Hold I and left-click in the Scene View to select the material of the renderer
+under the cursor (first material slot). The material is pinged in the Project window.
+
+- `I + LMB` — select material (replaces selection)
+- `I + Shift + LMB` — add material to current selection
+- Custom white eyedropper cursor with black outline shown while I is held
+- Uses `HandleUtility.PickGameObject` (GPU picking, no mesh raycasting)
+- Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `Editools_SelectMaterial_Enabled`, default true)
+
+### 7. SceneCameraUndo (Editor, `Shift+Z` / `Shift+Y`)
 
 Undo/redo for Scene View camera position.
 
@@ -205,14 +217,14 @@ Undo/redo for Scene View camera position.
 - Settle delay of 0.15s before committing camera state (avoids recording every frame during orbit)
 - Stores: pivot, rotation, size, orthographic mode
 
-### 7. CopyPasteTransformComponent (Editor)
+### 8. CopyPasteTransformComponent (Editor)
 
 Transform clipboard operations:
 - `Alt+Ctrl+C` — copy local position, rotation, scale
 - `Alt+Ctrl+V` — paste (with undo support)
 - `Alt+Ctrl+X` — reset transform to identity (with undo support)
 
-### 8. MassRename (Editor, `F2`)
+### 9. MassRename (Editor, `F2`)
 
 Batch-rename multiple selected objects (Hierarchy) or assets (Project view).
 Triggered by `F2` when two or more items are selected. Single-item F2 falls
@@ -251,7 +263,7 @@ operation via `Undo.CollapseUndoOperations`. Asset renames use
 
 **EditorPrefs:** `MassRename_Enabled` (default: true). Toggle in Editools overlay.
 
-### 9. QuickAccess (EditorWindow)
+### 10. QuickAccess (EditorWindow)
 
 User-curated quick-access panel for frequently used scene objects and project assets.
 Opens via `Tools > Editools > Quick Access`.
