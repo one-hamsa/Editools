@@ -300,10 +300,15 @@ public class MassRename : EditorWindow
         if (string.IsNullOrEmpty(_findString))
             return name;
 
-        // Convert glob pattern to regex: escape everything, then replace \* with .*
-        // Anchor with ^...$ so globs match the full name (prevents .* double-matching)
-        string pattern = "^" + Regex.Escape(_findString).Replace("\\*", ".*") + "$";
-        return Regex.Replace(name, pattern, _replaceString, RegexOptions.IgnoreCase);
+        // If wildcards present, anchor with ^...$ so globs match the full name
+        // (prevents .* double-matching the empty string). Without wildcards, do
+        // plain substring replacement.
+        if (_findString.Contains("*"))
+        {
+            string pattern = "^" + Regex.Escape(_findString).Replace("\\*", ".*") + "$";
+            return Regex.Replace(name, pattern, _replaceString, RegexOptions.IgnoreCase);
+        }
+        return name.Replace(_findString, _replaceString);
     }
 
     string ApplyRemovePrefix(string name)
