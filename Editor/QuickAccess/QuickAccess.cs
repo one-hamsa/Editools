@@ -913,7 +913,14 @@ public class QuickAccess : EditorWindow
 
 	static void DoSaveSelectionGroup(int slot)
 	{
-		var objects = Selection.objects;
+		// When the Project window's folder tree (left column) has focus,
+		// Selection.objects contains the right-pane assets, not the folder.
+		// Detect this and override with the actual folder the user clicked.
+		var folderOverride = GetActiveFolderIfTreeFocused();
+		var objects = folderOverride != null
+			? new Object[] { folderOverride }
+			: Selection.objects;
+
 		if (objects == null || objects.Length == 0)
 		{
 			// Clear the slot
@@ -1395,6 +1402,56 @@ public class QuickAccess : EditorWindow
 	{
 		var path = AssetDatabase.GetAssetPath(obj);
 		return !string.IsNullOrEmpty(path) && AssetDatabase.IsValidFolder(path);
+	}
+
+	/// <summary>
+	/// If the focused window is a ProjectBrowser whose folder tree (left column) has
+	/// keyboard focus, returns the active folder asset.  Returns null otherwise, so the
+	/// caller can fall back to <see cref="Selection.objects"/>.
+	/// Uses reflection into ProjectBrowser + ProjectWindowUtil (same pattern as HierarchyHeatmap).
+	/// </summary>
+	static Object GetActiveFolderIfTreeFocused()
+	{
+		const System.Reflection.BindingFlags kNonPublic =
+			System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+		const System.Reflection.BindingFlags kPublic =
+			System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+
+		// 1. Is the focused window a ProjectBrowser?
+		var pbType = typeof(Editor).Assembly.GetType("UnityEditor.ProjectBrowser");
+		if (pbType == null) return null;
+
+		var focused = EditorWindow.focusedWindow;
+		if (focused == null || focused.GetType() != pbType)
+			return null;
+
+		// 2. Does it have a folder tree (two-column mode)?
+		var treeField = pbType.GetField("m_FolderTree", kNonPublic);
+		if (treeField == null) return null;
+
+		var tree = treeField.GetValue(focused);
+		if (tree == null) return null;   // one-column mode — no separate tree
+
+		// 3. Does the folder tree have keyboard focus?
+		var hasFocusMethod = tree.GetType().GetMethod("HasFocus", kPublic);
+		if (hasFocusMethod == null) return null;
+
+		if (!(bool)hasFocusMethod.Invoke(tree, null))
+			return null;
+
+		// 4. Get the active folder path via ProjectWindowUtil (internal API).
+		var utilType = typeof(Editor).Assembly.GetType("UnityEditor.ProjectWindowUtil");
+		if (utilType == null) return null;
+
+		var getPathMethod = utilType.GetMethod("GetActiveFolderPath",
+			System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+		if (getPathMethod == null) return null;
+
+		var path = getPathMethod.Invoke(null, null) as string;
+		if (string.IsNullOrEmpty(path) || !AssetDatabase.IsValidFolder(path))
+			return null;
+
+		return AssetDatabase.LoadAssetAtPath<Object>(path);
 	}
 
 	/// <summary>
