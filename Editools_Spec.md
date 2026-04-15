@@ -25,6 +25,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/CopyPasteTransform/CopyPasteTransformComponent.cs` — Alt+Ctrl+C/V/X transform clipboard
 - `Editor/MassRename/MassRename.cs` — F2 batch rename for multiple selected objects/assets
 - `Editor/SelectMaterial/SelectMaterial.cs` — I+click to select material under cursor
+- `Editor/SceneViewFpsCounter/SceneViewFpsCounter.cs` — per-SceneView FPS overlay
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -321,6 +322,17 @@ Save/Load Selection. Groups are stored directly in EditorPrefs (no probing, no u
 **Files:**
 - `Editor/QuickAccess/QuickAccess.cs`
 - `Editor/QuickAccess/Resources/QuickAccess.uss`
+
+### 11. SceneViewFpsCounter (Editor, `[InitializeOnLoad]`)
+
+Live FPS overlay in the top-left corner of each Scene View.
+
+- Hooks into `SceneView.duringSceneGui`, samples delta time on `EventType.Repaint` only
+- Per-SceneView state via `Dictionary<int, FrameData>` keyed by `sceneView.GetInstanceID()`
+- Rolling average over 60 samples, displays average FPS and frame time (ms)
+- Rendered as IMGUI label inside `Handles.BeginGUI()` with semi-transparent black background
+- Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `SceneViewFpsCounter_Enabled`, default false)
+- Continuously calls `sceneView.Repaint()` to keep the counter updating
 
 ---
 

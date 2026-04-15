@@ -1151,7 +1151,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 7 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 8 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1211,6 +1211,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Alt + left-click in the Scene View to select the material of the object under the cursor " +
 		"(first material slot). The material is highlighted in the Project window.");
 
+	static readonly GUIContent k_FpsCounter = new GUIContent(
+		"FPS Counter",
+		"Shows a live FPS counter in the top-left corner of each Scene View. " +
+		"Displays average FPS and frame time in milliseconds. Tracked independently per view.");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1239,6 +1244,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawToggleRow(k_SelectMaterial, SelectMaterial.Enabled,
 			v => SelectMaterial.Enabled = v, null);
+
+		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
+			v => SceneViewFpsCounter.Enabled = v, null);
 	}
 
 	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,

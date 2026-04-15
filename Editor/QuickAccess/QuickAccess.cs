@@ -1349,8 +1349,6 @@ public class QuickAccess : EditorWindow
 			s_singleCache[id] = result;
 
 		return result;
-
-		return null;
 	}
 
 	static string GetGameObjectPath(GameObject obj)

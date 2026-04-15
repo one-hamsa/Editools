@@ -60,7 +60,7 @@ static class SelectMaterial
         Graphics.Blit(src, rt);
         var prev = RenderTexture.active;
         RenderTexture.active = rt;
-        var readable = new Texture2D(w, h, TextureFormat.ARGB32, false);
+        var readable = new Texture2D(w, h, TextureFormat.RGBA32, false);
         readable.ReadPixels(new Rect(0, 0, w, h), 0, 0);
         readable.Apply();
         RenderTexture.active = prev;
@@ -103,9 +103,9 @@ static class SelectMaterial
             }
         }
 
-        var cursor = new Texture2D(w, h, TextureFormat.ARGB32, false) { filterMode = FilterMode.Point };
+        var cursor = new Texture2D(w, h, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, alphaIsTransparency = true };
         cursor.SetPixels(result);
-        cursor.Apply();
+        cursor.Apply(false, false);
 
         Object.DestroyImmediate(readable);
         return cursor;
