@@ -318,6 +318,16 @@ Save/Load Selection. Groups are stored directly in EditorPrefs (no probing, no u
   `guid:` prefix (same as LRUAssets). Legacy `gameObject:` entries still resolve for backward compat.
 
 **Scene lifecycle:** Scene list reloads on `EditorSceneManager.activeSceneChangedInEditMode`.
+On scene change, old scene data is defensively saved under its explicit key before clearing,
+and `Undo.ClearUndo(this)` is called to prevent stale undo records from writing old-scene
+items to the new scene's prefs key.
+
+**Design constraints:**
+- `IsSceneObject` must reject prefab stage objects (same guard as `ObjectToID`) —
+  otherwise they get `instance:` IDs that die on domain reload.
+- Static code paths (e.g. `SaveSelectionGroupWithoutWindow`) must capture `PrefKeyScene`
+  once at entry — the computed property depends on the active scene at call time, which
+  can change mid-frame in edge cases.
 
 **Files:**
 - `Editor/QuickAccess/QuickAccess.cs`

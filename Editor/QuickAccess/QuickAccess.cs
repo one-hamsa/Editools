@@ -713,6 +713,14 @@ public class QuickAccess : EditorWindow
 
 	void OnActiveSceneChanged(Scene oldScene, Scene newScene)
 	{
+		// Defensively save old scene data under its own key before switching.
+		// This prevents stale undo records from overwriting the new scene's data.
+		if (oldScene.IsValid() && !string.IsNullOrEmpty(oldScene.name))
+		{
+			var oldKey = Application.dataPath + "QuickAccess_Scene_" + oldScene.name;
+			EditorPrefs.SetString(oldKey, string.Join(",", sceneIds));
+		}
+
 		ReloadSceneItems(newScene);
 	}
 
@@ -730,6 +738,12 @@ public class QuickAccess : EditorWindow
 		var sceneName = scene.IsValid() ? scene.name : "";
 		LoadListFromPrefs(sceneIds,
 			Application.dataPath + "QuickAccess_Scene_" + sceneName);
+
+		// Flush stale undo records that reference the old scene's sceneIds.
+		// Without this, Ctrl+Z can revert sceneIds to old-scene data and
+		// OnUndoRedo would save it under the new scene's prefs key.
+		Undo.ClearUndo(this);
+
 		RebuildRows(isScene: true);
 	}
 
@@ -961,6 +975,10 @@ public class QuickAccess : EditorWindow
 
 	static void SaveSelectionGroupWithoutWindow(int slot, Object[] sceneObjects, Object[] projectObjects)
 	{
+		// Capture the scene key once so it stays consistent throughout this method,
+		// even if the active scene changes mid-call.
+		var sceneKey = PrefKeyScene;
+
 		var groups = LoadSelectionGroupsFromPrefsStatic();
 
 		// Remove old multi items from lists
@@ -969,7 +987,7 @@ public class QuickAccess : EditorWindow
 			// Load current lists from prefs
 			var sceneList = new List<string>();
 			var projList = new List<string>();
-			var sceneData = EditorPrefs.GetString(PrefKeyScene, "");
+			var sceneData = EditorPrefs.GetString(sceneKey, "");
 			if (!string.IsNullOrEmpty(sceneData))
 				foreach (var id in sceneData.Split(','))
 					if (!string.IsNullOrEmpty(id)) sceneList.Add(id);
@@ -987,7 +1005,7 @@ public class QuickAccess : EditorWindow
 				}
 			}
 
-			EditorPrefs.SetString(PrefKeyScene, string.Join(",", sceneList));
+			EditorPrefs.SetString(sceneKey, string.Join(",", sceneList));
 			EditorPrefs.SetString(PrefKeyProject, string.Join(",", projList));
 		}
 
@@ -999,13 +1017,13 @@ public class QuickAccess : EditorWindow
 			if (!string.IsNullOrEmpty(id))
 			{
 				// Add to scene list if not present
-				var data = EditorPrefs.GetString(PrefKeyScene, "");
+				var data = EditorPrefs.GetString(sceneKey, "");
 				var list = string.IsNullOrEmpty(data) ? new List<string>() :
 					data.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList();
 				if (!list.Contains(id))
 				{
 					list.Add(id);
-					EditorPrefs.SetString(PrefKeyScene, string.Join(",", list));
+					EditorPrefs.SetString(sceneKey, string.Join(",", list));
 				}
 				newSlotIds.Add(id);
 			}
@@ -1395,7 +1413,8 @@ public class QuickAccess : EditorWindow
 	{
 		if (obj is Component comp) obj = comp.gameObject;
 		return obj is GameObject go && go.scene.IsValid() && go.scene.isLoaded
-		       && !AssetDatabase.Contains(obj);
+		       && !AssetDatabase.Contains(obj)
+		       && PrefabStageUtility.GetCurrentPrefabStage() == null;
 	}
 
 	static bool IsFolder(Object obj)
