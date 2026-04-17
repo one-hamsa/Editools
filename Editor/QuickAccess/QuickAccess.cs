@@ -65,18 +65,38 @@ public class QuickAccess : EditorWindow
 	static QuickAccess s_instance;
 
 	// ─── Prefs Keys ────────────────────────────────────────────
+	//
+	// Scene list is keyed by the scene asset's GUID — NOT its name — so that
+	// renames, duplicates, and same-named scenes in different folders don't
+	// collide. Unsaved / untitled scenes have no asset GUID; for those we
+	// skip persistence entirely (the in-memory list works during the session,
+	// but nothing is written to EditorPrefs).
 
 	static string PrefKeyProject         => Application.dataPath + "QuickAccess_Project";
-	static string PrefKeyScene           => Application.dataPath + "QuickAccess_Scene_" + ActiveSceneName;
 	static string PrefKeySelectionGroups => Application.dataPath + "QuickAccess_SelectionGroups_V2";
 
-	static string ActiveSceneName
+	/// <summary>Key under which the current scene's list is stored, cached at load time.
+	/// Empty string = scene has no asset GUID (untitled) → persistence is disabled for this scene.</summary>
+	string currentSceneKey = "";
+
+	/// <summary>Build the EditorPrefs key for a scene, or "" if the scene is untitled / has no GUID.</summary>
+	static string SceneKeyForScene(Scene scene)
 	{
-		get
-		{
-			var scene = SceneManager.GetActiveScene();
-			return scene.IsValid() ? scene.name : "";
-		}
+		if (!scene.IsValid()) return "";
+		var path = scene.path;
+		if (string.IsNullOrEmpty(path)) return "";
+		var guid = AssetDatabase.AssetPathToGUID(path);
+		if (string.IsNullOrEmpty(guid)) return "";
+		return Application.dataPath + "QuickAccess_Scene_" + guid;
+	}
+
+	static string SceneKeyForActiveScene() => SceneKeyForScene(SceneManager.GetActiveScene());
+
+	/// <summary>Legacy name-based key for one-time migration. Do not use for new writes.</summary>
+	static string LegacySceneKeyForScene(Scene scene)
+	{
+		if (!scene.IsValid() || string.IsNullOrEmpty(scene.name)) return "";
+		return Application.dataPath + "QuickAccess_Scene_" + scene.name;
 	}
 
 	// ─── Window access ─────────────────────────────────────────
@@ -713,13 +733,13 @@ public class QuickAccess : EditorWindow
 
 	void OnActiveSceneChanged(Scene oldScene, Scene newScene)
 	{
-		// Defensively save old scene data under its own key before switching.
-		// This prevents stale undo records from overwriting the new scene's data.
-		if (oldScene.IsValid() && !string.IsNullOrEmpty(oldScene.name))
-		{
-			var oldKey = Application.dataPath + "QuickAccess_Scene_" + oldScene.name;
-			EditorPrefs.SetString(oldKey, string.Join(",", sceneIds));
-		}
+		// Save old scene's list under the key it was loaded with — not a key
+		// re-derived from oldScene, which may now differ from what's in memory
+		// (e.g. if the scene was renamed, or if we bailed on load because the
+		// scene was untitled). currentSceneKey is the single source of truth
+		// for where sceneIds came from.
+		if (!string.IsNullOrEmpty(currentSceneKey))
+			EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
 
 		ReloadSceneItems(newScene);
 	}
@@ -735,9 +755,30 @@ public class QuickAccess : EditorWindow
 	{
 		InvalidateCache(); // Scene objects may have changed
 		sceneIds.Clear();
-		var sceneName = scene.IsValid() ? scene.name : "";
-		LoadListFromPrefs(sceneIds,
-			Application.dataPath + "QuickAccess_Scene_" + sceneName);
+
+		currentSceneKey = SceneKeyForScene(scene);
+		if (!string.IsNullOrEmpty(currentSceneKey))
+		{
+			LoadListFromPrefs(sceneIds, currentSceneKey);
+
+			// One-time migration from the old name-based key.
+			// If the new GUID key is empty but the legacy name-based key has
+			// data, copy it over. Best-effort — same-named scenes in the old
+			// scheme collided, so whichever scene loads first wins.
+			if (sceneIds.Count == 0)
+			{
+				var legacyKey = LegacySceneKeyForScene(scene);
+				if (!string.IsNullOrEmpty(legacyKey) && EditorPrefs.HasKey(legacyKey))
+				{
+					LoadListFromPrefs(sceneIds, legacyKey);
+					if (sceneIds.Count > 0)
+					{
+						EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
+						EditorPrefs.DeleteKey(legacyKey);
+					}
+				}
+			}
+		}
 
 		// Flush stale undo records that reference the old scene's sceneIds.
 		// Without this, Ctrl+Z can revert sceneIds to old-scene data and
@@ -752,9 +793,10 @@ public class QuickAccess : EditorWindow
 	void LoadFromPrefs()
 	{
 		projectIds.Clear();
-		sceneIds.Clear();
 		LoadListFromPrefs(projectIds, PrefKeyProject);
-		LoadListFromPrefs(sceneIds, PrefKeyScene);
+		// Scene list + currentSceneKey are established via ReloadSceneItems
+		// (called from OnSceneOpened / OnActiveSceneChanged, and explicitly here).
+		ReloadSceneItems(SceneManager.GetActiveScene());
 		LoadSelectionGroupsFromPrefs();
 	}
 
@@ -771,7 +813,11 @@ public class QuickAccess : EditorWindow
 	void SaveToPrefs()
 	{
 		EditorPrefs.SetString(PrefKeyProject, string.Join(",", projectIds));
-		EditorPrefs.SetString(PrefKeyScene, string.Join(",", sceneIds));
+		// Only persist scene list if we have a stable key. Untitled scenes
+		// (no asset GUID) keep their list in-memory for the session only —
+		// writing under an empty key would pollute a shared bucket.
+		if (!string.IsNullOrEmpty(currentSceneKey))
+			EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
 	}
 
 	// ─── Selection Group Persistence ───────────────────────────
@@ -976,8 +1022,11 @@ public class QuickAccess : EditorWindow
 	static void SaveSelectionGroupWithoutWindow(int slot, Object[] sceneObjects, Object[] projectObjects)
 	{
 		// Capture the scene key once so it stays consistent throughout this method,
-		// even if the active scene changes mid-call.
-		var sceneKey = PrefKeyScene;
+		// even if the active scene changes mid-call. Empty = untitled scene;
+		// scene objects cannot be persisted in that case (we skip, but still
+		// persist project objects and the group mapping).
+		var sceneKey = SceneKeyForActiveScene();
+		bool canPersistScene = !string.IsNullOrEmpty(sceneKey);
 
 		var groups = LoadSelectionGroupsFromPrefsStatic();
 
@@ -987,10 +1036,13 @@ public class QuickAccess : EditorWindow
 			// Load current lists from prefs
 			var sceneList = new List<string>();
 			var projList = new List<string>();
-			var sceneData = EditorPrefs.GetString(sceneKey, "");
-			if (!string.IsNullOrEmpty(sceneData))
-				foreach (var id in sceneData.Split(','))
-					if (!string.IsNullOrEmpty(id)) sceneList.Add(id);
+			if (canPersistScene)
+			{
+				var sceneData = EditorPrefs.GetString(sceneKey, "");
+				if (!string.IsNullOrEmpty(sceneData))
+					foreach (var id in sceneData.Split(','))
+						if (!string.IsNullOrEmpty(id)) sceneList.Add(id);
+			}
 			var projData = EditorPrefs.GetString(PrefKeyProject, "");
 			if (!string.IsNullOrEmpty(projData))
 				foreach (var id in projData.Split(','))
@@ -1005,13 +1057,14 @@ public class QuickAccess : EditorWindow
 				}
 			}
 
-			EditorPrefs.SetString(sceneKey, string.Join(",", sceneList));
+			if (canPersistScene)
+				EditorPrefs.SetString(sceneKey, string.Join(",", sceneList));
 			EditorPrefs.SetString(PrefKeyProject, string.Join(",", projList));
 		}
 
 		var newSlotIds = new List<string>();
 
-		if (sceneObjects.Length > 0)
+		if (sceneObjects.Length > 0 && canPersistScene)
 		{
 			var id = ObjectsToID(sceneObjects);
 			if (!string.IsNullOrEmpty(id))
