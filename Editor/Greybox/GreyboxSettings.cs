@@ -2,6 +2,7 @@
 using UnityEditor;
 using UnityEditor.ShortcutManagement;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
 /// Per-project EditorPrefs-backed settings for the Greybox tool.
@@ -16,6 +17,7 @@ static class GreyboxSettings
     const string k_StaticPref       = "Editools_Greybox_DefaultStatic";
     const string k_LayerPref        = "Editools_Greybox_DefaultLayer";
     const string k_MeshColliderPref = "Editools_Greybox_DefaultMeshCollider";
+    const string k_ShadowCastPref   = "Editools_Greybox_DefaultShadowCast";
 
     /// <summary>Per-project default material for new Greyboxes. Null = built-in grey.</summary>
     internal static Material DefaultMaterial
@@ -73,6 +75,13 @@ static class GreyboxSettings
         set => EditorPrefs.SetBool(k_MeshColliderPref, value);
     }
 
+    /// <summary>Whether new Greyboxes cast shadows. Default true.</summary>
+    internal static bool DefaultShadowCasting
+    {
+        get => EditorPrefs.GetBool(k_ShadowCastPref, true);
+        set => EditorPrefs.SetBool(k_ShadowCastPref, value);
+    }
+
     /// <summary>
     /// Returns the configured default material, or a built-in grey Standard fallback.
     /// The fallback is not cached — only used at Greybox creation time.
@@ -99,7 +108,10 @@ static class GreyboxSettings
 
         var mr = go.GetComponent<MeshRenderer>();
         if (mr != null)
-            mr.sharedMaterial = GetOrCreateDefaultMaterial();
+        {
+            mr.sharedMaterial  = GetOrCreateDefaultMaterial();
+            mr.shadowCastingMode = DefaultShadowCasting ? ShadowCastingMode.On : ShadowCastingMode.Off;
+        }
 
         go.transform.localScale = DefaultScale;
         go.isStatic   = DefaultStatic;
@@ -130,7 +142,10 @@ static class GreyboxSettings
 
         var mr = go.GetComponent<MeshRenderer>();
         if (mr != null)
-            mr.sharedMaterial = GetOrCreateDefaultMaterial();
+        {
+            mr.sharedMaterial    = GetOrCreateDefaultMaterial();
+            mr.shadowCastingMode = DefaultShadowCasting ? ShadowCastingMode.On : ShadowCastingMode.Off;
+        }
 
         go.transform.position   = worldPos;
         go.transform.rotation   = worldRot;
@@ -174,7 +189,11 @@ class GreyboxSettingsPopup : PopupWindowContent
         "Mesh Collider",
         "Add a MeshCollider component to new Greyboxes. Disable for purely visual blockout pieces.");
 
-    public override Vector2 GetWindowSize() => new Vector2(260, 150);
+    static readonly GUIContent k_ShadowCastLabel = new GUIContent(
+        "Cast Shadows",
+        "Whether new Greyboxes cast shadows. Disable to save draw calls on background blockout geometry.");
+
+    public override Vector2 GetWindowSize() => new Vector2(260, 172);
 
     public override void OnGUI(Rect rect)
     {
@@ -210,197 +229,34 @@ class GreyboxSettingsPopup : PopupWindowContent
         bool nextCollider = EditorGUILayout.Toggle(k_MeshColliderLabel, curCollider);
         if (nextCollider != curCollider)
             GreyboxSettings.DefaultMeshCollider = nextCollider;
+
+        EditorGUILayout.Space(4);
+
+        bool curShadow  = GreyboxSettings.DefaultShadowCasting;
+        bool nextShadow = EditorGUILayout.Toggle(k_ShadowCastLabel, curShadow);
+        if (nextShadow != curShadow)
+            GreyboxSettings.DefaultShadowCasting = nextShadow;
     }
 }
 
-// ─── Ctrl+G shortcut — create Greybox at surface under cursor ────────────────
+// ─── Ctrl+G shortcut — create Greybox and enter SnapToSurface placement mode ──
 
 /// <summary>
-/// Tracks the scene-view mouse ray each frame so it's available when the
-/// Ctrl+G shortcut fires (outside of OnGUI scope).
+/// Ctrl+G creates a Greybox at the view pivot, then immediately hands it to
+/// SnapToSurface.BeginSnap so placement uses the exact same proven raycasting.
+/// Left-click confirms; right-click cancels and destroys the object via undo.
 /// </summary>
-[InitializeOnLoad]
 static class GreyboxCreationShortcut
 {
-    static Ray      s_ray;
-    static bool     s_hasRay;
-    static SceneView s_view;
-
-    static GreyboxCreationShortcut()
-    {
-        SceneView.duringSceneGui += Track;
-    }
-
-    static void Track(SceneView sv)
-    {
-        var e = Event.current;
-        if (e.type == EventType.MouseMove || e.type == EventType.MouseDrag)
-        {
-            s_ray    = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-            s_hasRay = true;
-            s_view   = sv;
-        }
-    }
-
-    /// <summary>
-    /// Ctrl+G in Scene View — fires a ray against all scene geometry and places
-    /// a Greybox with its pivot on the hit surface, Y-axis aligned to the normal.
-    /// Falls back to view-pivot depth if no surface is hit.
-    /// </summary>
     [Shortcut("Editools/Create Greybox", typeof(SceneView), KeyCode.G, ShortcutModifiers.Control)]
     static void Execute()
     {
-        Vector3    pos;
-        Quaternion rot;
+        var sv = SceneView.lastActiveSceneView;
+        Vector3 spawnPos = sv != null ? sv.pivot : Vector3.zero;
 
-        if (s_hasRay && s_view != null && CastRayToScene(s_ray, out Vector3 hitPt, out Vector3 hitNorm))
-        {
-            pos = hitPt;
-            rot = NormalToRotation(hitNorm);
-        }
-        else
-        {
-            // Fallback: place at cursor depth aligned to view pivot
-            var sv = s_view ?? SceneView.lastActiveSceneView;
-            if (sv != null && s_hasRay)
-            {
-                float depth = Vector3.Dot(sv.pivot - s_ray.origin, s_ray.direction);
-                pos = s_ray.GetPoint(Mathf.Max(depth, 0.5f));
-            }
-            else if (sv != null)
-            {
-                pos = sv.pivot;
-            }
-            else
-            {
-                pos = Vector3.zero;
-            }
-            rot = Quaternion.identity;
-        }
-
-        // Place as sibling of the currently selected object (same parent in hierarchy)
         Transform selectedParent = Selection.activeTransform?.parent;
-        GreyboxSettings.PlaceGreybox(pos, rot, selectedParent);
-    }
-
-    // ─── Surface raycasting ──────────────────────────────────────
-    // Möller–Trumbore triangle intersection against all scene MeshFilters.
-    // Mirrors the approach in SnapToSurface but operates as a one-shot cast.
-
-    static bool CastRayToScene(Ray ray, out Vector3 hitPoint, out Vector3 hitNormal)
-    {
-        hitPoint  = Vector3.zero;
-        hitNormal = Vector3.up;
-
-        float closest = float.MaxValue;
-        bool  found   = false;
-
-        foreach (var mf in Object.FindObjectsByType<MeshFilter>(FindObjectsInactive.Exclude, FindObjectsSortMode.None))
-        {
-            if (mf.sharedMesh == null) continue;
-            if (mf.GetComponent<Greybox>() != null) continue; // skip existing greyboxes
-            var mr = mf.GetComponent<MeshRenderer>();
-            if (mr == null || !mr.enabled) continue;
-
-            if (RaycastMesh(ray, mf, out Vector3 p, out Vector3 n, out float d) && d < closest)
-            {
-                closest   = d;
-                hitPoint  = p;
-                hitNormal = n;
-                found     = true;
-            }
-        }
-        return found;
-    }
-
-    static bool RaycastMesh(Ray ray, MeshFilter mf, out Vector3 hitPoint, out Vector3 hitNormal, out float hitDist)
-    {
-        hitPoint  = Vector3.zero;
-        hitNormal = Vector3.up;
-        hitDist   = float.MaxValue;
-
-        var mesh  = mf.sharedMesh;
-        var tr    = mf.transform;
-        var verts = mesh.vertices;
-        var tris  = mesh.triangles;
-        var norms = mesh.normals;
-
-        float closestT   = float.MaxValue;
-        int   closestTri = -1;
-
-        for (int i = 0; i < tris.Length; i += 3)
-        {
-            Vector3 v0 = tr.TransformPoint(verts[tris[i]]);
-            Vector3 v1 = tr.TransformPoint(verts[tris[i + 1]]);
-            Vector3 v2 = tr.TransformPoint(verts[tris[i + 2]]);
-
-            if (MollerTrumbore(ray, v0, v1, v2, out float t) && t < closestT)
-            {
-                closestT   = t;
-                closestTri = i;
-            }
-        }
-
-        if (closestTri < 0) return false;
-
-        hitDist  = closestT;
-        hitPoint = ray.GetPoint(closestT);
-
-        // Interpolated world-space normal
-        Vector3 wv0 = tr.TransformPoint(verts[tris[closestTri]]);
-        Vector3 wv1 = tr.TransformPoint(verts[tris[closestTri + 1]]);
-        Vector3 wv2 = tr.TransformPoint(verts[tris[closestTri + 2]]);
-        Vector3 bary = Barycentric(hitPoint, wv0, wv1, wv2);
-
-        Vector3 n0 = tr.TransformDirection(norms[tris[closestTri]]);
-        Vector3 n1 = tr.TransformDirection(norms[tris[closestTri + 1]]);
-        Vector3 n2 = tr.TransformDirection(norms[tris[closestTri + 2]]);
-        hitNormal  = (n0 * bary.x + n1 * bary.y + n2 * bary.z).normalized;
-
-        return true;
-    }
-
-    static bool MollerTrumbore(Ray ray, Vector3 v0, Vector3 v1, Vector3 v2, out float t)
-    {
-        t = 0f;
-        Vector3 e1 = v1 - v0, e2 = v2 - v0;
-        Vector3 h  = Vector3.Cross(ray.direction, e2);
-        float   a  = Vector3.Dot(e1, h);
-        if (a > -1e-5f && a < 1e-5f) return false;
-        float   f  = 1f / a;
-        Vector3 s  = ray.origin - v0;
-        float   u  = f * Vector3.Dot(s, h);
-        if (u < 0f || u > 1f) return false;
-        Vector3 q  = Vector3.Cross(s, e1);
-        float   v  = f * Vector3.Dot(ray.direction, q);
-        if (v < 0f || u + v > 1f) return false;
-        t = f * Vector3.Dot(e2, q);
-        return t > 1e-5f;
-    }
-
-    static Vector3 Barycentric(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
-    {
-        Vector3 v0 = b - a, v1 = c - a, v2 = p - a;
-        float d00 = Vector3.Dot(v0, v0), d01 = Vector3.Dot(v0, v1);
-        float d11 = Vector3.Dot(v1, v1), d20 = Vector3.Dot(v2, v0), d21 = Vector3.Dot(v2, v1);
-        float den = d00 * d11 - d01 * d01;
-        float bv  = (d11 * d20 - d01 * d21) / den;
-        float bw  = (d00 * d21 - d01 * d20) / den;
-        return new Vector3(1f - bv - bw, bv, bw);
-    }
-
-    // Align object Y-axis to surface normal, forward derived from world up
-    static Quaternion NormalToRotation(Vector3 normal)
-    {
-        Vector3 up = normal;
-        Vector3 fwd;
-        if (Vector3.Dot(up, Vector3.up) > 0.99f)
-            fwd = Vector3.forward;
-        else if (Vector3.Dot(up, Vector3.up) < -0.99f)
-            fwd = Vector3.back;
-        else
-            fwd = Vector3.ProjectOnPlane(Vector3.up, up).normalized;
-        return Quaternion.LookRotation(fwd, up);
+        var go = GreyboxSettings.PlaceGreybox(spawnPos, Quaternion.identity, selectedParent);
+        SnapToSurface.BeginSnap(go);
     }
 }
 #endif

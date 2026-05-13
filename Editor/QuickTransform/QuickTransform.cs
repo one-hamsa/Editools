@@ -40,7 +40,7 @@ static class QuickTransform
 {
     // ─── Enums ──────────────────────────────────────────────────
 
-    enum Mode { None, Move, Rotate, Scale }
+    enum Mode { None, Move, Rotate, Scale, Special }
     enum Phase { Idle, Ready, Dragging }
     enum HoverKind { None, AllSideFaces, Face, Edge }
 
@@ -124,7 +124,7 @@ static class QuickTransform
     static Phase phase;
 
     // Key tracking
-    static bool wHeld, eHeld, rHeld;
+    static bool wHeld, eHeld, rHeld, qHeld;
     static bool rmbHeld;
     static double modeKeyDownTime;   // EditorApplication.timeSinceStartup when mode key first pressed
     static Mode suppressKeyUpFor;
@@ -194,6 +194,16 @@ static class QuickTransform
     static Vector3   greyboxEdgePlanePoint;  // point on drag plane (= edge midpoint at drag start)
     static int       greyboxEdgeAxisIdx;     // 0=X,1=Y,2=Z — canonical local axis of the locked edge
 
+    // ─── Greybox Extrude State ──────────────────────────────────
+    //
+    // Active when R+MMB drags a new greybox out of an existing greybox face.
+    // extrudeNewGb != null gates extrude behaviour in ApplyDrag and HandleReady/Dragging.
+
+    static Greybox extrudeNewGb;          // the greybox being grown
+    static Vector3 extrudeFaceCenter;     // world-space center of the source face (= pivot of new greybox)
+    static Vector3 extrudeFaceNormal;     // world-space outward normal of the source face
+    static float   extrudeStartMouseDist; // mouse projection distance at drag start
+
     // ─── Undo ─────────────────────────────────────────────────
 
     static int undoGroup;
@@ -261,7 +271,7 @@ static class QuickTransform
 
         if (e.type == EventType.MouseLeaveWindow)
         {
-            wHeld = eHeld = rHeld = false;
+            wHeld = eHeld = rHeld = qHeld = false;
             if (phase == Phase.Dragging)
             {
                 // Commit the drag — treat leaving the window as a normal release
@@ -283,7 +293,7 @@ static class QuickTransform
         // Early-out if disabled via toolbar toggle or overlay hidden
         if (!EditoolsOverlay.IsActive || !Enabled)
         {
-            wHeld = eHeld = rHeld = false;
+            wHeld = eHeld = rHeld = qHeld = false;
             if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
             Tools.hidden = false;
             return;
@@ -291,9 +301,10 @@ static class QuickTransform
 
         if (suppressKeyUpFor != Mode.None && e.type == EventType.KeyUp)
         {
-            bool suppress = (suppressKeyUpFor == Mode.Move   && e.keyCode == KeyCode.W)
-                         || (suppressKeyUpFor == Mode.Rotate && e.keyCode == KeyCode.E)
-                         || (suppressKeyUpFor == Mode.Scale  && e.keyCode == KeyCode.R);
+            bool suppress = (suppressKeyUpFor == Mode.Move    && e.keyCode == KeyCode.W)
+                         || (suppressKeyUpFor == Mode.Rotate  && e.keyCode == KeyCode.E)
+                         || (suppressKeyUpFor == Mode.Scale   && e.keyCode == KeyCode.R)
+                         || (suppressKeyUpFor == Mode.Special && e.keyCode == KeyCode.Q);
             if (suppress) { suppressKeyUpFor = Mode.None; e.Use(); return; }
         }
 
@@ -326,15 +337,12 @@ static class QuickTransform
             DetectHover(sv, e.mousePosition, heldMode);
             if (e.type == EventType.Repaint)
             {
-                // In Move mode with a Greybox: draw the OBB bounding box (same as Rotate/Scale),
-                // then overlay the actual deformed edges so they're separately selectable.
                 if (heldMode == Mode.Move && selected.Length == 1)
                 {
+                    // In Move mode with a Greybox: draw OBB + actual deformed edges for edge-deform hover.
                     var previewGb = selected[0].GetComponent<Greybox>();
                     if (previewGb != null)
                     {
-                        // Suppress edge highlight on OBB when hovering a greybox edge
-                        // (the edge overlay carries the highlight instead).
                         HoverKind boxKind  = hoveredKind == HoverKind.Edge ? HoverKind.None : hoveredKind;
                         int       boxIndex = hoveredKind == HoverKind.Edge ? 0 : hoveredIndex;
                         DrawBoundsBox(boxKind, boxIndex, heldMode, previewGb);
@@ -343,6 +351,12 @@ static class QuickTransform
                     }
                     else
                         DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                }
+                else if (heldMode == Mode.Special && selected.Length == 1)
+                {
+                    // Special mode: always a Greybox (guarded in GetHeldMode). Pass it for deleted-face display.
+                    var previewGb = selected[0].GetComponent<Greybox>();
+                    DrawBoundsBox(hoveredKind, hoveredIndex, heldMode, previewGb);
                 }
                 else
                     DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
@@ -380,12 +394,13 @@ static class QuickTransform
 
         if (e.type == EventType.KeyDown && !e.alt && !e.control && !rmbHeld)
         {
-            bool anyPrev = wHeld || eHeld || rHeld;
+            bool anyPrev = wHeld || eHeld || rHeld || qHeld;
             if (e.keyCode == KeyCode.W) wHeld = true;
             if (e.keyCode == KeyCode.E) eHeld = true;
             if (e.keyCode == KeyCode.R) rHeld = true;
+            if (e.keyCode == KeyCode.Q) qHeld = true;
             // Record timestamp when we first enter a mode key hold
-            if (!anyPrev && (wHeld || eHeld || rHeld))
+            if (!anyPrev && (wHeld || eHeld || rHeld || qHeld))
                 modeKeyDownTime = EditorApplication.timeSinceStartup;
         }
         if (e.type == EventType.KeyUp)
@@ -393,6 +408,7 @@ static class QuickTransform
             if (e.keyCode == KeyCode.W) wHeld = false;
             if (e.keyCode == KeyCode.E) eHeld = false;
             if (e.keyCode == KeyCode.R) rHeld = false;
+            if (e.keyCode == KeyCode.Q) qHeld = false;
         }
     }
 
@@ -401,6 +417,13 @@ static class QuickTransform
         if (wHeld) return Mode.Move;
         if (eHeld) return Mode.Rotate;
         if (rHeld) return Mode.Scale;
+        if (qHeld)
+        {
+            var sel = Selection.transforms;
+            if (sel != null && sel.Length == 1 && sel[0] != null
+                && sel[0].GetComponent<Greybox>() != null)
+                return Mode.Special;
+        }
         return Mode.None;
     }
 
@@ -410,27 +433,85 @@ static class QuickTransform
     {
         if (heldMode == Mode.None) return;
 
-        // W + middle-click: toggle a Greybox face on/off (remove/restore that quad)
-        if (e.type == EventType.MouseDown && e.button == 2
-            && heldMode == Mode.Move && selected.Length == 1)
+        // ── Special mode (Q held): LMB toggles a face, RMB extrudes ──
+        if (heldMode == Mode.Special && selected.Length == 1)
         {
             var gb = selected[0].GetComponent<Greybox>();
-            if (gb != null)
+            if (gb != null && e.type == EventType.MouseDown)
             {
-                ComputeBoundsForMode(selected, Mode.Move);
+                ComputeBoundsForMode(selected, Mode.Special);
                 int face = CheckFaceHandleHover(sv, e.mousePosition);
                 if (face < 0) face = CheckYFaceHover(sv, e.mousePosition);
                 if (face < 0) face = CheckSideFaceHover(sv, e.mousePosition);
-                if (face >= 0)
+
+                if (e.button == 0) // LMB: toggle face
                 {
-                    Undo.RegisterCompleteObjectUndo(gb, "Toggle Greybox Face");
-                    gb.ActiveFaces[face] = !gb.ActiveFaces[face];
-                    gb.RebuildMesh();
-                    EditorUtility.SetDirty(gb);
-                    e.Use();
+                    if (face >= 0)
+                    {
+                        Undo.RegisterCompleteObjectUndo(gb, "Toggle Greybox Face");
+                        gb.ActiveFaces[face] = !gb.ActiveFaces[face];
+                        gb.RebuildMesh();
+                        EditorUtility.SetDirty(gb);
+                        e.Use();
+                    }
+                    return;
+                }
+
+                if (e.button == 1) // RMB: extrude, hiding seam faces
+                {
+                    if (face >= 0)
+                    {
+                        activeMode       = Mode.Special;
+                        dragTargets      = selected;
+                        SnapshotTransforms();
+                        selectionPivot   = ComputePivot();
+                        lockedKind       = HoverKind.Face;
+                        lockedIndex      = face;
+                        dragButton       = 1;
+                        shiftHeldOnPress = false;
+                        didDuplicate     = false;
+
+                        BeginExtrude(gb, face, e.mousePosition, hideFaces: true);
+
+                        phase         = Phase.Ready;
+                        mousePressPos = e.mousePosition;
+
+                        int extrudeCtrlId = GUIUtility.GetControlID(FocusType.Passive);
+                        HandleUtility.AddDefaultControl(extrudeCtrlId);
+                        GUIUtility.hotControl = extrudeCtrlId;
+                        e.Use();
+                    }
+                    return;
+                }
+
+                if (e.button == 2) // MMB: extrude, keeping all faces
+                {
+                    if (face >= 0)
+                    {
+                        activeMode       = Mode.Special;
+                        dragTargets      = selected;
+                        SnapshotTransforms();
+                        selectionPivot   = ComputePivot();
+                        lockedKind       = HoverKind.Face;
+                        lockedIndex      = face;
+                        dragButton       = 2;
+                        shiftHeldOnPress = false;
+                        didDuplicate     = false;
+
+                        BeginExtrude(gb, face, e.mousePosition, hideFaces: false);
+
+                        phase         = Phase.Ready;
+                        mousePressPos = e.mousePosition;
+
+                        int extrudeCtrlId = GUIUtility.GetControlID(FocusType.Passive);
+                        HandleUtility.AddDefaultControl(extrudeCtrlId);
+                        GUIUtility.hotControl = extrudeCtrlId;
+                        e.Use();
+                    }
                     return;
                 }
             }
+            return; // Special mode consumes all other input
         }
 
         if (e.type != EventType.MouseDown) return;
@@ -496,7 +577,7 @@ static class QuickTransform
         }
 
         dragButton = e.button;
-        moveAlongNormal = e.button == 1;
+        moveAlongNormal = e.button == 0 && lockedKind == HoverKind.Face && heldMode == Mode.Move;
         scaleUniform    = e.button == 1 && heldMode == Mode.Scale;
         phase = Phase.Ready;
         mousePressPos = e.mousePosition;
@@ -665,27 +746,44 @@ static class QuickTransform
 
     static void HandleReady(Event e, SceneView sv)
     {
-        if (ModeKeyReleased()) { GUIUtility.hotControl = 0; ResetState(); return; }
+        if (ModeKeyReleased())
+        {
+            GUIUtility.hotControl = 0;
+            if (extrudeNewGb != null) EditorApplication.delayCall += Undo.PerformUndo;
+            ResetState();
+            return;
+        }
 
         if (e.type == EventType.MouseUp && e.button == dragButton)
-        { GUIUtility.hotControl = 0; ResetState(); e.Use(); return; }
+        {
+            GUIUtility.hotControl = 0;
+            if (extrudeNewGb != null) EditorApplication.delayCall += Undo.PerformUndo;
+            ResetState();
+            e.Use();
+            return;
+        }
 
         if (e.type == EventType.MouseDrag && e.button == dragButton)
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
-                    DuplicateAndSwapTargets();
-
-                if (greyboxTarget != null)
+                if (extrudeNewGb != null)
                 {
-                    Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
+                    Undo.RegisterCompleteObjectUndo(extrudeNewGb.transform, "Greybox Extrude");
                 }
                 else
                 {
-                    string undoName = GetUndoName();
-                    foreach (var t in dragTargets)
-                        Undo.RegisterCompleteObjectUndo(t, undoName);
+                    if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
+                        DuplicateAndSwapTargets();
+
+                    if (greyboxTarget != null)
+                        Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
+                    else
+                    {
+                        string undoName = GetUndoName();
+                        foreach (var t in dragTargets)
+                            Undo.RegisterCompleteObjectUndo(t, undoName);
+                    }
                 }
                 undoGroup = Undo.GetCurrentGroup();
 
@@ -744,7 +842,11 @@ static class QuickTransform
             Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
+            // Capture before ResetState clears it
+            GameObject extruded = extrudeNewGb != null ? extrudeNewGb.gameObject : null;
             ResetState();
+            if (extruded != null)
+                Selection.activeObject = extruded;
             e.Use();
             return;
         }
@@ -757,6 +859,7 @@ static class QuickTransform
 
     static void ApplyDrag(Event e, SceneView sv)
     {
+        if (extrudeNewGb != null) { ApplyExtrude(e.mousePosition); sv.Repaint(); return; }
         switch (activeMode)
         {
             case Mode.Move:   ApplyMove(sv, e.mousePosition);   break;
@@ -1160,10 +1263,26 @@ static class QuickTransform
     {
         switch (mode)
         {
-            case Mode.Move:   DetectMoveHover(sv, mousePos);   break;
-            case Mode.Rotate: DetectRotateHover(sv, mousePos); break;
-            case Mode.Scale:  DetectScaleHover(sv, mousePos);  break;
+            case Mode.Move:    DetectMoveHover(sv, mousePos);    break;
+            case Mode.Rotate:  DetectRotateHover(sv, mousePos);  break;
+            case Mode.Scale:   DetectScaleHover(sv, mousePos);   break;
+            case Mode.Special: DetectSpecialHover(sv, mousePos); break;
         }
+    }
+
+    static void DetectSpecialHover(SceneView sv, Vector2 mousePos)
+    {
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
+
+        int yFace = CheckYFaceHover(sv, mousePos);
+        if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
+
+        int sideFace = CheckSideFaceHover(sv, mousePos);
+        if (sideFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = sideFace; return; }
+
+        hoveredKind  = HoverKind.AllSideFaces;
+        hoveredIndex = 0;
     }
 
     static void DetectMoveHover(SceneView sv, Vector2 mousePos)
@@ -1657,16 +1776,18 @@ static class QuickTransform
         didDuplicate        = false;
         greyboxTarget       = null;
         greyboxStartCorners = null;
+        extrudeNewGb        = null;
     }
 
     static bool ModeKeyReleased()
     {
         return activeMode switch
         {
-            Mode.Move   => !wHeld,
-            Mode.Rotate => !eHeld,
-            Mode.Scale  => !rHeld,
-            _           => true
+            Mode.Move    => !wHeld,
+            Mode.Rotate  => !eHeld,
+            Mode.Scale   => !rHeld,
+            Mode.Special => !qHeld,
+            _            => true
         };
     }
 
@@ -1674,10 +1795,11 @@ static class QuickTransform
     {
         return activeMode switch
         {
-            Mode.Move   => "QuickTransform Move",
-            Mode.Rotate => "QuickTransform Rotate",
-            Mode.Scale  => "QuickTransform Scale",
-            _           => "QuickTransform"
+            Mode.Move    => "QuickTransform Move",
+            Mode.Rotate  => "QuickTransform Rotate",
+            Mode.Scale   => "QuickTransform Scale",
+            Mode.Special => "QuickTransform Special",
+            _            => "QuickTransform"
         };
     }
 
@@ -1767,6 +1889,104 @@ static class QuickTransform
         greyboxTarget.Corners[greyboxEdgeCornerB] = greyboxStartCorners[greyboxEdgeCornerB] + localDelta;
         greyboxTarget.RebuildMesh();
         EditorUtility.SetDirty(greyboxTarget);
+    }
+
+    /// <summary>
+    /// Set up extrude state: compute face geometry, spawn the new greybox sized to the face,
+    /// and record the starting mouse projection distance along the face normal.
+    /// Called from HandleIdle before entering Phase.Ready.
+    /// </summary>
+    static void BeginExtrude(Greybox sourceGb, int face, Vector2 mousePos, bool hideFaces = true)
+    {
+        // World corners of the source face
+        Vector3[] wc = sourceGb.GetWorldCorners();
+        int[] ci = FaceCornerIndices[face];
+        Vector3 c0 = wc[ci[0]], c1 = wc[ci[1]], c2 = wc[ci[2]], c3 = wc[ci[3]];
+        extrudeFaceCenter = (c0 + c1 + c2 + c3) * 0.25f;
+
+        // Face normal from winding; verify direction against face index convention
+        extrudeFaceNormal = Vector3.Cross(c1 - c0, c3 - c0).normalized;
+        int   axisIdx = face / 2;
+        float signF   = (face % 2 == 0) ? 1f : -1f;
+        Vector3 localNormal = axisIdx == 0 ? new Vector3(signF, 0, 0)
+                            : axisIdx == 1 ? new Vector3(0, signF, 0)
+                            : new Vector3(0, 0, signF);
+        if (Vector3.Dot(extrudeFaceNormal, sourceGb.transform.TransformDirection(localNormal)) < 0f)
+            extrudeFaceNormal = -extrudeFaceNormal;
+
+        // New greybox rotation: Y+ along face normal, Z aligned to the t-axis edge of the source face
+        // so the extruded greybox's bottom face sits flush and axis-aligned with the source face.
+        Vector3 up   = extrudeFaceNormal;
+        Vector3 tDir = Vector3.ProjectOnPlane(c3 - c0, up); // t-axis edge projected onto face plane
+        if (tDir.sqrMagnitude < 0.0001f)
+            tDir = Vector3.ProjectOnPlane(c1 - c0, up);     // degenerate fallback: try s-axis
+        if (tDir.sqrMagnitude < 0.0001f)
+            tDir = Vector3.ProjectOnPlane(Vector3.forward, up); // last resort
+        Quaternion extrudeRot = Quaternion.LookRotation(tDir.normalized, up);
+
+        // Project face corners onto new greybox's right/forward to get half-extents
+        Vector3 right   = extrudeRot * Vector3.right;
+        Vector3 forward = extrudeRot * Vector3.forward;
+        float maxR = 0f, maxFwd = 0f;
+        foreach (var c in new[] { c0, c1, c2, c3 })
+        {
+            Vector3 offset = c - extrudeFaceCenter;
+            maxR   = Mathf.Max(maxR,   Mathf.Abs(Vector3.Dot(offset, right)));
+            maxFwd = Mathf.Max(maxFwd, Mathf.Abs(Vector3.Dot(offset, forward)));
+        }
+
+        // Hide the source face — it's now an interior seam between the two greyboxes
+        Undo.RegisterCompleteObjectUndo(sourceGb, "Greybox Extrude");
+        if (hideFaces) sourceGb.ActiveFaces[face] = false;
+        sourceGb.RebuildMesh();
+        EditorUtility.SetDirty(sourceGb);
+
+        // Create greybox at face center — pivot-at-bottom means bottom face sits flush with source
+        Transform parent = sourceGb.transform.parent;
+        var go = GreyboxSettings.PlaceGreybox(extrudeFaceCenter, extrudeRot, parent);
+        // Override scale: X/Z match face dimensions, Y starts near-zero and grows with drag
+        go.transform.localScale = new Vector3(maxR * 2f, 0.001f, maxFwd * 2f);
+        extrudeNewGb = go.GetComponent<Greybox>();
+
+        // Inherit source greybox properties
+        var sourceMr = sourceGb.GetComponent<MeshRenderer>();
+        var newMr    = go.GetComponent<MeshRenderer>();
+        if (sourceMr != null && newMr != null)
+        {
+            newMr.sharedMaterial    = sourceMr.sharedMaterial;
+            newMr.shadowCastingMode = sourceMr.shadowCastingMode;
+        }
+        go.layer    = sourceGb.gameObject.layer;
+        go.isStatic = sourceGb.gameObject.isStatic;
+
+        var srcSO = new SerializedObject(sourceGb);
+        var dstSO = new SerializedObject(extrudeNewGb);
+        dstSO.FindProperty("_subdivisionMultiplier").floatValue = srcSO.FindProperty("_subdivisionMultiplier").floatValue;
+        dstSO.FindProperty("_uvTileScale").floatValue           = srcSO.FindProperty("_uvTileScale").floatValue;
+        dstSO.ApplyModifiedPropertiesWithoutUndo();
+        if (hideFaces) extrudeNewGb.ActiveFaces[3] = false; // hide bottom face — seam against source
+        extrudeNewGb.RebuildMesh();
+
+        // Seed the starting projection distance so drag delta starts at zero
+        Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+        extrudeStartMouseDist = ProjectRayOntoLine(mouseRay, extrudeFaceCenter, extrudeFaceNormal);
+    }
+
+    /// <summary>
+    /// Update the extruded greybox height each drag frame.
+    /// Projects the mouse ray onto the line from the face center along the face normal;
+    /// the distance delta becomes scale.y of the new greybox.
+    /// </summary>
+    static void ApplyExtrude(Vector2 mousePos)
+    {
+        if (extrudeNewGb == null) return;
+        Ray   mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+        float dist     = ProjectRayOntoLine(mouseRay, extrudeFaceCenter, extrudeFaceNormal);
+        float height   = Mathf.Max(dist - extrudeStartMouseDist, 0.001f);
+        Vector3 s      = extrudeNewGb.transform.localScale;
+        s.y            = height;
+        extrudeNewGb.transform.localScale = s;
+        EditorUtility.SetDirty(extrudeNewGb.gameObject);
     }
 
     /// <summary>Draw the 12 actual Greybox edges as a wireframe, with optional edge or face highlight.</summary>
@@ -1915,7 +2135,7 @@ static class QuickTransform
             Handles.DrawLine(corners[edge[0]], corners[edge[1]]);
 
         // ── Highlights ──
-        bool faceDeleted = gb != null && mode == Mode.Move
+        bool faceDeleted = gb != null && mode == Mode.Special
             && kind == HoverKind.Face && index >= 0 && index < 6
             && !gb.ActiveFaces[index];
         switch (kind)
@@ -1991,7 +2211,7 @@ static class QuickTransform
             Vector3 center      = GetFaceCenter(face);
             bool    frontFacing = Vector3.Dot(GetFaceNormal(face), camFwd) < 0f;
             bool    hovered     = kind == HoverKind.Face && index == face;
-            bool    deleted     = gb != null && mode == Mode.Move
+            bool    deleted     = gb != null && mode == Mode.Special
                                   && face < gb.ActiveFaces.Length && !gb.ActiveFaces[face];
 
             float sz = HandleUtility.GetHandleSize(center) * 0.045f * (frontFacing ? 1.1f : 0.85f);
@@ -2017,10 +2237,11 @@ static class QuickTransform
     {
         return mode switch
         {
-            Mode.Move   => new Color(1f, 0.8f, 0.2f, alpha),   // yellow-orange
-            Mode.Rotate => new Color(0.2f, 0.9f, 0.2f, alpha), // green
-            Mode.Scale  => new Color(0.5f, 0.5f, 1f, alpha),   // blue-ish
-            _           => new Color(1f, 1f, 1f, alpha),
+            Mode.Move    => new Color(1f, 0.8f, 0.2f, alpha),   // yellow-orange
+            Mode.Rotate  => new Color(0.2f, 0.9f, 0.2f, alpha), // green
+            Mode.Scale   => new Color(0.5f, 0.5f, 1f, alpha),   // blue-ish
+            Mode.Special => new Color(0.9f, 0.3f, 1f, alpha),   // purple
+            _            => new Color(1f, 1f, 1f, alpha),
         };
     }
 

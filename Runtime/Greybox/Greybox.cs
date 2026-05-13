@@ -46,6 +46,13 @@ public class Greybox : MonoBehaviour
              "1 = use manager density as-is. 0 = disable subdivision on this Greybox.")]
     float _subdivisionMultiplier = 1f;
 
+    // ─── UV ─────────────────────────────────────────────────────
+
+    [SerializeField]
+    [Tooltip("UV tiling scale. 1 = one texture repeat per meter of world-space face extent. " +
+             "Higher values tile the texture more tightly.")]
+    float _uvTileScale = 1f;
+
     // ─── Mesh ───────────────────────────────────────────────────
 
     Mesh _mesh;
@@ -198,6 +205,11 @@ public class Greybox : MonoBehaviour
             Vector3 cd = SampleFace(fixedComp, fixedVal, sComp, tComp, 0f, 1f);
             Vector3 faceNormal = Vector3.Cross(cb - ca, cd - ca).normalized;
 
+            // World-space extents along each face axis for UV projection
+            Vector3 lossyScale = transform.lossyScale;
+            float sScale = Mathf.Abs(lossyScale[sComp]);
+            float tScale = Mathf.Abs(lossyScale[tComp]);
+
             // Vertex grid
             for (int j = 0; j < rows; j++)
             {
@@ -206,9 +218,11 @@ public class Greybox : MonoBehaviour
                 {
                     float t   = k / (float)(cols - 1);
                     int   vi  = vBase + j * cols + k;
-                    verts[vi]   = SampleFace(fixedComp, fixedVal, sComp, tComp, s, t);
+                    Vector3 p = SampleFace(fixedComp, fixedVal, sComp, tComp, s, t);
+                    verts[vi]   = p;
                     normals[vi] = faceNormal;
-                    uvs[vi]     = new Vector2(s, t);
+                    uvs[vi]     = new Vector2(p[sComp] * sScale * _uvTileScale,
+                                             p[tComp] * tScale * _uvTileScale);
                 }
             }
 

@@ -38,6 +38,29 @@ public class SnapToSurface : EditorWindow
         }
     }
 
+    /// <summary>
+    /// Programmatically begin snap mode for a given target without registering a
+    /// transform undo. Used by Ctrl+G greybox creation: the caller's
+    /// RegisterCreatedObjectUndo covers the cancel/delete path via PerformUndo.
+    /// </summary>
+    internal static void BeginSnap(GameObject target) {
+        if (isSnapping || target == null)
+            return;
+
+        selectedObject   = target;
+        originalPosition = target.transform.position;
+        originalRotation = target.transform.rotation;
+
+        ignoredObjects.Clear();
+        ignoredObjects.Add(selectedObject);
+        foreach (Transform child in selectedObject.GetComponentsInChildren<Transform>(true))
+            ignoredObjects.Add(child.gameObject);
+
+        isSnapping = true;
+        SceneView.duringSceneGui += OnSceneGUI;
+        SceneView.RepaintAll();
+    }
+
     private static void OnSceneGUI(SceneView sceneView) {
         if (!isSnapping || selectedObject == null) {
             CleanupSnapMode();
