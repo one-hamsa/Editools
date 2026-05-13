@@ -337,7 +337,7 @@ static class QuickTransform
                         // (the edge overlay carries the highlight instead).
                         HoverKind boxKind  = hoveredKind == HoverKind.Edge ? HoverKind.None : hoveredKind;
                         int       boxIndex = hoveredKind == HoverKind.Edge ? 0 : hoveredIndex;
-                        DrawBoundsBox(boxKind, boxIndex, heldMode);
+                        DrawBoundsBox(boxKind, boxIndex, heldMode, previewGb);
                         DrawGreyboxEdgesOnly(previewGb.GetWorldCorners(),
                             hoveredKind == HoverKind.Edge ? hoveredIndex : -1);
                     }
@@ -718,7 +718,7 @@ static class QuickTransform
             if (greyboxTarget != null)
             {
                 // OBB box (no highlights while pre-drag) + locked greybox edge highlighted
-                DrawBoundsBox(HoverKind.None, 0, activeMode);
+                DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
                 DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
             }
             else
@@ -1827,7 +1827,7 @@ static class QuickTransform
         // Greybox edge deform: OBB bounding box + actual edges with the dragged edge highlighted
         if (greyboxTarget != null)
         {
-            DrawBoundsBox(HoverKind.None, 0, activeMode);
+            DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
             DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
             return;
         }
@@ -1899,7 +1899,7 @@ static class QuickTransform
 
     // ─── Box Drawing ────────────────────────────────────────────
 
-    static void DrawBoundsBox(HoverKind kind, int index, Mode mode)
+    static void DrawBoundsBox(HoverKind kind, int index, Mode mode, Greybox gb = null)
     {
         Vector3[] corners = GetBoxCorners();
 
@@ -1915,6 +1915,9 @@ static class QuickTransform
             Handles.DrawLine(corners[edge[0]], corners[edge[1]]);
 
         // ── Highlights ──
+        bool faceDeleted = gb != null && mode == Mode.Move
+            && kind == HoverKind.Face && index >= 0 && index < 6
+            && !gb.ActiveFaces[index];
         switch (kind)
         {
             case HoverKind.AllSideFaces:
@@ -1922,7 +1925,7 @@ static class QuickTransform
                 break;
 
             case HoverKind.Face:
-                DrawFaceHighlight(corners, index, mode);
+                DrawFaceHighlight(corners, index, mode, faceDeleted);
                 break;
 
             case HoverKind.Edge:
@@ -1931,17 +1934,21 @@ static class QuickTransform
         }
 
         // ── Face handles (always on top) ──
-        DrawFaceHandles(kind, index, mode);
+        DrawFaceHandles(kind, index, mode, gb);
     }
 
-    static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode)
+    static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode, bool faceDeleted = false)
     {
         if (face < 0 || face >= 6) return;
         int[] ci = FaceCornerIndices[face];
         Vector3[] verts = { corners[ci[0]], corners[ci[1]], corners[ci[2]], corners[ci[3]] };
 
         Color fill, outline;
-        if (mode == Mode.Scale)
+        if (faceDeleted)
+        {
+            fill = new Color(1f, 0.2f, 0.2f, 0.25f);
+        }
+        else if (mode == Mode.Scale)
         {
             int axisIdx = face / 2;
             fill = axisIdx == 0 ? new Color(1f, 0.3f, 0.3f, 0.25f)
@@ -1966,22 +1973,40 @@ static class QuickTransform
     }
 
     /// <summary>
-    /// Draws a small always-on-top dot handle at each front-facing bounding-box face center.
-    /// Hovered face uses the mode color; all others are dim white.
+    /// Draws a small always-on-top dot handle at each bounding-box face center.
+    /// Front-facing handles are noticeably brighter; back-facing are very faint.
+    /// Deleted faces (greybox move mode) draw red. Hovered face uses the mode color.
     /// </summary>
-    static void DrawFaceHandles(HoverKind kind, int index, Mode mode)
+    static void DrawFaceHandles(HoverKind kind, int index, Mode mode, Greybox gb = null)
     {
         if (Camera.current == null) return;
 
         var prevZ = Handles.zTest;
         Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;
 
+        Vector3 camFwd = Camera.current.transform.forward;
+
         for (int face = 0; face < 6; face++)
         {
-            Vector3 center = GetFaceCenter(face);
-            float sz = HandleUtility.GetHandleSize(center) * 0.045f;
-            bool hovered = kind == HoverKind.Face && index == face;
-            Handles.color = hovered ? GetModeColor(mode, 1f) : new Color(1f, 1f, 1f, 0.5f);
+            Vector3 center      = GetFaceCenter(face);
+            bool    frontFacing = Vector3.Dot(GetFaceNormal(face), camFwd) < 0f;
+            bool    hovered     = kind == HoverKind.Face && index == face;
+            bool    deleted     = gb != null && mode == Mode.Move
+                                  && face < gb.ActiveFaces.Length && !gb.ActiveFaces[face];
+
+            float sz = HandleUtility.GetHandleSize(center) * 0.045f * (frontFacing ? 1.1f : 0.85f);
+
+            Color col;
+            if (hovered)
+                col = deleted
+                    ? new Color(1f, 0.2f, 0.2f, frontFacing ? 1f  : 0.5f)
+                    : GetModeColor(mode,          frontFacing ? 1f  : 0.5f);
+            else if (deleted)
+                col = new Color(1f, 0.2f, 0.2f,  frontFacing ? 0.8f : 0.25f);
+            else
+                col = new Color(1f, 1f,   1f,    frontFacing ? 0.75f : 0.1f);
+
+            Handles.color = col;
             Handles.DotHandleCap(0, center, Quaternion.identity, sz, EventType.Repaint);
         }
 

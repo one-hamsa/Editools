@@ -10,6 +10,7 @@ public class SnapToSurface : EditorWindow
     private static Vector3 originalPosition;
     private static Quaternion originalRotation;
     private static HashSet<GameObject> ignoredObjects = new HashSet<GameObject>();
+    private static GameObject lastHitSurfaceObject;
 
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
@@ -91,6 +92,11 @@ public class SnapToSurface : EditorWindow
             if (ignoredObjects.Contains(obj))
                 continue;
 
+            // Skip objects with no active/enabled MeshRenderer
+            MeshRenderer mr = obj.GetComponent<MeshRenderer>();
+            if (mr == null || !mr.enabled)
+                continue;
+
             Vector3 hitPoint;
             Vector3 hitNormal;
             float hitDistance;
@@ -102,6 +108,7 @@ public class SnapToSurface : EditorWindow
                     closestHitPoint = hitPoint;
                     closestHitNormal = hitNormal;
                     foundHit = true;
+                    lastHitSurfaceObject = obj;
                 }
             }
         }
@@ -134,6 +141,9 @@ public class SnapToSurface : EditorWindow
     }
 
     private static void ExitSnapMode(bool confirm) {
+        if (confirm && lastHitSurfaceObject != null)
+            Debug.Log($"[SnapToSurface] Aligned to surface: {lastHitSurfaceObject.name}");
+
         if (!confirm && selectedObject != null) {
             // Revert via undo so no stale undo entry remains
             Undo.PerformUndo();
@@ -147,6 +157,7 @@ public class SnapToSurface : EditorWindow
         SceneView.duringSceneGui -= OnSceneGUI;
         ignoredObjects.Clear();
         selectedObject = null;
+        lastHitSurfaceObject = null;
         SceneView.RepaintAll();
     }
 

@@ -10,6 +10,12 @@ using UnityEngine;
 ///   bit2 = Z sign (0=negative, 1=positive)
 ///
 /// Default shape: 1×1×1 unit cube, Y range [0,1], XZ range [-0.5, 0.5].
+///
+/// Adaptive subdivision: a GreyboxManager anywhere above in the hierarchy
+/// supplies a vertex density (verts/meter). The mesh is subdivided per local
+/// axis to approach that density, using the world-space bounding-box extents.
+/// Edit-time: rebuilt whenever scale or manager density changes.
+/// Runtime: built once on OnEnable, never again.
 /// </summary>
 [ExecuteAlways]
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
@@ -33,21 +39,45 @@ public class Greybox : MonoBehaviour
 
     public bool[] ActiveFaces => _activeFaces;
 
+    // ─── Subdivision ────────────────────────────────────────────
+
+    [SerializeField]
+    [Tooltip("Coefficient applied to the GreyboxManager's vertex density. " +
+             "1 = use manager density as-is. 0 = disable subdivision on this Greybox.")]
+    float _subdivisionMultiplier = 1f;
+
     // ─── Mesh ───────────────────────────────────────────────────
 
     Mesh _mesh;
 
-    static readonly int[][] FaceCornerIndices =
+    // Per face: [fixedComp, fixedVal, sComp, tComp]
+    //   fixedComp: which uvw component is constant (0=u/X, 1=v/Y, 2=w/Z)
+    //   fixedVal:  0 or 1
+    //   sComp:     uvw component the row parameter maps to
+    //   tComp:     uvw component the col parameter maps to
+    //
+    // Grid vertex [j][k]: uvw[fixedComp]=fixedVal, uvw[sComp]=j/(rows-1), uvw[tComp]=k/(cols-1)
+    // Winding produces outward normals matching the face axis direction.
+    static readonly int[,] s_faceParams = new int[6, 4]
     {
-        new[] { 1, 3, 7, 5 }, // face 0: +X
-        new[] { 0, 4, 6, 2 }, // face 1: -X
-        new[] { 2, 6, 7, 3 }, // face 2: +Y
-        new[] { 0, 1, 5, 4 }, // face 3: -Y
-        new[] { 4, 5, 7, 6 }, // face 4: +Z
-        new[] { 0, 2, 3, 1 }, // face 5: -Z
+        { 0, 1, 1, 2 }, // face 0 (+X): u=1, s→v(Y), t→w(Z)
+        { 0, 0, 2, 1 }, // face 1 (-X): u=0, s→w(Z), t→v(Y)
+        { 1, 1, 2, 0 }, // face 2 (+Y): v=1, s→w(Z), t→u(X)
+        { 1, 0, 0, 2 }, // face 3 (-Y): v=0, s→u(X), t→w(Z)
+        { 2, 1, 0, 1 }, // face 4 (+Z): w=1, s→u(X), t→v(Y)
+        { 2, 0, 1, 0 }, // face 5 (-Z): w=0, s→v(Y), t→u(X)
     };
 
-    // ─── Unity lifecycle ────────────────────────────────────────
+    // ─── Edit-time dirty tracking ────────────────────────────────
+
+#if UNITY_EDITOR
+    GreyboxManager _cachedManager;
+    float          _cachedDensity  = -1f;
+    Vector3        _cachedScale;
+    bool           _rebuildPending;
+#endif
+
+    // ─── Unity lifecycle ─────────────────────────────────────────
 
     void OnEnable()
     {
@@ -59,8 +89,14 @@ public class Greybox : MonoBehaviour
     void OnValidate()
     {
         ValidateArrays();
+#if UNITY_EDITOR
+        // sharedMesh assignment triggers SendMessage which is forbidden inside OnValidate.
+        // Defer to the next Update tick instead.
+        _rebuildPending = true;
+#else
         EnsureMesh();
         RebuildMesh();
+#endif
     }
 
 #if UNITY_EDITOR
@@ -69,6 +105,33 @@ public class Greybox : MonoBehaviour
         _corners     = DefaultCorners();
         _activeFaces = DefaultActiveFaces();
         EnsureMesh();
+        RebuildMesh();
+    }
+
+    void Update()
+    {
+        if (_rebuildPending)
+        {
+            _rebuildPending = false;
+            EnsureMesh();
+            RebuildMesh();
+            // Refresh cache so the density/scale check below doesn't fire again immediately
+            _cachedManager = GetComponentInParent<GreyboxManager>();
+            _cachedDensity = _cachedManager != null ? _cachedManager.VertexDensity : 0f;
+            _cachedScale   = transform.lossyScale;
+            return;
+        }
+
+        var   manager = GetComponentInParent<GreyboxManager>();
+        float density = manager != null ? manager.VertexDensity : 0f;
+        var   scale   = transform.lossyScale;
+
+        if (manager == _cachedManager && density == _cachedDensity && scale == _cachedScale)
+            return;
+
+        _cachedManager = manager;
+        _cachedDensity = density;
+        _cachedScale   = scale;
         RebuildMesh();
     }
 #endif
@@ -81,59 +144,95 @@ public class Greybox : MonoBehaviour
             _activeFaces = DefaultActiveFaces();
     }
 
-    // ─── Public API ─────────────────────────────────────────────
+    // ─── Public API ──────────────────────────────────────────────
 
-    /// <summary>Rebuild the procedural mesh from current corner positions and active-face flags.</summary>
+    /// <summary>Rebuild the procedural mesh from current corner positions, active-face flags, and subdivision.</summary>
     public void RebuildMesh()
     {
         ValidateArrays();
         EnsureMesh();
 
-        int activeFaceCount = 0;
-        for (int f = 0; f < 6; f++)
-            if (_activeFaces[f]) activeFaceCount++;
+        float effective = ComputeEffectiveDensity();
 
-        var verts   = new Vector3[activeFaceCount * 4];
-        var normals = new Vector3[activeFaceCount * 4];
-        var uvs     = new Vector2[activeFaceCount * 4];
-        var tris    = new int[activeFaceCount * 6];
+        // Pre-compute per-face grid sizes based on actual face edge lengths
+        var faceRows = new int[6];
+        var faceCols = new int[6];
+        for (int face = 0; face < 6; face++)
+        {
+            if (!_activeFaces[face]) continue;
+            ComputeFaceCuts(face, effective, out int sc, out int tc);
+            faceRows[face] = sc + 2;
+            faceCols[face] = tc + 2;
+        }
+
+        // Count total verts and tris across all active faces
+        int totalVerts = 0, totalTris = 0;
+        for (int face = 0; face < 6; face++)
+        {
+            if (!_activeFaces[face]) continue;
+            totalVerts += faceRows[face] * faceCols[face];
+            totalTris  += (faceRows[face] - 1) * (faceCols[face] - 1) * 2;
+        }
+
+        var verts   = new Vector3[totalVerts];
+        var normals = new Vector3[totalVerts];
+        var uvs     = new Vector2[totalVerts];
+        var tris    = new int[totalTris * 3];
 
         int vBase = 0, tBase = 0;
+
         for (int face = 0; face < 6; face++)
         {
             if (!_activeFaces[face]) continue;
 
-            int[] ci = FaceCornerIndices[face];
-            Vector3 a = _corners[ci[0]];
-            Vector3 b = _corners[ci[1]];
-            Vector3 c = _corners[ci[2]];
-            Vector3 d = _corners[ci[3]];
+            int fixedComp = s_faceParams[face, 0];
+            int fixedVal  = s_faceParams[face, 1];
+            int sComp     = s_faceParams[face, 2];
+            int tComp     = s_faceParams[face, 3];
+            int rows      = faceRows[face];
+            int cols      = faceCols[face];
 
-            verts[vBase]     = a;
-            verts[vBase + 1] = b;
-            verts[vBase + 2] = c;
-            verts[vBase + 3] = d;
+            // Flat face normal from deformed corners at (s=0,t=0), (s=1,t=0), (s=0,t=1)
+            Vector3 ca = SampleFace(fixedComp, fixedVal, sComp, tComp, 0f, 0f);
+            Vector3 cb = SampleFace(fixedComp, fixedVal, sComp, tComp, 1f, 0f);
+            Vector3 cd = SampleFace(fixedComp, fixedVal, sComp, tComp, 0f, 1f);
+            Vector3 faceNormal = Vector3.Cross(cb - ca, cd - ca).normalized;
 
-            Vector3 n = Vector3.Cross(b - a, d - a).normalized;
-            normals[vBase]     = n;
-            normals[vBase + 1] = n;
-            normals[vBase + 2] = n;
-            normals[vBase + 3] = n;
+            // Vertex grid
+            for (int j = 0; j < rows; j++)
+            {
+                float s = j / (float)(rows - 1);
+                for (int k = 0; k < cols; k++)
+                {
+                    float t   = k / (float)(cols - 1);
+                    int   vi  = vBase + j * cols + k;
+                    verts[vi]   = SampleFace(fixedComp, fixedVal, sComp, tComp, s, t);
+                    normals[vi] = faceNormal;
+                    uvs[vi]     = new Vector2(s, t);
+                }
+            }
 
-            uvs[vBase]     = new Vector2(0, 0);
-            uvs[vBase + 1] = new Vector2(1, 0);
-            uvs[vBase + 2] = new Vector2(1, 1);
-            uvs[vBase + 3] = new Vector2(0, 1);
+            // Quad triangles
+            for (int j = 0; j < rows - 1; j++)
+            {
+                for (int k = 0; k < cols - 1; k++)
+                {
+                    int v0 = vBase + j       * cols + k;
+                    int v1 = vBase + (j + 1) * cols + k;
+                    int v2 = vBase + (j + 1) * cols + (k + 1);
+                    int v3 = vBase + j       * cols + (k + 1);
 
-            tris[tBase]     = vBase;
-            tris[tBase + 1] = vBase + 1;
-            tris[tBase + 2] = vBase + 2;
-            tris[tBase + 3] = vBase;
-            tris[tBase + 4] = vBase + 2;
-            tris[tBase + 5] = vBase + 3;
+                    tris[tBase]     = v0;
+                    tris[tBase + 1] = v1;
+                    tris[tBase + 2] = v2;
+                    tris[tBase + 3] = v0;
+                    tris[tBase + 4] = v2;
+                    tris[tBase + 5] = v3;
+                    tBase += 6;
+                }
+            }
 
-            vBase += 4;
-            tBase += 6;
+            vBase += rows * cols;
         }
 
         _mesh.Clear();
@@ -159,13 +258,73 @@ public class Greybox : MonoBehaviour
         return result;
     }
 
-    // ─── Helpers ─────────────────────────────────────────────────
+    // ─── Subdivision ─────────────────────────────────────────────
+
+    float ComputeEffectiveDensity()
+    {
+        float multiplier = Mathf.Max(0f, _subdivisionMultiplier);
+        if (multiplier == 0f) return 0f;
+        var manager = GetComponentInParent<GreyboxManager>();
+        float density = manager != null ? manager.VertexDensity : 0f;
+        return density * multiplier;
+    }
+
+    // Returns per-face edge-loop cuts based on the actual world-space edge lengths
+    // of that face's two parametric directions. Takes the longer of the two opposite
+    // edges in each direction so sheared faces don't get under-subdivided.
+    void ComputeFaceCuts(int face, float effective, out int sCuts, out int tCuts)
+    {
+        if (effective <= 0f) { sCuts = 0; tCuts = 0; return; }
+
+        int fixedComp = s_faceParams[face, 0];
+        int fixedVal  = s_faceParams[face, 1];
+        int sComp     = s_faceParams[face, 2];
+        int tComp     = s_faceParams[face, 3];
+
+        Vector3 p00 = SampleFace(fixedComp, fixedVal, sComp, tComp, 0f, 0f);
+        Vector3 p10 = SampleFace(fixedComp, fixedVal, sComp, tComp, 1f, 0f);
+        Vector3 p01 = SampleFace(fixedComp, fixedVal, sComp, tComp, 0f, 1f);
+        Vector3 p11 = SampleFace(fixedComp, fixedVal, sComp, tComp, 1f, 1f);
+
+        float sLen = (transform.TransformVector(p10 - p00).magnitude
+                    + transform.TransformVector(p11 - p01).magnitude) * 0.5f;
+        float tLen = (transform.TransformVector(p01 - p00).magnitude
+                    + transform.TransformVector(p11 - p10).magnitude) * 0.5f;
+
+        sCuts = Mathf.Max(1, Mathf.RoundToInt(sLen * effective)) - 1;
+        tCuts = Mathf.Max(1, Mathf.RoundToInt(tLen * effective)) - 1;
+    }
+
+    // Trilinear interpolation of the 8 corners.
+    // u = X param [0,1], v = Y param [0,1], w = Z param [0,1]
+    Vector3 TriLerp(float u, float v, float w)
+    {
+        Vector3 c00 = Vector3.Lerp(_corners[0], _corners[1], u);
+        Vector3 c10 = Vector3.Lerp(_corners[2], _corners[3], u);
+        Vector3 c01 = Vector3.Lerp(_corners[4], _corners[5], u);
+        Vector3 c11 = Vector3.Lerp(_corners[6], _corners[7], u);
+        return Vector3.Lerp(Vector3.Lerp(c00, c10, v), Vector3.Lerp(c01, c11, v), w);
+    }
+
+    // Samples a local-space position on a face at parametric (s, t).
+    Vector3 SampleFace(int fixedComp, int fixedVal, int sComp, int tComp, float s, float t)
+    {
+        float[] uvw    = new float[3];
+        uvw[fixedComp] = fixedVal;
+        uvw[sComp]     = s;
+        uvw[tComp]     = t;
+        return TriLerp(uvw[0], uvw[1], uvw[2]);
+    }
+
+    // ─── Mesh lifecycle ───────────────────────────────────────────
 
     void EnsureMesh()
     {
         if (_mesh != null) return;
         _mesh = new Mesh { name = "Greybox Mesh", hideFlags = HideFlags.HideAndDontSave };
     }
+
+    // ─── Defaults ────────────────────────────────────────────────
 
     public static Vector3[] DefaultCorners()
     {

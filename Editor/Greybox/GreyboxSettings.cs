@@ -299,6 +299,8 @@ static class GreyboxCreationShortcut
         {
             if (mf.sharedMesh == null) continue;
             if (mf.GetComponent<Greybox>() != null) continue; // skip existing greyboxes
+            var mr = mf.GetComponent<MeshRenderer>();
+            if (mr == null || !mr.enabled) continue;
 
             if (RaycastMesh(ray, mf, out Vector3 p, out Vector3 n, out float d) && d < closest)
             {
