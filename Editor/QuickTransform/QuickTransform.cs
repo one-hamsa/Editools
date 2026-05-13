@@ -769,7 +769,7 @@ static class QuickTransform
             {
                 if (extrudeNewGb != null)
                 {
-                    Undo.RegisterCompleteObjectUndo(extrudeNewGb.transform, "Greybox Extrude");
+                    Undo.RegisterCompleteObjectUndo(extrudeNewGb, "Greybox Extrude");
                 }
                 else
                 {
@@ -1914,41 +1914,50 @@ static class QuickTransform
         if (Vector3.Dot(extrudeFaceNormal, sourceGb.transform.TransformDirection(localNormal)) < 0f)
             extrudeFaceNormal = -extrudeFaceNormal;
 
-        // New greybox rotation: Y+ along face normal, Z aligned to the t-axis edge of the source face
-        // so the extruded greybox's bottom face sits flush and axis-aligned with the source face.
+        // Rotation: Y+ along face normal, Z along the t-axis edge of the source face
         Vector3 up   = extrudeFaceNormal;
-        Vector3 tDir = Vector3.ProjectOnPlane(c3 - c0, up); // t-axis edge projected onto face plane
-        if (tDir.sqrMagnitude < 0.0001f)
-            tDir = Vector3.ProjectOnPlane(c1 - c0, up);     // degenerate fallback: try s-axis
-        if (tDir.sqrMagnitude < 0.0001f)
-            tDir = Vector3.ProjectOnPlane(Vector3.forward, up); // last resort
+        Vector3 tDir = Vector3.ProjectOnPlane(c3 - c0, up);
+        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(c1 - c0, up);
+        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(Vector3.forward, up);
         Quaternion extrudeRot = Quaternion.LookRotation(tDir.normalized, up);
 
-        // Project face corners onto new greybox's right/forward to get half-extents
-        Vector3 right   = extrudeRot * Vector3.right;
-        Vector3 forward = extrudeRot * Vector3.forward;
-        float maxR = 0f, maxFwd = 0f;
-        foreach (var c in new[] { c0, c1, c2, c3 })
-        {
-            Vector3 offset = c - extrudeFaceCenter;
-            maxR   = Mathf.Max(maxR,   Mathf.Abs(Vector3.Dot(offset, right)));
-            maxFwd = Mathf.Max(maxFwd, Mathf.Abs(Vector3.Dot(offset, forward)));
-        }
-
-        // Hide the source face — it's now an interior seam between the two greyboxes
+        // Modify source
         Undo.RegisterCompleteObjectUndo(sourceGb, "Greybox Extrude");
         if (hideFaces) sourceGb.ActiveFaces[face] = false;
         sourceGb.RebuildMesh();
         EditorUtility.SetDirty(sourceGb);
 
-        // Create greybox at face center — pivot-at-bottom means bottom face sits flush with source
+        // Spawn new greybox at face center with scale=1 — corners encode actual dimensions directly
         Transform parent = sourceGb.transform.parent;
         var go = GreyboxSettings.PlaceGreybox(extrudeFaceCenter, extrudeRot, parent);
-        // Override scale: X/Z match face dimensions, Y starts near-zero and grows with drag
-        go.transform.localScale = new Vector3(maxR * 2f, 0.001f, maxFwd * 2f);
+        go.transform.localScale = Vector3.one;
         extrudeNewGb = go.GetComponent<Greybox>();
 
-        // Inherit source greybox properties
+        // Build 8 corners from the source face world corners.
+        // Each source corner is transformed to the new greybox's local space; its X/Z sign
+        // determines which box corner it maps to (bit0=+X, bit2=+Z), preserving deformed shapes.
+        // Bottom (Y=0) and top (Y=near-zero) start flush; ApplyExtrude grows the top corners.
+        Vector3[] newCorners = Greybox.DefaultCorners();
+        foreach (var sc in new[] { c0, c1, c2, c3 })
+        {
+            Vector3 lc     = go.transform.InverseTransformPoint(sc);
+            int     botIdx = (lc.x >= 0f ? 1 : 0) | (lc.z >= 0f ? 4 : 0);
+            int     topIdx = botIdx | 2;
+            newCorners[botIdx] = new Vector3(lc.x, 0f,     lc.z);
+            newCorners[topIdx] = new Vector3(lc.x, 0.001f, lc.z);
+        }
+
+        // Apply corners + inherited Greybox properties in one SerializedObject pass
+        var srcSO      = new SerializedObject(sourceGb);
+        var dstSO      = new SerializedObject(extrudeNewGb);
+        var cornersArr = dstSO.FindProperty("_corners");
+        for (int i = 0; i < 8; i++)
+            cornersArr.GetArrayElementAtIndex(i).vector3Value = newCorners[i];
+        dstSO.FindProperty("_subdivisionMultiplier").floatValue = srcSO.FindProperty("_subdivisionMultiplier").floatValue;
+        dstSO.FindProperty("_uvTileScale").floatValue           = srcSO.FindProperty("_uvTileScale").floatValue;
+        dstSO.ApplyModifiedPropertiesWithoutUndo();
+
+        // Inherit MeshRenderer and GameObject properties
         var sourceMr = sourceGb.GetComponent<MeshRenderer>();
         var newMr    = go.GetComponent<MeshRenderer>();
         if (sourceMr != null && newMr != null)
@@ -1959,13 +1968,9 @@ static class QuickTransform
         go.layer    = sourceGb.gameObject.layer;
         go.isStatic = sourceGb.gameObject.isStatic;
 
-        var srcSO = new SerializedObject(sourceGb);
-        var dstSO = new SerializedObject(extrudeNewGb);
-        dstSO.FindProperty("_subdivisionMultiplier").floatValue = srcSO.FindProperty("_subdivisionMultiplier").floatValue;
-        dstSO.FindProperty("_uvTileScale").floatValue           = srcSO.FindProperty("_uvTileScale").floatValue;
-        dstSO.ApplyModifiedPropertiesWithoutUndo();
         if (hideFaces) extrudeNewGb.ActiveFaces[3] = false; // hide bottom face — seam against source
         extrudeNewGb.RebuildMesh();
+        EditorUtility.SetDirty(extrudeNewGb);
 
         // Seed the starting projection distance so drag delta starts at zero
         Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
@@ -1983,9 +1988,13 @@ static class QuickTransform
         Ray   mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
         float dist     = ProjectRayOntoLine(mouseRay, extrudeFaceCenter, extrudeFaceNormal);
         float height   = Mathf.Max(dist - extrudeStartMouseDist, 0.001f);
-        Vector3 s      = extrudeNewGb.transform.localScale;
-        s.y            = height;
-        extrudeNewGb.transform.localScale = s;
+        var corners = extrudeNewGb.Corners;
+        for (int i = 0; i < 8; i++)
+        {
+            if ((i & 2) != 0) // top corner: bit1 set
+                corners[i] = new Vector3(corners[i].x, height, corners[i].z);
+        }
+        extrudeNewGb.RebuildMesh();
         EditorUtility.SetDirty(extrudeNewGb.gameObject);
     }
 
