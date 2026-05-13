@@ -180,6 +180,20 @@ static class QuickTransform
     static bool    scaleUniform;                // RMB = uniform scale
     static float   scaleUniformStartScreenDist; // starting screen-space distance from anchor to mouse
 
+    // ─── Greybox Edge Deform State ──────────────────────────────
+    //
+    // Active only when dragging an edge on a Greybox in Move mode.
+    // greyboxTarget != null signals that ApplyMove should deform instead of translate.
+
+    static Greybox   greyboxTarget;
+    static Vector3[] greyboxStartCorners;    // corner snapshot at drag start
+    static int       greyboxEdgeCornerA;     // index of first corner of the edge
+    static int       greyboxEdgeCornerB;     // index of second corner of the edge
+    static Vector3   greyboxEdgeHitStart;    // world-space raycast hit when drag began
+    static Vector3   greyboxEdgePlaneNormal; // normal of drag plane (canonical local axis of the edge)
+    static Vector3   greyboxEdgePlanePoint;  // point on drag plane (= edge midpoint at drag start)
+    static int       greyboxEdgeAxisIdx;     // 0=X,1=Y,2=Z — canonical local axis of the locked edge
+
     // ─── Undo ─────────────────────────────────────────────────
 
     static int undoGroup;
@@ -308,11 +322,31 @@ static class QuickTransform
             && (EditorApplication.timeSinceStartup - modeKeyDownTime) >= ModeKeyDelaySec;
         if (showPreview)
         {
-            ComputeBounds(selected);
+            ComputeBoundsForMode(selected, heldMode);
             DetectHover(sv, e.mousePosition, heldMode);
             if (e.type == EventType.Repaint)
             {
-                DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                // In Move mode with a Greybox: draw the OBB bounding box (same as Rotate/Scale),
+                // then overlay the actual deformed edges so they're separately selectable.
+                if (heldMode == Mode.Move && selected.Length == 1)
+                {
+                    var previewGb = selected[0].GetComponent<Greybox>();
+                    if (previewGb != null)
+                    {
+                        // Suppress edge highlight on OBB when hovering a greybox edge
+                        // (the edge overlay carries the highlight instead).
+                        HoverKind boxKind  = hoveredKind == HoverKind.Edge ? HoverKind.None : hoveredKind;
+                        int       boxIndex = hoveredKind == HoverKind.Edge ? 0 : hoveredIndex;
+                        DrawBoundsBox(boxKind, boxIndex, heldMode);
+                        DrawGreyboxEdgesOnly(previewGb.GetWorldCorners(),
+                            hoveredKind == HoverKind.Edge ? hoveredIndex : -1);
+                    }
+                    else
+                        DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                }
+                else
+                    DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+
                 if (hoveredKind == HoverKind.AllSideFaces)
                 {
                     if (heldMode == Mode.Move)        DrawWorldMoveGizmo(boundsCenter);
@@ -375,6 +409,30 @@ static class QuickTransform
     static void HandleIdle(Event e, SceneView sv, Transform[] selected, Mode heldMode)
     {
         if (heldMode == Mode.None) return;
+
+        // W + middle-click: toggle a Greybox face on/off (remove/restore that quad)
+        if (e.type == EventType.MouseDown && e.button == 2
+            && heldMode == Mode.Move && selected.Length == 1)
+        {
+            var gb = selected[0].GetComponent<Greybox>();
+            if (gb != null)
+            {
+                ComputeBoundsForMode(selected, Mode.Move);
+                int face = CheckFaceHandleHover(sv, e.mousePosition);
+                if (face < 0) face = CheckYFaceHover(sv, e.mousePosition);
+                if (face < 0) face = CheckSideFaceHover(sv, e.mousePosition);
+                if (face >= 0)
+                {
+                    Undo.RegisterCompleteObjectUndo(gb, "Toggle Greybox Face");
+                    gb.ActiveFaces[face] = !gb.ActiveFaces[face];
+                    gb.RebuildMesh();
+                    EditorUtility.SetDirty(gb);
+                    e.Use();
+                    return;
+                }
+            }
+        }
+
         if (e.type != EventType.MouseDown) return;
         if (e.button != 0 && e.button != 1) return;
 
@@ -387,10 +445,29 @@ static class QuickTransform
         selectionPivot = ComputePivot();
 
         // Lock hover result
-        ComputeBounds(dragTargets);
+        ComputeBoundsForMode(dragTargets, activeMode);
         DetectHover(sv, e.mousePosition, activeMode);
         lockedKind  = hoveredKind;
         lockedIndex = hoveredIndex;
+
+        // W + RMB on a Greybox edge: reset that edge to default, no drag
+        if (e.button == 1 && heldMode == Mode.Move && lockedKind == HoverKind.Edge && dragTargets.Length == 1)
+        {
+            var gb = dragTargets[0].GetComponent<Greybox>();
+            if (gb != null)
+            {
+                Undo.RegisterCompleteObjectUndo(gb, "Reset Greybox Edge");
+                int[] ec  = EdgeCornerIndices[lockedIndex];
+                var   def = Greybox.DefaultCorners();
+                gb.Corners[ec[0]] = def[ec[0]];
+                gb.Corners[ec[1]] = def[ec[1]];
+                gb.RebuildMesh();
+                EditorUtility.SetDirty(gb);
+                activeMode = Mode.None; dragTargets = null;
+                startPositions = null; startRotations = null; startScales = null;
+                e.Use(); return;
+            }
+        }
 
         // RMB drag requires a face to lock onto — except Scale which allows outside-box
         if (e.button == 1 && lockedKind != HoverKind.Face)
@@ -444,6 +521,33 @@ static class QuickTransform
 
     static void InitMove(SceneView sv, Vector2 mousePos)
     {
+        // Greybox edge deform: set up drag plane perpendicular to the edge axis
+        if (lockedKind == HoverKind.Edge && dragTargets.Length == 1)
+        {
+            var gb = dragTargets[0].GetComponent<Greybox>();
+            if (gb != null)
+            {
+                greyboxTarget       = gb;
+                greyboxStartCorners = (Vector3[])gb.Corners.Clone();
+                int[] ec            = EdgeCornerIndices[lockedIndex];
+                greyboxEdgeCornerA  = ec[0];
+                greyboxEdgeCornerB  = ec[1];
+
+                Vector3[] wc           = gb.GetWorldCorners();
+                greyboxEdgePlanePoint  = (wc[greyboxEdgeCornerA] + wc[greyboxEdgeCornerB]) * 0.5f;
+                // Plane normal = canonical local axis of the edge (lockedIndex/4), not the
+                // actual edge direction. For a default cube these are identical, but they diverge
+                // after deformation — using the local axis keeps the drag plane stable.
+                greyboxEdgeAxisIdx     = lockedIndex / 4;
+                greyboxEdgePlaneNormal = greyboxEdgeAxisIdx == 0 ? gb.transform.right
+                                      : greyboxEdgeAxisIdx == 1 ? gb.transform.up
+                                      : gb.transform.forward;
+
+                RaycastPlane(mousePos, greyboxEdgePlanePoint, greyboxEdgePlaneNormal, out greyboxEdgeHitStart);
+                return;
+            }
+        }
+
         if (lockedKind == HoverKind.Face)
         {
             movePlaneNormal = GetFaceNormal(lockedIndex);
@@ -570,12 +674,19 @@ static class QuickTransform
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                if (shiftHeldOnPress && !didDuplicate)
+                if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
                     DuplicateAndSwapTargets();
 
-                string undoName = GetUndoName();
-                foreach (var t in dragTargets)
-                    Undo.RegisterCompleteObjectUndo(t, undoName);
+                if (greyboxTarget != null)
+                {
+                    Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
+                }
+                else
+                {
+                    string undoName = GetUndoName();
+                    foreach (var t in dragTargets)
+                        Undo.RegisterCompleteObjectUndo(t, undoName);
+                }
                 undoGroup = Undo.GetCurrentGroup();
 
                 phase = Phase.Dragging;
@@ -603,10 +714,19 @@ static class QuickTransform
         // Draw the locked bounding box (+ rotation gizmo) while waiting for drag threshold
         if (e.type == EventType.Repaint)
         {
-            ComputeBounds(dragTargets);
-            DrawBoundsBox(lockedKind, lockedIndex, activeMode);
-            if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
-                DrawRotationGizmo(sv);
+            ComputeBoundsForMode(dragTargets, activeMode);
+            if (greyboxTarget != null)
+            {
+                // OBB box (no highlights while pre-drag) + locked greybox edge highlighted
+                DrawBoundsBox(HoverKind.None, 0, activeMode);
+                DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
+            }
+            else
+            {
+                DrawBoundsBox(lockedKind, lockedIndex, activeMode);
+                if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
+                    DrawRotationGizmo(sv);
+            }
         }
 
         if (IsMouseEvent(e)) e.Use();
@@ -648,6 +768,12 @@ static class QuickTransform
 
     static void ApplyMove(SceneView sv, Vector2 mousePos)
     {
+        if (greyboxTarget != null)
+        {
+            ApplyGreyboxEdgeMove(mousePos);
+            return;
+        }
+
         if (moveAlongNormal)
         {
             // RMB face drag: movement locked along face normal
@@ -744,7 +870,7 @@ static class QuickTransform
         }
 
         // ── Verify and correct: guarantee anchor face stays pixel-perfect ──
-        ComputeBounds(dragTargets);
+        ComputeBoundsForMode(dragTargets, activeMode);
         int axisIdx = lockedIndex / 2;
         float signF = (lockedIndex % 2 == 0) ? 1f : -1f;
         // The anchor is the face OPPOSITE to the locked face
@@ -836,6 +962,57 @@ static class QuickTransform
 
         for (int i = 0; i < 3; i++)
             boundsExtents[i] = Mathf.Max(boundsExtents[i], MinBoundsExtent);
+    }
+
+    /// <summary>
+    /// OBB aligned to the object's local axes, built by projecting the Greybox's actual
+    /// deformed world corners onto those axes. Tightly encloses whatever shape the user
+    /// has dragged the corners into. Used for all modes so the box always fits the geometry.
+    /// </summary>
+    static void ComputeGreyboxDeformedOBB(Greybox gb)
+    {
+        var t  = gb.transform;
+        boundsAxes = new[] { t.right, t.up, t.forward };
+
+        Vector3[] wc = gb.GetWorldCorners();
+        float minR = float.MaxValue, maxR = float.MinValue;
+        float minU = float.MaxValue, maxU = float.MinValue;
+        float minF = float.MaxValue, maxF = float.MinValue;
+
+        foreach (var w in wc)
+        {
+            float r = Vector3.Dot(w, boundsAxes[0]);
+            float u = Vector3.Dot(w, boundsAxes[1]);
+            float f = Vector3.Dot(w, boundsAxes[2]);
+            if (r < minR) minR = r; if (r > maxR) maxR = r;
+            if (u < minU) minU = u; if (u > maxU) maxU = u;
+            if (f < minF) minF = f; if (f > maxF) maxF = f;
+        }
+
+        float cR = (minR + maxR) * 0.5f;
+        float cU = (minU + maxU) * 0.5f;
+        float cF = (minF + maxF) * 0.5f;
+        boundsCenter  = boundsAxes[0] * cR + boundsAxes[1] * cU + boundsAxes[2] * cF;
+        boundsExtents = new[]
+        {
+            Mathf.Max((maxR - minR) * 0.5f, MinBoundsExtent),
+            Mathf.Max((maxU - minU) * 0.5f, MinBoundsExtent),
+            Mathf.Max((maxF - minF) * 0.5f, MinBoundsExtent),
+        };
+    }
+
+    /// <summary>
+    /// Dispatches to ComputeGreyboxDeformedOBB for a single Greybox (all modes),
+    /// otherwise falls back to ComputeBounds.
+    /// </summary>
+    static void ComputeBoundsForMode(Transform[] targets, Mode mode)
+    {
+        if (targets != null && targets.Length == 1)
+        {
+            var gb = targets[0]?.GetComponent<Greybox>();
+            if (gb != null) { ComputeGreyboxDeformedOBB(gb); return; }
+        }
+        ComputeBounds(targets);
     }
 
     /// <summary>
@@ -991,6 +1168,14 @@ static class QuickTransform
 
     static void DetectMoveHover(SceneView sv, Vector2 mousePos)
     {
+        // Face handles override everything
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
+
+        // Greybox: edge hover — dragging an edge deforms the mesh
+        int gbEdge = GetActiveGreyboxEdge(mousePos);
+        if (gbEdge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = gbEdge; return; }
+
         // Y face hover → axis-locked Y movement
         int yFace = CheckYFaceHover(sv, mousePos);
         if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
@@ -1006,8 +1191,12 @@ static class QuickTransform
 
     static void DetectRotateHover(SceneView sv, Vector2 mousePos)
     {
-        // Edge proximity first (highest priority)
-        int edge = DetectNearestEdge(sv, mousePos);
+        // Face handles override everything
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
+
+        // Edge proximity
+        int edge = DetectNearestEdge(mousePos);
         if (edge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = edge; return; }
 
         // Y face hover
@@ -1025,6 +1214,10 @@ static class QuickTransform
 
     static void DetectScaleHover(SceneView sv, Vector2 mousePos)
     {
+        // Face handles override everything
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
+
         // Y face hover (exact polygon hit)
         int yFace = CheckYFaceHover(sv, mousePos);
         if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
@@ -1043,6 +1236,26 @@ static class QuickTransform
         // Quadrant for side faces (always picks one)
         hoveredKind  = HoverKind.Face;
         hoveredIndex = GetQuadrantFace(sv, mousePos);
+    }
+
+    /// <summary>
+    /// Returns the face index (0-5) if the mouse is within 2× EdgeHoverPx of any
+    /// front-facing face handle (face center dot), or -1 otherwise.
+    /// Takes priority over all other face-selection methods.
+    /// </summary>
+    static int CheckFaceHandleHover(SceneView sv, Vector2 mousePos)
+    {
+        float threshold = EdgeHoverPx * 2f;
+        int   bestFace  = -1;
+        float bestDist  = threshold;
+
+        for (int face = 0; face < 6; face++)
+        {
+            Vector2 s = HandleUtility.WorldToGUIPoint(GetFaceCenter(face));
+            float dist = Vector2.Distance(mousePos, s);
+            if (dist < bestDist) { bestDist = dist; bestFace = face; }
+        }
+        return bestFace;
     }
 
     /// <summary>Check if mouse is within EdgeHoverPx of a front-facing Y face's edges.</summary>
@@ -1180,8 +1393,8 @@ static class QuickTransform
         return bestFace;
     }
 
-    /// <summary>Find the nearest front-facing edge within threshold pixels, or -1.</summary>
-    static int DetectNearestEdge(SceneView sv, Vector2 mousePos)
+    /// <summary>Find the nearest edge within threshold pixels, or -1.</summary>
+    static int DetectNearestEdge(Vector2 mousePos)
     {
         Vector3[] corners = GetBoxCorners();
         float threshold = EdgeHoverPx;
@@ -1328,6 +1541,26 @@ static class QuickTransform
         new[] {0,4}, new[] {1,5}, new[] {2,6}, new[] {3,7}, // along axis 2
     };
 
+    /// <summary>
+    /// The two face indices adjacent to each edge (index matches EdgeCornerIndices).
+    /// Derived from FaceCornerIndices — both corners of the edge must appear in the face.
+    /// </summary>
+    static readonly int[][] EdgeFaceAdjacency =
+    {
+        new[] {3, 5}, // edge  0: {0,1} → -Y, -Z
+        new[] {2, 5}, // edge  1: {2,3} → +Y, -Z
+        new[] {3, 4}, // edge  2: {4,5} → -Y, +Z
+        new[] {2, 4}, // edge  3: {6,7} → +Y, +Z
+        new[] {1, 5}, // edge  4: {0,2} → -X, -Z
+        new[] {0, 5}, // edge  5: {1,3} → +X, -Z
+        new[] {1, 4}, // edge  6: {4,6} → -X, +Z
+        new[] {0, 4}, // edge  7: {5,7} → +X, +Z
+        new[] {1, 3}, // edge  8: {0,4} → -X, -Y
+        new[] {0, 3}, // edge  9: {1,5} → +X, -Y
+        new[] {1, 2}, // edge 10: {2,6} → -X, +Y
+        new[] {0, 2}, // edge 11: {3,7} → +X, +Y
+    };
+
     static Vector3[] GetFaceWorldCorners(int face)
     {
         Vector3[] all = GetBoxCorners();
@@ -1420,8 +1653,10 @@ static class QuickTransform
         moveAlongNormal = false;
         scaleUniform = false;
         dragButton = 0;
-        shiftHeldOnPress = false;
-        didDuplicate = false;
+        shiftHeldOnPress    = false;
+        didDuplicate        = false;
+        greyboxTarget       = null;
+        greyboxStartCorners = null;
     }
 
     static bool ModeKeyReleased()
@@ -1452,13 +1687,150 @@ static class QuickTransform
             || e.type == EventType.MouseUp   || e.type == EventType.MouseMove;
     }
 
+    // ─── Greybox Edge Helpers ───────────────────────────────────
+
+    /// <summary>
+    /// Returns the edge index nearest to mousePos on the active single Greybox, or -1.
+    /// Uses the Greybox's actual world corners (not the OBB) so deformed shapes stay correct.
+    /// Skips backface edges based on camera direction.
+    /// </summary>
+    static int GetActiveGreyboxEdge(Vector2 mousePos)
+    {
+        Transform t = null;
+        if (dragTargets != null && dragTargets.Length == 1)  t = dragTargets[0];
+        else if (Selection.transforms?.Length == 1)          t = Selection.transforms[0];
+        if (t == null) return -1;
+
+        var gb = t.GetComponent<Greybox>();
+        if (gb == null) return -1;
+
+        return DetectNearestGreyboxEdge(gb.GetWorldCorners(), mousePos);
+    }
+
+    /// <summary>Find the nearest Greybox edge within EdgeHoverPx in screen space.</summary>
+    static int DetectNearestGreyboxEdge(Vector3[] wc, Vector2 mousePos)
+    {
+        float threshold = EdgeHoverPx;
+        int   bestEdge  = -1;
+        float bestDist  = threshold;
+
+        for (int ei = 0; ei < 12; ei++)
+        {
+            int[] ec = EdgeCornerIndices[ei];
+            Vector2 a = HandleUtility.WorldToGUIPoint(wc[ec[0]]);
+            Vector2 b = HandleUtility.WorldToGUIPoint(wc[ec[1]]);
+            float dist = DistPointToSegment2D(mousePos, a, b);
+            if (dist < bestDist) { bestDist = dist; bestEdge = ei; }
+        }
+        return bestEdge;
+    }
+
+    /// <summary>
+    /// Returns true if at least one of the edge's two adjacent faces is front-facing,
+    /// using actual face normals computed from the Greybox's world corners.
+    /// </summary>
+    static bool IsGreyboxEdgeVisible(Vector3[] wc, int edgeIdx, Vector3 camFwd)
+    {
+        foreach (int face in EdgeFaceAdjacency[edgeIdx])
+        {
+            int[] ci = FaceCornerIndices[face];
+            Vector3 n = Vector3.Cross(wc[ci[1]] - wc[ci[0]], wc[ci[2]] - wc[ci[0]]).normalized;
+            if (Vector3.Dot(n, camFwd) < 0f) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Move the two Greybox corners of the locked edge by projecting the mouse ray
+    /// onto the plane perpendicular to the edge axis.
+    /// </summary>
+    static void ApplyGreyboxEdgeMove(Vector2 mousePos)
+    {
+        if (greyboxTarget == null || greyboxStartCorners == null) return;
+        if (!RaycastPlane(mousePos, greyboxEdgePlanePoint, greyboxEdgePlaneNormal, out Vector3 hit)) return;
+
+        Vector3 worldDelta = hit - greyboxEdgeHitStart;
+        Vector3 localDelta = greyboxTarget.transform.InverseTransformVector(worldDelta);
+
+        // Shift held: snap movement to the dominant free local axis
+        if (Event.current.shift)
+        {
+            int a = (greyboxEdgeAxisIdx + 1) % 3;
+            int b = (greyboxEdgeAxisIdx + 2) % 3;
+            if (Mathf.Abs(localDelta[a]) >= Mathf.Abs(localDelta[b]))
+                localDelta[b] = 0f;
+            else
+                localDelta[a] = 0f;
+        }
+
+        greyboxTarget.Corners[greyboxEdgeCornerA] = greyboxStartCorners[greyboxEdgeCornerA] + localDelta;
+        greyboxTarget.Corners[greyboxEdgeCornerB] = greyboxStartCorners[greyboxEdgeCornerB] + localDelta;
+        greyboxTarget.RebuildMesh();
+        EditorUtility.SetDirty(greyboxTarget);
+    }
+
+    /// <summary>Draw the 12 actual Greybox edges as a wireframe, with optional edge or face highlight.</summary>
+    static void DrawGreyboxWireframe(Vector3[] wc, HoverKind kind, int index, Mode mode)
+    {
+        Handles.color = new Color(1f, 1f, 1f, 0.25f);
+        for (int ei = 0; ei < 12; ei++)
+        {
+            int[] ec = EdgeCornerIndices[ei];
+            Handles.DrawLine(wc[ec[0]], wc[ec[1]]);
+        }
+
+        if (kind == HoverKind.Edge)
+        {
+            int[] ec = EdgeCornerIndices[index];
+            Handles.color = GetModeColor(mode, 0.9f);
+            Handles.DrawLine(wc[ec[0]], wc[ec[1]], 4f);
+        }
+        else if (kind == HoverKind.Face && index >= 0 && index < 6)
+        {
+            int[] ci = FaceCornerIndices[index];
+            Vector3[] verts  = { wc[ci[0]], wc[ci[1]], wc[ci[2]], wc[ci[3]] };
+            Color     fill   = GetModeColor(mode, 0.2f);
+            Color     outline = fill; outline.a = 0.9f;
+            Handles.DrawSolidRectangleWithOutline(verts, fill, outline);
+        }
+    }
+
+    /// <summary>
+    /// Draws the 12 actual Greybox edges as an overlay over the OBB bounding box.
+    /// highlightEdge >= 0 draws that edge brighter and thicker (edge-deform hover).
+    /// </summary>
+    static void DrawGreyboxEdgesOnly(Vector3[] wc, int highlightEdge)
+    {
+        Handles.color = new Color(1f, 1f, 1f, 0.6f);
+        for (int ei = 0; ei < 12; ei++)
+        {
+            if (ei == highlightEdge) continue;
+            int[] ec = EdgeCornerIndices[ei];
+            Handles.DrawLine(wc[ec[0]], wc[ec[1]]);
+        }
+        if (highlightEdge >= 0)
+        {
+            int[] ec = EdgeCornerIndices[highlightEdge];
+            Handles.color = GetModeColor(Mode.Move, 0.9f);
+            Handles.DrawLine(wc[ec[0]], wc[ec[1]], 4f);
+        }
+    }
+
     // ─── Visual Feedback ────────────────────────────────────────
 
     static void DrawFeedback(SceneView sv)
     {
         if (dragTargets == null) return;
 
-        ComputeBounds(dragTargets);
+        ComputeBoundsForMode(dragTargets, activeMode);
+
+        // Greybox edge deform: OBB bounding box + actual edges with the dragged edge highlighted
+        if (greyboxTarget != null)
+        {
+            DrawBoundsBox(HoverKind.None, 0, activeMode);
+            DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
+            return;
+        }
         DrawBoundsBox(lockedKind, lockedIndex, activeMode);
 
         // Rotation gizmo: circle + line from pivot to mouse
@@ -1557,6 +1929,9 @@ static class QuickTransform
                 DrawEdgeHighlight(corners, index, mode);
                 break;
         }
+
+        // ── Face handles (always on top) ──
+        DrawFaceHandles(kind, index, mode);
     }
 
     static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode)
@@ -1588,6 +1963,29 @@ static class QuickTransform
         Color c = GetModeColor(mode, 0.9f);
         Handles.color = c;
         Handles.DrawLine(corners[ec[0]], corners[ec[1]], 4f);
+    }
+
+    /// <summary>
+    /// Draws a small always-on-top dot handle at each front-facing bounding-box face center.
+    /// Hovered face uses the mode color; all others are dim white.
+    /// </summary>
+    static void DrawFaceHandles(HoverKind kind, int index, Mode mode)
+    {
+        if (Camera.current == null) return;
+
+        var prevZ = Handles.zTest;
+        Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;
+
+        for (int face = 0; face < 6; face++)
+        {
+            Vector3 center = GetFaceCenter(face);
+            float sz = HandleUtility.GetHandleSize(center) * 0.045f;
+            bool hovered = kind == HoverKind.Face && index == face;
+            Handles.color = hovered ? GetModeColor(mode, 1f) : new Color(1f, 1f, 1f, 0.5f);
+            Handles.DotHandleCap(0, center, Quaternion.identity, sz, EventType.Repaint);
+        }
+
+        Handles.zTest = prevZ;
     }
 
     static Color GetModeColor(Mode mode, float alpha)

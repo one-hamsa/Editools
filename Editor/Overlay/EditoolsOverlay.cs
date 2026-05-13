@@ -1151,7 +1151,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 8 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 9 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1216,6 +1216,15 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Shows a live FPS counter in the top-left corner of each Scene View. " +
 		"Displays average FPS and frame time in milliseconds. Tracked independently per view.");
 
+	static readonly GUIContent k_Greybox = new GUIContent(
+		"Greybox",
+		"Deformable box primitives for level blockout.\n" +
+		"Create via GameObject > 3D Object > Greybox, or press Ctrl+G in the Scene View.\n\n" +
+		"Ctrl+G — places a new Greybox on the surface under the cursor, " +
+		"pivot on the surface, Y aligned to the surface normal.\n\n" +
+		"Hold W over an edge to deform that edge.\n\n" +
+		"Click ▸ to set the default material for new Greyboxes.");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1247,6 +1256,25 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
 			v => SceneViewFpsCounter.Enabled = v, null);
+
+		DrawSubmenuOnlyRow(k_Greybox,
+			rect => UnityEditor.PopupWindow.Show(rect, new GreyboxSettingsPopup()));
+	}
+
+	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
+	{
+		EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
+		GUILayout.Space(20);
+		if (GUILayout.Button(label, s_rowButtonStyle))
+		{
+			// editorWindow.position is screen-space. Inside OnGUI, GUIToScreenRect adds
+			// the popup's screen origin, so we pass (win.width, 0) in GUI space to land
+			// at (win.xMax, win.yMin) in screen space — opening to the right of the settings popup.
+			Rect win = editorWindow != null ? editorWindow.position : new Rect(200, 300, 200, 202);
+			onSubmenu?.Invoke(new Rect(win.width, 0f, 0f, 0f));
+		}
+		GUILayout.Label("▸", s_arrowStyle, GUILayout.Width(16));
+		EditorGUILayout.EndHorizontal();
 	}
 
 	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,

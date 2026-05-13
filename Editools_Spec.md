@@ -13,10 +13,12 @@ with screenshot capture, and a set of scene editing accelerators.
 
 ### Runtime
 - `Runtime/MaterialOverride/SceneMaterialOverride.cs` — centralized scene material swapping
+- `Runtime/Greybox/Greybox.cs` — deformable box primitive; stores 8 local-space corners, rebuilds procedural mesh on change
 - `Runtime/Editools.asmdef` — runtime assembly, all platforms
 
 ### Editor
 - `Editor/Overlay/EditoolsOverlay.cs` — toolbar overlay, screenshot capture, button strip
+- `Editor/Greybox/GreyboxSettings.cs` — per-project default material pref + GameObject/3D Object/Greybox menu item + settings popup
 - `Editor/HierarchyHeatmap/HierarchyHeatmap.cs` — recent-selection heatmap in Hierarchy
 - `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag transform tool
 - `Editor/QuickTransform/QuickTransformConfig.cs` — per-project config SO for QuickTransform
@@ -343,6 +345,43 @@ Live FPS overlay in the top-left corner of each Scene View.
 - Rendered as IMGUI label inside `Handles.BeginGUI()` with semi-transparent black background
 - Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `SceneViewFpsCounter_Enabled`, default false)
 - Continuously calls `sceneView.Repaint()` to keep the counter updating
+
+### 12. Greybox (Runtime + Editor)
+
+Deformable box primitive for level blockout. Created via `GameObject > 3D Object > Greybox`.
+
+**Runtime component (`Greybox.cs`, `[ExecuteAlways]`):**
+- Stores `Vector3[8] _corners` in local space — the 8 deformable corners of the box
+- Corner encoding: `bit0=+X, bit1=+Y, bit2=+Z` (matches QuickTransform's box convention)
+- **Pivot at center-bottom**: default Y range `[0, 1]`, XZ range `[-0.5, 0.5]`
+- Auto-requires `MeshFilter`, `MeshRenderer`, `MeshCollider`
+- `RebuildMesh()` — 6 quads × 2 triangles = 12 tris; per-face vertices for flat normals; UVs 0–1 per face; updates both `MeshFilter.sharedMesh` and `MeshCollider.sharedMesh`
+- `GetWorldCorners()` — returns 8 corners transformed to world space (used by QuickTransform)
+- `_mesh` has `HideFlags.HideAndDontSave` — procedural, not serialized; rebuilt on `OnEnable()` after domain reload
+
+**Editor (`GreyboxSettings.cs`):**
+- `GreyboxSettings.DefaultMaterial` — per-project `EditorPrefs` material (GUID key: `Editools_Greybox_DefaultMatGUID`)
+- `GreyboxSettingsPopup` — single material field, accessible from Editools Settings ▸ Greybox
+- `GreyboxSettings.PlaceGreybox(pos, rot, parent)` — shared creation helper used by both menu item and shortcut
+- Menu item (`GameObject > 3D Object > Greybox`) — creates at origin with identity rotation
+- **Ctrl+G shortcut** (`GreyboxCreationShortcut`, `[InitializeOnLoad]`, context = `SceneView`):
+  - Tracks the last scene-view mouse ray each frame via `SceneView.duringSceneGui` (`MouseMove`/`MouseDrag` events)
+  - On Ctrl+G: fires Möller–Trumbore ray against all active scene `MeshFilter`s (skips existing Greyboxes); on hit, places pivot at surface point with Y aligned to interpolated surface normal and forward derived from world-up projection (same logic as SnapToSurface)
+  - Fallback (no surface hit): places at view-pivot depth along the stored ray, identity rotation
+  - Full undo via `Undo.RegisterCreatedObjectUndo`
+
+**QuickTransform integration (`W` + edge hover on Greybox):**
+- In `DetectMoveHover`: checks for single selected Greybox; if mouse is within `EdgeHoverPx` of an actual mesh edge (actual corners, not OBB), sets `HoverKind.Edge`
+- In `InitMove`: when `HoverKind.Edge` + Greybox → sets up `greyboxTarget`, snapshots corners, computes drag plane (normal = edge direction, point = edge midpoint)
+- In `ApplyMove`: raycasts onto drag plane, converts world delta to local space, modifies both edge corners, calls `RebuildMesh()`, marks dirty
+- `DrawGreyboxWireframe()` — draws 12 actual mesh edges (not OBB) during all hover/drag phases; highlighted edge shown in Move-mode yellow when hovered
+- Undo registered on the `Greybox` component (not Transform); Shift+duplicate skipped for edge drags
+- Face-move and Rotate/Scale modes work normally on Greybox (OBB-based, no special case)
+
+**Design constraints:**
+- Corners are in local space; QuickTransform always converts world delta via `InverseTransformVector` before applying
+- The drag plane is perpendicular to the edge direction — movement is 2D-free on that plane (no single-axis lock)
+- After deformation, OBB face detection (used by Rotate/Scale) may not perfectly match geometry for heavily skewed shapes — acceptable for greyboxing use
 
 ---
 
