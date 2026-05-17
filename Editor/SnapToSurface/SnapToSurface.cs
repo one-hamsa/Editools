@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEditor;
 using UnityEditor.ShortcutManagement;
 using System.Collections.Generic;
+using UnityEngine.Pool;
 
 public class SnapToSurface : EditorWindow
 {
@@ -11,6 +12,18 @@ public class SnapToSurface : EditorWindow
     private static Quaternion originalRotation;
     private static HashSet<GameObject> ignoredObjects = new HashSet<GameObject>();
     private static GameObject lastHitSurfaceObject;
+
+    // Per-session scene snapshot built on snap entry so MouseMove doesn't have to
+    // FindObjectsOfType<MeshFilter>() and re-fetch mesh.vertices/triangles every frame
+    // (mesh.vertices returns a fresh array each call — that was the GC hotspot).
+    struct SnapMeshEntry
+    {
+        public Transform     transform;
+        public List<Vector3> vertices;
+        public List<int>     triangles;
+        public List<Vector3> normals;
+    }
+    private static readonly List<SnapMeshEntry> s_snapMeshes = new();
 
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
@@ -31,6 +44,8 @@ public class SnapToSurface : EditorWindow
             foreach (Transform child in selectedObject.GetComponentsInChildren<Transform>(true)) {
                 ignoredObjects.Add(child.gameObject);
             }
+
+            BuildSnapMeshCache();
 
             isSnapping = true;
             SceneView.duringSceneGui += OnSceneGUI;
@@ -56,9 +71,68 @@ public class SnapToSurface : EditorWindow
         foreach (Transform child in selectedObject.GetComponentsInChildren<Transform>(true))
             ignoredObjects.Add(child.gameObject);
 
+        BuildSnapMeshCache();
+
         isSnapping = true;
         SceneView.duringSceneGui += OnSceneGUI;
         SceneView.RepaintAll();
+    }
+
+    /// <summary>
+    /// Build a per-session snapshot of all eligible meshes in the scene. This is done
+    /// once on snap entry instead of on every MouseMove. Vertex/triangle/normal lists
+    /// are taken from UnityEngine.Pool.ListPool — they get returned on cleanup so
+    /// repeated snap sessions reuse the same buffers.
+    /// </summary>
+    private static void BuildSnapMeshCache() {
+        ReleaseSnapMeshCache();
+
+        var meshFilters = GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
+        foreach (var mf in meshFilters) {
+            GameObject obj = mf.gameObject;
+            if (ignoredObjects.Contains(obj))
+                continue;
+
+            MeshRenderer mr = mf.GetComponent<MeshRenderer>();
+            if (mr == null || !mr.enabled)
+                continue;
+
+            Mesh mesh = mf.sharedMesh;
+            if (mesh == null)
+                continue;
+
+            var verts = ListPool<Vector3>.Get();
+            var tris  = ListPool<int>.Get();
+            var norms = ListPool<Vector3>.Get();
+
+            mesh.GetVertices(verts);
+            mesh.GetNormals(norms);
+
+            // Aggregate all submeshes' triangles to preserve the original
+            // mesh.triangles-flattened behaviour.
+            for (int sm = 0; sm < mesh.subMeshCount; sm++) {
+                var smTris = ListPool<int>.Get();
+                mesh.GetTriangles(smTris, sm);
+                tris.AddRange(smTris);
+                ListPool<int>.Release(smTris);
+            }
+
+            s_snapMeshes.Add(new SnapMeshEntry {
+                transform = mf.transform,
+                vertices  = verts,
+                triangles = tris,
+                normals   = norms,
+            });
+        }
+    }
+
+    private static void ReleaseSnapMeshCache() {
+        foreach (var entry in s_snapMeshes) {
+            ListPool<Vector3>.Release(entry.vertices);
+            ListPool<int>.Release(entry.triangles);
+            ListPool<Vector3>.Release(entry.normals);
+        }
+        s_snapMeshes.Clear();
     }
 
     private static void OnSceneGUI(SceneView sceneView) {
@@ -100,38 +174,22 @@ public class SnapToSurface : EditorWindow
 
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePosition);
 
-        // Find all mesh filters in the scene
-        MeshFilter[] allMeshFilters = GameObject.FindObjectsOfType<MeshFilter>();
-
         float closestDistance = float.MaxValue;
         Vector3 closestHitPoint = Vector3.zero;
         Vector3 closestHitNormal = Vector3.up;
         bool foundHit = false;
 
-        foreach (MeshFilter meshFilter in allMeshFilters) {
-            GameObject obj = meshFilter.gameObject;
+        for (int i = 0; i < s_snapMeshes.Count; i++) {
+            var entry = s_snapMeshes[i];
+            if (entry.transform == null) continue;
 
-            // Skip if this is the selected object or its children
-            if (ignoredObjects.Contains(obj))
-                continue;
-
-            // Skip objects with no active/enabled MeshRenderer
-            MeshRenderer mr = obj.GetComponent<MeshRenderer>();
-            if (mr == null || !mr.enabled)
-                continue;
-
-            Vector3 hitPoint;
-            Vector3 hitNormal;
-            float hitDistance;
-
-            if (RaycastMesh(ray, obj, out hitPoint, out hitNormal, out hitDistance)) {
-                // Use the actual distance along the ray from camera
+            if (RaycastMesh(ray, entry, out Vector3 hitPoint, out Vector3 hitNormal, out float hitDistance)) {
                 if (hitDistance < closestDistance) {
                     closestDistance = hitDistance;
                     closestHitPoint = hitPoint;
                     closestHitNormal = hitNormal;
                     foundHit = true;
-                    lastHitSurfaceObject = obj;
+                    lastHitSurfaceObject = entry.transform.gameObject;
                 }
             }
         }
@@ -179,40 +237,34 @@ public class SnapToSurface : EditorWindow
         isSnapping = false;
         SceneView.duringSceneGui -= OnSceneGUI;
         ignoredObjects.Clear();
+        ReleaseSnapMeshCache();
         selectedObject = null;
         lastHitSurfaceObject = null;
         SceneView.RepaintAll();
     }
 
-    private static bool RaycastMesh(Ray ray, GameObject target, out Vector3 hitPoint, out Vector3 hitNormal, out float hitDistance) {
+    private static bool RaycastMesh(Ray ray, SnapMeshEntry entry, out Vector3 hitPoint, out Vector3 hitNormal, out float hitDistance) {
         hitPoint = Vector3.zero;
         hitNormal = Vector3.up;
         hitDistance = float.MaxValue;
 
-        MeshFilter meshFilter = target.GetComponent<MeshFilter>();
-        if (meshFilter == null || meshFilter.sharedMesh == null)
-            return false;
-
-        Mesh mesh = meshFilter.sharedMesh;
-        Transform transform = target.transform;
-
-        Vector3[] vertices = mesh.vertices;
-        int[] triangles = mesh.triangles;
-        Vector3[] normals = mesh.normals;
+        Transform transform = entry.transform;
+        var vertices  = entry.vertices;
+        var triangles = entry.triangles;
+        var normals   = entry.normals;
 
         float closestT = float.MaxValue;
         bool hitFound = false;
         Vector3 closestLocalHitPoint = Vector3.zero;
         int closestTriIndex = 0;
 
-        // Check all triangles
-        for (int i = 0; i < triangles.Length; i += 3) {
+        int triCount = triangles.Count;
+        for (int i = 0; i < triCount; i += 3) {
             Vector3 v0 = transform.TransformPoint(vertices[triangles[i]]);
             Vector3 v1 = transform.TransformPoint(vertices[triangles[i + 1]]);
             Vector3 v2 = transform.TransformPoint(vertices[triangles[i + 2]]);
 
-            float t;
-            if (RayIntersectsTriangle(ray, v0, v1, v2, out t)) {
+            if (RayIntersectsTriangle(ray, v0, v1, v2, out float t)) {
                 if (t < closestT) {
                     closestT = t;
                     hitFound = true;
@@ -226,7 +278,6 @@ public class SnapToSurface : EditorWindow
             hitPoint = closestLocalHitPoint;
             hitDistance = closestT;
 
-            // Calculate interpolated normal in world space
             Vector3 v0 = transform.TransformPoint(vertices[triangles[closestTriIndex]]);
             Vector3 v1 = transform.TransformPoint(vertices[triangles[closestTriIndex + 1]]);
             Vector3 v2 = transform.TransformPoint(vertices[triangles[closestTriIndex + 2]]);

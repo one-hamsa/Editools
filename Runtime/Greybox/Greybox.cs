@@ -267,9 +267,15 @@ public class Greybox : MonoBehaviour
     public Vector3[] GetWorldCorners()
     {
         var result = new Vector3[8];
-        for (int i = 0; i < 8; i++)
-            result[i] = transform.TransformPoint(_corners[i]);
+        GetWorldCorners(result);
         return result;
+    }
+
+    /// <summary>Fills the provided buffer (length 8) with the 8 corners in world space.</summary>
+    public void GetWorldCorners(Vector3[] dst)
+    {
+        for (int i = 0; i < 8; i++)
+            dst[i] = transform.TransformPoint(_corners[i]);
     }
 
     // ─── Subdivision ─────────────────────────────────────────────

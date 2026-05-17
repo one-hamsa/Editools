@@ -46,6 +46,27 @@ public static class HierarchyHeatmap
     private static MethodInfo projectIsExpandedMethod;
     private static bool projectReflectionSetup = false;
 
+    // Resolved-object caches. Walking markedHierarchyItems / recentHierarchySelections
+    // and calling EditorUtility.InstanceIDToObject for every entry on every row redraw
+    // (hundreds of rows * 5-10 entries) is what makes this expensive. We rebuild
+    // these caches lazily when the source lists change, then per-row code just
+    // walks the cached Transforms/strings.
+    private static Transform[] s_markedHierarchyTransforms = System.Array.Empty<Transform>();
+    private static Transform[] s_recentHierarchyTransforms = System.Array.Empty<Transform>();
+    private static string[]    s_markedProjectPaths       = System.Array.Empty<string>();
+    private static string[]    s_recentProjectPaths       = System.Array.Empty<string>();
+    private static bool s_markedHierarchyDirty = true;
+    private static bool s_recentHierarchyDirty = true;
+    private static bool s_markedProjectDirty   = true;
+    private static bool s_recentProjectDirty   = true;
+
+    // Latches so reflection-failure warnings only fire once per session, not once per
+    // hierarchy/project row every repaint.
+    private static bool s_warnedHierarchyReflectionSetup;
+    private static bool s_warnedHierarchyIsExpanded;
+    private static bool s_warnedProjectReflectionSetup;
+    private static bool s_warnedProjectIsExpanded;
+
     static HierarchyHeatmap() {
         // Load enabled state from EditorPrefs
         enabled = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false);
@@ -60,16 +81,20 @@ public static class HierarchyHeatmap
         // Load marked items
         LoadMarkedItems();
 
-        // Hook into selection changed event
+        // Defensive -= before += so an unexpected re-entry into the static ctor
+        // (or a previously-subscribed handler that survives domain reload) can't
+        // double up. Unity normally clears these on reload, but the duplicate-sub
+        // category of bug is silent and expensive, so the redundancy is worth it.
+        Selection.selectionChanged -= OnSelectionChanged;
         Selection.selectionChanged += OnSelectionChanged;
 
-        // Hook into hierarchy item GUI drawing
+        EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyItemGUI;
         EditorApplication.hierarchyWindowItemOnGUI += OnHierarchyItemGUI;
 
-        // Hook into project item GUI drawing
+        EditorApplication.projectWindowItemOnGUI -= OnProjectItemGUI;
         EditorApplication.projectWindowItemOnGUI += OnProjectItemGUI;
 
-        // Hook into update for polling active folder
+        EditorApplication.update -= OnUpdate;
         EditorApplication.update += OnUpdate;
 
         // Setup reflection for active folder path
@@ -84,8 +109,52 @@ public static class HierarchyHeatmap
         projectBrowserType = assembly.GetType("UnityEditor.ProjectBrowser");
 
         // Reset on play mode change or scene change
+        EditorApplication.playModeStateChanged -= OnPlayModeChanged;
         EditorApplication.playModeStateChanged += OnPlayModeChanged;
+        SceneManager.sceneLoaded -= OnSceneLoaded;
         SceneManager.sceneLoaded += OnSceneLoaded;
+    }
+
+    // ─── Resolved-object caches (rebuilt lazily on dirty) ────────
+
+    private static void EnsureMarkedHierarchyTransforms() {
+        if (!s_markedHierarchyDirty) return;
+        if (s_markedHierarchyTransforms.Length != markedHierarchyItems.Count)
+            s_markedHierarchyTransforms = new Transform[markedHierarchyItems.Count];
+        for (int i = 0; i < markedHierarchyItems.Count; i++) {
+            var go = EditorUtility.InstanceIDToObject(markedHierarchyItems[i]) as GameObject;
+            s_markedHierarchyTransforms[i] = go != null ? go.transform : null;
+        }
+        s_markedHierarchyDirty = false;
+    }
+
+    private static void EnsureRecentHierarchyTransforms() {
+        if (!s_recentHierarchyDirty) return;
+        if (s_recentHierarchyTransforms.Length != recentHierarchySelections.Count)
+            s_recentHierarchyTransforms = new Transform[recentHierarchySelections.Count];
+        for (int i = 0; i < recentHierarchySelections.Count; i++) {
+            var go = EditorUtility.InstanceIDToObject(recentHierarchySelections[i]) as GameObject;
+            s_recentHierarchyTransforms[i] = go != null ? go.transform : null;
+        }
+        s_recentHierarchyDirty = false;
+    }
+
+    private static void EnsureMarkedProjectPaths() {
+        if (!s_markedProjectDirty) return;
+        if (s_markedProjectPaths.Length != markedProjectItems.Count)
+            s_markedProjectPaths = new string[markedProjectItems.Count];
+        for (int i = 0; i < markedProjectItems.Count; i++)
+            s_markedProjectPaths[i] = AssetDatabase.GUIDToAssetPath(markedProjectItems[i]);
+        s_markedProjectDirty = false;
+    }
+
+    private static void EnsureRecentProjectPaths() {
+        if (!s_recentProjectDirty) return;
+        if (s_recentProjectPaths.Length != recentProjectSelections.Count)
+            s_recentProjectPaths = new string[recentProjectSelections.Count];
+        for (int i = 0; i < recentProjectSelections.Count; i++)
+            s_recentProjectPaths[i] = AssetDatabase.GUIDToAssetPath(recentProjectSelections[i]);
+        s_recentProjectDirty = false;
     }
 
     private static void LoadSettings() {
@@ -168,6 +237,9 @@ public static class HierarchyHeatmap
                 }
             }
         }
+
+        s_markedHierarchyDirty = true;
+        s_markedProjectDirty = true;
     }
 
     private static void SaveMarkedItems() {
@@ -230,6 +302,7 @@ public static class HierarchyHeatmap
         if (markedHierarchyItems.Count > maxMarked) {
             markedHierarchyItems.RemoveAt(0); // Remove oldest
         }
+        s_markedHierarchyDirty = true;
     }
 
     private static void AddMarkedProjectItem(string guid) {
@@ -238,12 +311,15 @@ public static class HierarchyHeatmap
         if (markedProjectItems.Count > maxMarked) {
             markedProjectItems.RemoveAt(0); // Remove oldest
         }
+        s_markedProjectDirty = true;
     }
 
     [Shortcut("Editools/Clear All Heatmap Marks", KeyCode.D, ShortcutModifiers.Alt | ShortcutModifiers.Shift)]
     private static void ClearAllMarks() {
         markedHierarchyItems.Clear();
         markedProjectItems.Clear();
+        s_markedHierarchyDirty = true;
+        s_markedProjectDirty = true;
         SaveMarkedItems();
         EditorApplication.RepaintHierarchyWindow();
         EditorApplication.RepaintProjectWindow();
@@ -357,6 +433,7 @@ public static class HierarchyHeatmap
         if (recentHierarchySelections.Count > maxRecent) {
             recentHierarchySelections.RemoveAt(0);
         }
+        s_recentHierarchyDirty = true;
     }
 
     private static void AddOrUpdateRecentProject(string guid) {
@@ -365,6 +442,7 @@ public static class HierarchyHeatmap
         if (recentProjectSelections.Count > maxRecent) {
             recentProjectSelections.RemoveAt(0);
         }
+        s_recentProjectDirty = true;
     }
 
     private static void OnHierarchyItemGUI(int instanceID, Rect selectionRect) {
@@ -376,7 +454,10 @@ public static class HierarchyHeatmap
             try {
                 SetupHierarchyReflection();
             } catch (Exception e) {
-                Debug.LogWarning("HierarchyHeatmap: Failed to setup hierarchy reflection: " + e.Message);
+                if (!s_warnedHierarchyReflectionSetup) {
+                    Debug.LogWarning("HierarchyHeatmap: Failed to setup hierarchy reflection: " + e.Message);
+                    s_warnedHierarchyReflectionSetup = true;
+                }
             }
             hierarchyReflectionSetup = true;
         }
@@ -389,17 +470,23 @@ public static class HierarchyHeatmap
             try {
                 isExpanded = (bool)isExpandedMethod.Invoke(hierarchyTreeViewController, new object[] { instanceID });
             } catch (Exception e) {
-                Debug.LogWarning("HierarchyHeatmap: Failed to check IsExpanded for hierarchy item: " + e.Message);
+                if (!s_warnedHierarchyIsExpanded) {
+                    Debug.LogWarning("HierarchyHeatmap: Failed to check IsExpanded for hierarchy item: " + e.Message);
+                    s_warnedHierarchyIsExpanded = true;
+                }
                 isExpanded = true;
             }
         }
 
-        // Check for marked children in collapsed parents
+        // Check for marked children in collapsed parents. Uses the cached
+        // Transform array so we don't InstanceIDToObject per row per repaint.
         if (hasChildren && !isExpanded && !isMarked) {
-            foreach (int markedID in markedHierarchyItems) {
-                if (markedID == instanceID) continue; // Skip self
-                GameObject markedGO = EditorUtility.InstanceIDToObject(markedID) as GameObject;
-                if (markedGO != null && markedGO.transform.IsChildOf(go.transform)) {
+            EnsureMarkedHierarchyTransforms();
+            var parentT = go.transform;
+            for (int i = 0; i < markedHierarchyItems.Count; i++) {
+                if (markedHierarchyItems[i] == instanceID) continue; // skip self
+                var markedT = s_markedHierarchyTransforms[i];
+                if (markedT != null && markedT.IsChildOf(parentT)) {
                     isMarked = true;
                     break;
                 }
@@ -419,13 +506,15 @@ public static class HierarchyHeatmap
         int tier = GetHierarchyRecencyTier(instanceID);
 
         if (hasChildren && !isExpanded) {
+            EnsureRecentHierarchyTransforms();
+            var parentT = go.transform;
             int subtreeMax = 0;
             for (int i = recentHierarchySelections.Count - 1; i >= 0; i--) // Iterate from most recent
             {
                 int recentID = recentHierarchySelections[i];
-                if (recentID == instanceID) continue; // Skip self
-                GameObject recentGO = EditorUtility.InstanceIDToObject(recentID) as GameObject;
-                if (recentGO != null && recentGO.transform.IsChildOf(go.transform)) {
+                if (recentID == instanceID) continue;
+                var recentT = s_recentHierarchyTransforms[i];
+                if (recentT != null && recentT.IsChildOf(parentT)) {
                     int childTier = GetHierarchyRecencyTier(recentID);
                     if (childTier > subtreeMax) {
                         subtreeMax = childTier;
@@ -462,7 +551,10 @@ public static class HierarchyHeatmap
             try {
                 SetupProjectTreeReflection();
             } catch (Exception e) {
-                Debug.LogWarning("HierarchyHeatmap: Failed to setup project reflection: " + e.Message);
+                if (!s_warnedProjectReflectionSetup) {
+                    Debug.LogWarning("HierarchyHeatmap: Failed to setup project reflection: " + e.Message);
+                    s_warnedProjectReflectionSetup = true;
+                }
             }
             projectReflectionSetup = true;
         }
@@ -470,27 +562,34 @@ public static class HierarchyHeatmap
         bool isFolder = AssetDatabase.IsValidFolder(path);
         bool isMarked = markedProjectItems.Contains(guid);
 
+        // Compute isExpanded once for folders; original code resolved the folder
+        // and ran the IsExpanded reflection twice per row. Now it runs once.
+        bool isExpanded = true;
         if (isFolder) {
             UnityEngine.Object folderObj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path);
             if (folderObj == null) return;
             int folderInstanceID = folderObj.GetInstanceID();
 
-            bool isExpanded = true; // Fallback to true
             if (projectIsExpandedMethod != null && projectTreeViewController != null) {
                 try {
                     isExpanded = (bool)projectIsExpandedMethod.Invoke(projectTreeViewController, new object[] { folderInstanceID });
                 } catch (Exception e) {
-                    Debug.LogWarning("HierarchyHeatmap: Failed to check IsExpanded for project item: " + e.Message);
+                    if (!s_warnedProjectIsExpanded) {
+                        Debug.LogWarning("HierarchyHeatmap: Failed to check IsExpanded for project item: " + e.Message);
+                        s_warnedProjectIsExpanded = true;
+                    }
                     isExpanded = true;
                 }
             }
 
-            // Check for marked children in collapsed folders
+            // Check for marked children in collapsed folders (uses cached paths).
             if (!isExpanded && !isMarked) {
-                foreach (string markedGuid in markedProjectItems) {
-                    if (markedGuid == guid) continue; // Skip self
-                    string markedPath = AssetDatabase.GUIDToAssetPath(markedGuid);
-                    if (markedPath.StartsWith(path + "/")) {
+                EnsureMarkedProjectPaths();
+                string prefix = path + "/";
+                for (int i = 0; i < markedProjectItems.Count; i++) {
+                    if (markedProjectItems[i] == guid) continue; // Skip self
+                    string markedPath = s_markedProjectPaths[i];
+                    if (!string.IsNullOrEmpty(markedPath) && markedPath.StartsWith(prefix)) {
                         isMarked = true;
                         break;
                     }
@@ -510,38 +609,24 @@ public static class HierarchyHeatmap
 
         int tier = GetProjectRecencyTier(guid);
 
-        if (isFolder) {
-            UnityEngine.Object folderObj = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(path);
-            if (folderObj == null) return;
-            int folderInstanceID = folderObj.GetInstanceID();
-
-            bool isExpanded = true; // Fallback to true
-            if (projectIsExpandedMethod != null && projectTreeViewController != null) {
-                try {
-                    isExpanded = (bool)projectIsExpandedMethod.Invoke(projectTreeViewController, new object[] { folderInstanceID });
-                } catch (Exception e) {
-                    Debug.LogWarning("HierarchyHeatmap: Failed to check IsExpanded for project item: " + e.Message);
-                    isExpanded = true;
-                }
-            }
-
-            if (!isExpanded) {
-                int subtreeMax = 0;
-                for (int i = recentProjectSelections.Count - 1; i >= 0; i--) // Iterate from most recent
-                {
-                    string recentGuid = recentProjectSelections[i];
-                    if (recentGuid == guid) continue; // Skip self
-                    string recentPath = AssetDatabase.GUIDToAssetPath(recentGuid);
-                    if (recentPath.StartsWith(path + "/")) {
-                        int childTier = GetProjectRecencyTier(recentGuid);
-                        if (childTier > subtreeMax) {
-                            subtreeMax = childTier;
-                        }
+        if (isFolder && !isExpanded) {
+            EnsureRecentProjectPaths();
+            string prefix = path + "/";
+            int subtreeMax = 0;
+            for (int i = recentProjectSelections.Count - 1; i >= 0; i--) // Iterate from most recent
+            {
+                string recentGuid = recentProjectSelections[i];
+                if (recentGuid == guid) continue; // Skip self
+                string recentPath = s_recentProjectPaths[i];
+                if (!string.IsNullOrEmpty(recentPath) && recentPath.StartsWith(prefix)) {
+                    int childTier = GetProjectRecencyTier(recentGuid);
+                    if (childTier > subtreeMax) {
+                        subtreeMax = childTier;
                     }
                 }
-                if (subtreeMax > 0) {
-                    tier = Mathf.Max(tier, subtreeMax); // Use max from subtree, in case folder also has tier
-                }
+            }
+            if (subtreeMax > 0) {
+                tier = Mathf.Max(tier, subtreeMax); // Use max from subtree, in case folder also has tier
             }
         }
 
@@ -571,6 +656,8 @@ public static class HierarchyHeatmap
     public static void ResetRecent() {
         recentHierarchySelections.Clear();
         recentProjectSelections.Clear();
+        s_recentHierarchyDirty = true;
+        s_recentProjectDirty = true;
         EditorApplication.RepaintHierarchyWindow();
         EditorApplication.RepaintProjectWindow();
     }
@@ -582,6 +669,10 @@ public static class HierarchyHeatmap
     }
 
     private static void OnSceneLoaded(Scene scene, LoadSceneMode mode) {
+        // Hierarchy InstanceIDs from before scene load are stale — drop caches
+        // so the next per-row pass re-resolves against the new scene.
+        s_markedHierarchyDirty = true;
+        s_recentHierarchyDirty = true;
         ResetRecent();
     }
 }

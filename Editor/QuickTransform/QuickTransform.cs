@@ -346,7 +346,8 @@ static class QuickTransform
                         HoverKind boxKind  = hoveredKind == HoverKind.Edge ? HoverKind.None : hoveredKind;
                         int       boxIndex = hoveredKind == HoverKind.Edge ? 0 : hoveredIndex;
                         DrawBoundsBox(boxKind, boxIndex, heldMode, previewGb);
-                        DrawGreyboxEdgesOnly(previewGb.GetWorldCorners(),
+                        previewGb.GetWorldCorners(s_greyboxCorners);
+                        DrawGreyboxEdgesOnly(s_greyboxCorners,
                             hoveredKind == HoverKind.Edge ? hoveredIndex : -1);
                     }
                     else
@@ -614,8 +615,8 @@ static class QuickTransform
                 greyboxEdgeCornerA  = ec[0];
                 greyboxEdgeCornerB  = ec[1];
 
-                Vector3[] wc           = gb.GetWorldCorners();
-                greyboxEdgePlanePoint  = (wc[greyboxEdgeCornerA] + wc[greyboxEdgeCornerB]) * 0.5f;
+                gb.GetWorldCorners(s_greyboxCorners);
+                greyboxEdgePlanePoint  = (s_greyboxCorners[greyboxEdgeCornerA] + s_greyboxCorners[greyboxEdgeCornerB]) * 0.5f;
                 // Plane normal = canonical local axis of the edge (lockedIndex/4), not the
                 // actual edge direction. For a default cube these are identical, but they diverge
                 // after deformation — using the local axis keeps the drag plane stable.
@@ -817,7 +818,8 @@ static class QuickTransform
             {
                 // OBB box (no highlights while pre-drag) + locked greybox edge highlighted
                 DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
-                DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
+                greyboxTarget.GetWorldCorners(s_greyboxCorners);
+                DrawGreyboxEdgesOnly(s_greyboxCorners, lockedIndex);
             }
             else
             {
@@ -1077,7 +1079,8 @@ static class QuickTransform
         var t  = gb.transform;
         boundsAxes = new[] { t.right, t.up, t.forward };
 
-        Vector3[] wc = gb.GetWorldCorners();
+        gb.GetWorldCorners(s_greyboxCorners);
+        Vector3[] wc = s_greyboxCorners;
         float minR = float.MaxValue, maxR = float.MinValue;
         float minU = float.MaxValue, maxU = float.MinValue;
         float minF = float.MaxValue, maxF = float.MinValue;
@@ -1388,14 +1391,13 @@ static class QuickTransform
             if (Vector3.Dot(normal, camFwd) > 0f) continue;
 
             Vector3[] corners = GetFaceWorldCorners(face);
-            Vector2[] screen = new Vector2[4];
             for (int i = 0; i < 4; i++)
-                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+                s_screenQuad[i] = HandleUtility.WorldToGUIPoint(corners[i]);
 
             // Check distance to each edge of the face quad
             for (int i = 0; i < 4; i++)
             {
-                float dist = DistPointToSegment2D(mousePos, screen[i], screen[(i + 1) % 4]);
+                float dist = DistPointToSegment2D(mousePos, s_screenQuad[i], s_screenQuad[(i + 1) % 4]);
                 if (dist < threshold) return face;
             }
         }
@@ -1416,30 +1418,28 @@ static class QuickTransform
             if (Vector3.Dot(normal, camFwd) > 0f) continue;
 
             Vector3[] corners = GetFaceWorldCorners(face);
-            Vector2[] screen = new Vector2[4];
             Vector2 center = Vector2.zero;
             for (int i = 0; i < 4; i++)
             {
-                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
-                center += screen[i];
+                s_screenQuad[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+                center += s_screenQuad[i];
             }
             center *= 0.25f;
 
             // Expand proportional to face size on screen (~30% of half-diagonal)
             float halfDiag = 0f;
             for (int i = 0; i < 4; i++)
-                halfDiag = Mathf.Max(halfDiag, Vector2.Distance(screen[i], center));
+                halfDiag = Mathf.Max(halfDiag, Vector2.Distance(s_screenQuad[i], center));
             float expand = halfDiag * 0.3f;
 
-            Vector2[] expanded = new Vector2[4];
             for (int i = 0; i < 4; i++)
             {
-                Vector2 dir = screen[i] - center;
+                Vector2 dir = s_screenQuad[i] - center;
                 float len = dir.magnitude;
-                expanded[i] = len > 0.001f ? screen[i] + dir * (expand / len) : screen[i];
+                s_expandedQuad[i] = len > 0.001f ? s_screenQuad[i] + dir * (expand / len) : s_screenQuad[i];
             }
 
-            if (IsPointInScreenQuad(mousePos, expanded))
+            if (IsPointInScreenQuad(mousePos, s_expandedQuad))
                 return face;
         }
         return -1;
@@ -1458,10 +1458,9 @@ static class QuickTransform
             if (Vector3.Dot(normal, camFwd) > 0f) continue;
 
             Vector3[] corners = GetFaceWorldCorners(face);
-            Vector2[] screen = new Vector2[4];
             for (int i = 0; i < 4; i++)
-                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
-            if (IsPointInScreenQuad(mousePos, screen))
+                s_screenQuad[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+            if (IsPointInScreenQuad(mousePos, s_screenQuad))
                 return face;
         }
         return -1;
@@ -1479,10 +1478,9 @@ static class QuickTransform
             if (Vector3.Dot(normal, camFwd) > 0f) continue;
 
             Vector3[] corners = GetFaceWorldCorners(face);
-            Vector2[] screen = new Vector2[4];
             for (int i = 0; i < 4; i++)
-                screen[i] = HandleUtility.WorldToGUIPoint(corners[i]);
-            if (IsPointInScreenQuad(mousePos, screen))
+                s_screenQuad[i] = HandleUtility.WorldToGUIPoint(corners[i]);
+            if (IsPointInScreenQuad(mousePos, s_screenQuad))
                 return face;
         }
         return -1;
@@ -1621,24 +1619,32 @@ static class QuickTransform
         return best;
     }
 
+    // Reusable buffers for per-frame hot paths (GetBoxCorners / GetFaceWorldCorners
+    // / hover screen-quad checks). All callers are single-threaded on the editor
+    // main thread, sequential — safe to share.
+    static readonly Vector3[] s_boxCorners = new Vector3[8];
+    static readonly Vector3[] s_faceCorners = new Vector3[4];
+    static readonly Vector2[] s_screenQuad = new Vector2[4];
+    static readonly Vector2[] s_expandedQuad = new Vector2[4];
+    static readonly Vector3[] s_greyboxCorners = new Vector3[8];
+
     /// <summary>
-    /// 8 corners of the bounding box.
-    /// Corner index bits: bit0=X sign, bit1=Y sign, bit2=Z sign.
+    /// 8 corners of the bounding box. Returns a shared static buffer — do not retain
+    /// across other calls into this class. Corner index bits: bit0=X, bit1=Y, bit2=Z.
     /// </summary>
     static Vector3[] GetBoxCorners()
     {
-        Vector3[] c = new Vector3[8];
         for (int i = 0; i < 8; i++)
         {
             float sx = (i & 1) != 0 ? 1f : -1f;
             float sy = (i & 2) != 0 ? 1f : -1f;
             float sz = (i & 4) != 0 ? 1f : -1f;
-            c[i] = boundsCenter
+            s_boxCorners[i] = boundsCenter
                 + boundsAxes[0] * (boundsExtents[0] * sx)
                 + boundsAxes[1] * (boundsExtents[1] * sy)
                 + boundsAxes[2] * (boundsExtents[2] * sz);
         }
-        return c;
+        return s_boxCorners;
     }
 
     /// <summary>Corner indices for each face (winding order).</summary>
@@ -1680,11 +1686,19 @@ static class QuickTransform
         new[] {0, 2}, // edge 11: {3,7} → +X, +Y
     };
 
+    /// <summary>
+    /// World-space corners of a face. Returns a shared static buffer (4 entries).
+    /// Do not call other QuickTransform geometry helpers between fill and consume.
+    /// </summary>
     static Vector3[] GetFaceWorldCorners(int face)
     {
         Vector3[] all = GetBoxCorners();
         int[] ci = FaceCornerIndices[face];
-        return new[] { all[ci[0]], all[ci[1]], all[ci[2]], all[ci[3]] };
+        s_faceCorners[0] = all[ci[0]];
+        s_faceCorners[1] = all[ci[1]];
+        s_faceCorners[2] = all[ci[2]];
+        s_faceCorners[3] = all[ci[3]];
+        return s_faceCorners;
     }
 
     /// <summary>World-space direction of an edge (unit vector along the edge's axis).</summary>
@@ -1826,7 +1840,8 @@ static class QuickTransform
         var gb = t.GetComponent<Greybox>();
         if (gb == null) return -1;
 
-        return DetectNearestGreyboxEdge(gb.GetWorldCorners(), mousePos);
+        gb.GetWorldCorners(s_greyboxCorners);
+        return DetectNearestGreyboxEdge(s_greyboxCorners, mousePos);
     }
 
     /// <summary>Find the nearest Greybox edge within EdgeHoverPx in screen space.</summary>
@@ -2057,7 +2072,8 @@ static class QuickTransform
         if (greyboxTarget != null)
         {
             DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
-            DrawGreyboxEdgesOnly(greyboxTarget.GetWorldCorners(), lockedIndex);
+            greyboxTarget.GetWorldCorners(s_greyboxCorners);
+            DrawGreyboxEdgesOnly(s_greyboxCorners, lockedIndex);
             return;
         }
         DrawBoundsBox(lockedKind, lockedIndex, activeMode);
