@@ -17,6 +17,7 @@ static class SelectMaterial
     static bool s_enabled;
     static bool s_loaded;
     static bool s_iHeld;
+    static bool s_cursorOverridden;
     static Texture2D s_eyedropperCursor;
 
     static SelectMaterial()
@@ -150,13 +151,18 @@ static class SelectMaterial
                 new Rect(0, 0, sceneView.position.width, sceneView.position.height),
                 MouseCursor.CustomCursor);
             Cursor.SetCursor(EyedropperCursor, new Vector2(1, 23), CursorMode.Auto);
+            s_cursorOverridden = true;
 
             if (e.type == EventType.Repaint)
                 sceneView.Repaint();
         }
-        else if (e.type == EventType.Repaint)
+        else if (s_cursorOverridden)
         {
+            // Restore default cursor exactly once after release — calling this every
+            // Repaint clobbers cursors set elsewhere (resize handles, text IBeam, etc.)
+            // and causes a global cursor flicker across the whole editor.
             Cursor.SetCursor(null, Vector2.zero, CursorMode.Auto);
+            s_cursorOverridden = false;
         }
 
         // I + left-click to pick material, I + Shift + left-click to add to selection
