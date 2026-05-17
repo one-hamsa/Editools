@@ -36,7 +36,7 @@ using UnityEngine;
 /// Configure per-project via a QuickTransformConfig ScriptableObject asset.
 /// </summary>
 [InitializeOnLoad]
-static class QuickTransform
+static partial class QuickTransform
 {
     // ─── Enums ──────────────────────────────────────────────────
 
@@ -337,9 +337,21 @@ static class QuickTransform
             DetectHover(sv, e.mousePosition, heldMode);
             if (e.type == EventType.Repaint)
             {
-                if (heldMode == Mode.Move && selected.Length == 1)
+                Greypipe previewPipe = selected.Length == 1 ? selected[0].GetComponent<Greypipe>() : null;
+                bool hoveringPipeVertex = previewPipe != null
+                    && (greypipeHoveredVertex >= 0 || greypipeHoveredBezierVertex >= 0);
+
+                if (previewPipe != null)
                 {
-                    // In Move mode with a Greybox: draw OBB + actual deformed edges for edge-deform hover.
+                    // Greypipe: spline + handles. Suppress bounding box when hovering a vertex —
+                    // the vertex gizmos take over.
+                    if (!hoveringPipeVertex && heldMode != Mode.Special)
+                        DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                    DrawGreypipeSpline(previewPipe, -1);
+                    DrawGreypipeVertexHandles(previewPipe, greypipeHoveredVertex);
+                }
+                else if (heldMode == Mode.Move && selected.Length == 1)
+                {
                     var previewGb = selected[0].GetComponent<Greybox>();
                     if (previewGb != null)
                     {
@@ -355,7 +367,6 @@ static class QuickTransform
                 }
                 else if (heldMode == Mode.Special && selected.Length == 1)
                 {
-                    // Special mode: always a Greybox (guarded in GetHeldMode). Pass it for deleted-face display.
                     var previewGb = selected[0].GetComponent<Greybox>();
                     DrawBoundsBox(hoveredKind, hoveredIndex, heldMode, previewGb);
                 }
@@ -422,7 +433,7 @@ static class QuickTransform
         {
             var sel = Selection.transforms;
             if (sel != null && sel.Length == 1 && sel[0] != null
-                && sel[0].GetComponent<Greybox>() != null)
+                && (sel[0].GetComponent<Greybox>() != null || sel[0].GetComponent<Greypipe>() != null))
                 return Mode.Special;
         }
         return Mode.None;
@@ -434,9 +445,18 @@ static class QuickTransform
     {
         if (heldMode == Mode.None) return;
 
-        // ── Special mode (Q held): LMB toggles a face, RMB extrudes ──
+        // ── Special mode (Q held) ──
         if (heldMode == Mode.Special && selected.Length == 1)
         {
+            // Greypipe special mode
+            var pipe = selected[0].GetComponent<Greypipe>();
+            if (pipe != null)
+            {
+                HandleGreypipeSpecialIdle(e, sv, pipe, selected);
+                return;
+            }
+
+            // Greybox special mode: LMB toggles a face, RMB extrudes
             var gb = selected[0].GetComponent<Greybox>();
             if (gb != null && e.type == EventType.MouseDown)
             {
@@ -516,8 +536,80 @@ static class QuickTransform
         }
 
         if (e.type != EventType.MouseDown) return;
-        if (e.button != 0 && e.button != 1) return;
+        if (e.button != 0 && e.button != 1 && e.button != 2) return;
 
+        // Greypipe: vertex handle click takes priority — works for all modes and all buttons,
+        // so it must be checked BEFORE the RMB-only-for-Move/Scale early return below.
+        if (selected.Length == 1)
+        {
+            var pipe = selected[0].GetComponent<Greypipe>();
+            if (pipe != null)
+            {
+                // In Move mode, bezier endpoint dots take priority — drag them to reshape the bezier.
+                if (heldMode == Mode.Move && e.button == 0)
+                {
+                    DetectGreypipeBezierHover(sv, e.mousePosition, pipe, out int bvtx, out int bside);
+                    if (bvtx >= 0)
+                    {
+                        activeMode = heldMode;
+                        dragTargets = selected;
+                        SnapshotTransforms();
+                        selectionPivot = ComputePivot();
+
+                        BeginGreypipeBezierHandleDrag(pipe, bvtx, bside, e.mousePosition);
+                        phase = Phase.Ready;
+                        mousePressPos = e.mousePosition;
+                        dragButton = e.button;
+                        shiftHeldOnPress = false;
+                        didDuplicate = false;
+
+                        int ctrlId2 = GUIUtility.GetControlID(FocusType.Passive);
+                        HandleUtility.AddDefaultControl(ctrlId2);
+                        GUIUtility.hotControl = ctrlId2;
+                        e.Use();
+                        return;
+                    }
+                }
+
+                int vtx = DetectGreypipeVertexHover(sv, e.mousePosition, pipe);
+                if (vtx >= 0)
+                {
+                    // MMB on vertex in Rotate mode: reset that handle to align with the Main Axis. No drag.
+                    if (e.button == 2 && heldMode == Mode.Rotate)
+                    {
+                        Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
+                        pipe.ResetVertexHandle(vtx);
+                        pipe.RebuildMesh();
+                        EditorUtility.SetDirty(pipe);
+                        e.Use();
+                        return;
+                    }
+
+                    // MMB in other modes — ignore (we don't have a defined behaviour).
+                    if (e.button == 2) return;
+
+                    activeMode = heldMode;
+                    dragTargets = selected;
+                    SnapshotTransforms();
+                    selectionPivot = ComputePivot();
+
+                    BeginGreypipeVertexTransform(pipe, vtx, activeMode, e.mousePosition);
+                    phase = Phase.Ready;
+                    mousePressPos = e.mousePosition;
+                    dragButton = e.button;
+                    shiftHeldOnPress = e.shift;
+                    didDuplicate = false;
+
+                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
+                    HandleUtility.AddDefaultControl(ctrlId);
+                    GUIUtility.hotControl = ctrlId;
+                    e.Use();
+                    return;
+                }
+            }
+        }
+
+        if (e.button == 2) return;  // MMB outside Greypipe vertex: ignore
         // RMB is used for face-normal movement (Move) and uniform scaling (Scale)
         if (e.button == 1 && heldMode != Mode.Move && heldMode != Mode.Scale) return;
 
@@ -814,9 +906,14 @@ static class QuickTransform
         if (e.type == EventType.Repaint)
         {
             ComputeBoundsForMode(dragTargets, activeMode);
-            if (greyboxTarget != null)
+            if (greypipeTarget != null)
             {
-                // OBB box (no highlights while pre-drag) + locked greybox edge highlighted
+                DrawGreypipeDragPlane();
+                DrawGreypipeSpline(greypipeTarget, greypipeSelectedVertex);
+                DrawGreypipeVertexHandles(greypipeTarget, greypipeSelectedVertex);
+            }
+            else if (greyboxTarget != null)
+            {
                 DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
                 greyboxTarget.GetWorldCorners(s_greyboxCorners);
                 DrawGreyboxEdgesOnly(s_greyboxCorners, lockedIndex);
@@ -841,6 +938,7 @@ static class QuickTransform
 
         if ((e.type == EventType.MouseUp && e.button == dragButton) || ModeKeyReleased())
         {
+            HandleGreypipeGirthRelease();
             Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
@@ -862,6 +960,7 @@ static class QuickTransform
     static void ApplyDrag(Event e, SceneView sv)
     {
         if (extrudeNewGb != null) { ApplyExtrude(e.mousePosition); sv.Repaint(); return; }
+        if (greypipeTarget != null) { ApplyGreypipeVertexDrag(e, sv); sv.Repaint(); return; }
         switch (activeMode)
         {
             case Mode.Move:   ApplyMove(sv, e.mousePosition);   break;
@@ -1264,6 +1363,9 @@ static class QuickTransform
 
     static void DetectHover(SceneView sv, Vector2 mousePos, Mode mode)
     {
+        // Greypipe vertex hover detection (shared across all modes)
+        DetectGreypipeHover(sv, mousePos);
+
         switch (mode)
         {
             case Mode.Move:    DetectMoveHover(sv, mousePos);    break;
@@ -1791,6 +1893,7 @@ static class QuickTransform
         greyboxTarget       = null;
         greyboxStartCorners = null;
         extrudeNewGb        = null;
+        ResetGreypipeState();
     }
 
     static bool ModeKeyReleased()
@@ -2067,6 +2170,15 @@ static class QuickTransform
         if (dragTargets == null) return;
 
         ComputeBoundsForMode(dragTargets, activeMode);
+
+        // Greypipe vertex transform feedback
+        if (greypipeTarget != null)
+        {
+            DrawGreypipeDragPlane();
+            DrawGreypipeSpline(greypipeTarget, greypipeSelectedVertex);
+            DrawGreypipeVertexHandles(greypipeTarget, greypipeSelectedVertex);
+            return;
+        }
 
         // Greybox edge deform: OBB bounding box + actual edges with the dragged edge highlighted
         if (greyboxTarget != null)

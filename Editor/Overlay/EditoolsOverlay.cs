@@ -1216,14 +1216,12 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Shows a live FPS counter in the top-left corner of each Scene View. " +
 		"Displays average FPS and frame time in milliseconds. Tracked independently per view.");
 
-	static readonly GUIContent k_Greybox = new GUIContent(
-		"Greybox",
-		"Deformable box primitives for level blockout.\n" +
-		"Create via GameObject > 3D Object > Greybox, or press Ctrl+G in the Scene View.\n\n" +
-		"Ctrl+G — places a new Greybox on the surface under the cursor, " +
-		"pivot on the surface, Y aligned to the surface normal.\n\n" +
-		"Hold W over an edge to deform that edge.\n\n" +
-		"Click ▸ to set the default material for new Greyboxes.");
+	static readonly GUIContent k_GreyPrimitives = new GUIContent(
+		"Grey Primitives",
+		"Procedural primitives for level blockout.\n\n" +
+		"Greybox — Ctrl+G — deformable box. Hold W over an edge to deform.\n" +
+		"Greypipe — Ctrl+T — spline-based tube. Hold Q to insert/extend/delete vertices.\n\n" +
+		"Click ▸ to edit shared defaults (material, layer, collider, shadows) and per-primitive defaults.");
 
 	public override void OnGUI(Rect rect)
 	{
@@ -1257,8 +1255,8 @@ class EditoolsSettingsPopup : PopupWindowContent
 		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
 			v => SceneViewFpsCounter.Enabled = v, null);
 
-		DrawSubmenuOnlyRow(k_Greybox,
-			rect => UnityEditor.PopupWindow.Show(rect, new GreyboxSettingsPopup()));
+		DrawSubmenuOnlyRow(k_GreyPrimitives,
+			rect => UnityEditor.PopupWindow.Show(rect, new GreyPrimitivesSettingsPopup()));
 	}
 
 	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
