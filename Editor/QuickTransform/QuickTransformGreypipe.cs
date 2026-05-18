@@ -29,6 +29,7 @@ static partial class QuickTransform
     static int     greypipeBezierHandleSide;  // +1 = forward endpoint, -1 = back endpoint
     static int     greypipeHoveredBezierVertex = -1;
     static int     greypipeHoveredBezierSide;
+    static Vector3 greypipeBezierStartEndpointWorld;  // snapshot of endpoint world pos at drag begin
 
     // Special mode drag state
     static bool    greypipeExtending;
@@ -62,15 +63,16 @@ static partial class QuickTransform
         var pipe = sel[0].GetComponent<Greypipe>();
         if (pipe == null) return;
 
-        // In Move mode, bezier handle endpoints are selectable — and take priority over the vertex
-        // (the endpoints are visually distinct dots ahead of/behind the vertex).
-        if (GetHeldMode() == Mode.Move)
-        {
-            DetectGreypipeBezierHover(sv, mousePos, pipe, out greypipeHoveredBezierVertex, out greypipeHoveredBezierSide);
-            if (greypipeHoveredBezierVertex >= 0) return;
-        }
+        // Rotate mode: Greypipe rotates as a whole object — no per-vertex hover.
+        if (GetHeldMode() == Mode.Rotate) return;
 
+        // Vertex takes priority over bezier handle endpoints. Only fall back to handle hover
+        // (in Move mode) when no vertex is under the cursor.
         greypipeHoveredVertex = DetectGreypipeVertexHover(sv, mousePos, pipe);
+        if (greypipeHoveredVertex >= 0) return;
+
+        if (GetHeldMode() == Mode.Move)
+            DetectGreypipeBezierHover(sv, mousePos, pipe, out greypipeHoveredBezierVertex, out greypipeHoveredBezierSide);
     }
 
     static void DetectGreypipeBezierHover(SceneView sv, Vector2 mousePos, Greypipe pipe, out int vertexIdx, out int side)
@@ -159,9 +161,14 @@ static partial class QuickTransform
         greypipeVertexMode     = mode;
         greypipeStartVertex    = pipe.Vertices[vertexIndex];
 
+        // Open a fresh undo group so the registrations below + all future drag/release mutations
+        // collapse into a single undo entry. Without IncrementCurrentGroup, later code paths
+        // (HandleReady's re-registration) can land in a later group and split the entry in two.
+        Undo.IncrementCurrentGroup();
+        undoGroup = Undo.GetCurrentGroup();
         Undo.RegisterCompleteObjectUndo(pipe.transform, $"Greypipe Vertex {mode}");
         Undo.RegisterCompleteObjectUndo(pipe, $"Greypipe Vertex {mode}");
-        undoGroup = Undo.GetCurrentGroup();
+        Undo.SetCurrentGroupName($"Greypipe Vertex {mode}");
 
         Vector3 vertexWorld = pipe.GetWorldVertexPosition(vertexIndex);
         Vector3 mainAxis    = pipe.MainAxisWorld;
@@ -186,9 +193,6 @@ static partial class QuickTransform
             case Mode.Move:
                 RaycastPlane(mousePos, greypipeDragPlanePoint, greypipeDragPlaneNormal, out greypipeDragHitStart);
                 break;
-            case Mode.Rotate:
-                greypipeDragStartDist = ScreenAngleFrom(mousePos, vertexWorld);
-                break;
             case Mode.Scale:
                 greypipeDragStartDist = mousePos.x;
                 break;
@@ -202,13 +206,19 @@ static partial class QuickTransform
         greypipeBezierHandleSide   = side;
         greypipeStartVertex        = pipe.Vertices[vertexIndex];
 
-        Undo.RegisterCompleteObjectUndo(pipe, "Greypipe Bezier Handle");
+        Undo.IncrementCurrentGroup();
         undoGroup = Undo.GetCurrentGroup();
+        Undo.RegisterCompleteObjectUndo(pipe, "Greypipe Bezier Handle");
+        Undo.SetCurrentGroupName("Greypipe Bezier Handle");
 
         Vector3 vertexWorld = pipe.GetWorldVertexPosition(vertexIndex);
-        Vector3 mainAxis    = pipe.MainAxisWorld;
+        Vector3 handleDir   = pipe.GetVertexHandleDirWorld(vertexIndex);
+        float   worldLen    = pipe.Vertices[vertexIndex].handleLength * pipe.transform.lossyScale.z;
+        greypipeBezierStartEndpointWorld = vertexWorld + handleDir * worldLen * side;
 
-        greypipeDragPlanePoint  = vertexWorld;
+        Vector3 mainAxis = pipe.MainAxisWorld;
+        // Plane sits at the dragged endpoint (so feedback gizmo draws there too).
+        greypipeDragPlanePoint  = greypipeBezierStartEndpointWorld;
         greypipeDragPlaneNormal = ComputeMainPlaneNormal(mainAxis);
         RaycastPlane(mousePos, greypipeDragPlanePoint, greypipeDragPlaneNormal, out greypipeDragHitStart);
     }
@@ -229,7 +239,7 @@ static partial class QuickTransform
         // Bezier handle endpoint drag
         if (greypipeBezierHandleVertex >= 0)
         {
-            ApplyGreypipeBezierHandleDrag(mousePos);
+            ApplyGreypipeBezierHandleDrag(e, mousePos);
             greypipeTarget.RebuildMesh();
             EditorUtility.SetDirty(greypipeTarget);
             return;
@@ -259,9 +269,6 @@ static partial class QuickTransform
         {
             case Mode.Move:
                 ApplyGreypipeVertexMove(mousePos, e.button);
-                break;
-            case Mode.Rotate:
-                ApplyGreypipeVertexRotate(mousePos, e.button);
                 break;
             case Mode.Scale:
                 ApplyGreypipeVertexScale(mousePos);
@@ -301,15 +308,31 @@ static partial class QuickTransform
             greypipeTarget.ApplyEdgeAxisRelativePositions(greypipeEdgeSnapshot);
     }
 
-    static void ApplyGreypipeBezierHandleDrag(Vector2 mousePos)
+    static void ApplyGreypipeBezierHandleDrag(Event e, Vector2 mousePos)
     {
-        if (!RaycastPlane(mousePos, greypipeDragPlanePoint, greypipeDragPlaneNormal, out Vector3 hit)) return;
+        // Compute drag delta with the same mode plane logic as vertex move:
+        //   LMB → in the Main Plane (mainAxis × worldUp)
+        //   RMB → perpendicular to the Main Plane
+        Vector3 delta;
+        if (e.button == 1)
+        {
+            Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
+            float currentDist = ProjectRayOntoLine(mouseRay, greypipeDragPlanePoint, greypipeDragPlaneNormal);
+            float startDist   = ProjectRayOntoLine(
+                HandleUtility.GUIPointToWorldRay(mousePressPos), greypipeDragPlanePoint, greypipeDragPlaneNormal);
+            delta = greypipeDragPlaneNormal * (currentDist - startDist);
+        }
+        else
+        {
+            if (!RaycastPlane(mousePos, greypipeDragPlanePoint, greypipeDragPlaneNormal, out Vector3 hit)) return;
+            delta = hit - greypipeDragHitStart;
+        }
 
-        Vector3 vertexWorld = greypipeTarget.GetWorldVertexPosition(greypipeBezierHandleVertex);
-        Vector3 worldEndpoint = hit;
-        Vector3 worldDir = worldEndpoint - vertexWorld;
+        Vector3 vertexWorld   = greypipeTarget.GetWorldVertexPosition(greypipeBezierHandleVertex);
+        Vector3 worldEndpoint = greypipeBezierStartEndpointWorld + delta;
+        Vector3 worldDir      = worldEndpoint - vertexWorld;
 
-        // If user is dragging the back endpoint, flip so handleRotation always represents "forward".
+        // Back-endpoint drag flips: handleRotation always represents the "forward" side.
         if (greypipeBezierHandleSide < 0) worldDir = -worldDir;
 
         float worldLen = worldDir.magnitude;
@@ -318,7 +341,6 @@ static partial class QuickTransform
         Vector3 localDir = greypipeTarget.transform.InverseTransformDirection(worldDir.normalized);
         greypipeTarget.SetVertexHandleDirLocal(greypipeBezierHandleVertex, localDir);
 
-        // Length back-converts world length to local units via the dominant scale axis.
         float scale = greypipeTarget.transform.lossyScale.z;
         if (Mathf.Abs(scale) < 0.0001f) scale = 1f;
 
@@ -326,38 +348,6 @@ static partial class QuickTransform
         var v = verts[greypipeBezierHandleVertex];
         v.handleLength = Mathf.Max(0.001f, worldLen / Mathf.Abs(scale));
         verts[greypipeBezierHandleVertex] = v;
-    }
-
-    static void ApplyGreypipeVertexRotate(Vector2 mousePos, int button)
-    {
-        Vector3 mainAxis = greypipeTarget.MainAxisWorld;
-        Vector3 vertexWorld = greypipeTarget.GetWorldVertexPosition(greypipeSelectedVertex);
-
-        Vector3 rotAxis;
-        if (button == 1)
-        {
-            Vector3 up = Vector3.Cross(mainAxis, Vector3.Cross(Vector3.up, mainAxis)).normalized;
-            if (up.sqrMagnitude < 0.01f) up = Vector3.Cross(mainAxis, Vector3.right).normalized;
-            rotAxis = up;
-        }
-        else
-        {
-            rotAxis = mainAxis;
-        }
-
-        float currentAngle = ScreenAngleFrom(mousePos, vertexWorld);
-        float angleDelta = currentAngle - greypipeDragStartDist;
-        float sign = Vector3.Dot(SceneView.lastActiveSceneView.camera.transform.forward, rotAxis) > 0f ? -1f : 1f;
-
-        // Express world rotation axis in Main Axis frame space (where handleRotation lives)
-        Vector3 localAxis = greypipeTarget.transform.InverseTransformDirection(rotAxis);
-        Vector3 frameAxis = Quaternion.Inverse(greypipeTarget.MainAxisFrameLocal) * localAxis;
-        Quaternion frameRot = Quaternion.AngleAxis(sign * angleDelta, frameAxis);
-
-        var verts = greypipeTarget.Vertices;
-        var v = verts[greypipeSelectedVertex];
-        v.handleRotation = frameRot * greypipeStartVertex.handleRotation;
-        verts[greypipeSelectedVertex] = v;
     }
 
     static void ApplyGreypipeVertexScale(Vector2 mousePos)
@@ -390,6 +380,8 @@ static partial class QuickTransform
         {
             if (hoveredVtx >= 0)
             {
+                Undo.IncrementCurrentGroup();
+                int g = Undo.GetCurrentGroup();
                 Undo.RegisterCompleteObjectUndo(pipe.transform, "Delete Greypipe Vertex");
                 Undo.RegisterCompleteObjectUndo(pipe, "Delete Greypipe Vertex");
                 if (pipe.RemoveVertex(hoveredVtx))
@@ -398,8 +390,11 @@ static partial class QuickTransform
                     pipe.RebuildMesh();
                     EditorUtility.SetDirty(pipe);
                 }
-                e.Use();
+                Undo.SetCurrentGroupName("Delete Greypipe Vertex");
+                Undo.CollapseUndoOperations(g);
             }
+            // Always consume in Special mode so RMB doesn't trigger scene-view nav.
+            e.Use();
             return;
         }
 
@@ -415,9 +410,11 @@ static partial class QuickTransform
                 greypipeTarget         = pipe;
                 greypipeSelectedVertex = hoveredVtx;
 
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
                 Undo.RegisterCompleteObjectUndo(pipe.transform, "Extend Greypipe");
                 Undo.RegisterCompleteObjectUndo(pipe, "Extend Greypipe");
-                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Extend Greypipe");
 
                 // Create the new vertex at the edge position initially
                 Vector3 edgeWorld = pipe.GetWorldVertexPosition(hoveredVtx);
@@ -454,14 +451,18 @@ static partial class QuickTransform
             // LMB on spline (not a vertex): insert new vertex
             if (DetectGreypipeSplineHover(sv, e.mousePosition, pipe, out int segIdx, out float segT))
             {
+                Undo.IncrementCurrentGroup();
+                int g = Undo.GetCurrentGroup();
                 Undo.RegisterCompleteObjectUndo(pipe.transform, "Insert Greypipe Vertex");
                 Undo.RegisterCompleteObjectUndo(pipe, "Insert Greypipe Vertex");
                 pipe.InsertVertex(segIdx, segT);
                 pipe.RecenterPivot();
                 pipe.RebuildMesh();
                 EditorUtility.SetDirty(pipe);
-                e.Use();
+                Undo.SetCurrentGroupName("Insert Greypipe Vertex");
+                Undo.CollapseUndoOperations(g);
             }
+            e.Use();
             return;
         }
 
@@ -477,8 +478,10 @@ static partial class QuickTransform
                 greypipeGirthStartMouseY = e.mousePosition.y;
                 greypipeTarget          = pipe;
 
-                Undo.RegisterCompleteObjectUndo(pipe, "Greypipe Girth");
+                Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
+                Undo.RegisterCompleteObjectUndo(pipe, "Greypipe Girth");
+                Undo.SetCurrentGroupName("Greypipe Girth");
 
                 activeMode       = Mode.Special;
                 dragTargets      = selected;
@@ -493,8 +496,9 @@ static partial class QuickTransform
                 int id = GUIUtility.GetControlID(FocusType.Passive);
                 HandleUtility.AddDefaultControl(id);
                 GUIUtility.hotControl = id;
-                e.Use();
             }
+            // Always consume — MMB shouldn't bleed through to scene-nav even when no vertex hit.
+            e.Use();
             return;
         }
     }
@@ -622,35 +626,89 @@ static partial class QuickTransform
 
     static void DrawGreypipeSpline(Greypipe pipe, int highlightVertex)
     {
-        Color splineColor = s_splineColor;
-        for (int seg = 0; seg < pipe.SegmentCount; seg++)
+        // Spline lines: still use Handles.zTest two-pass (works reliably for DrawBezier).
+        var prevZTest = Handles.zTest;
+        for (int pass = 0; pass < 2; pass++)
         {
-            pipe.GetSegmentControlPoints(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
-            Vector3 wp0 = pipe.transform.TransformPoint(p0);
-            Vector3 wp1 = pipe.transform.TransformPoint(p1);
-            Vector3 wp2 = pipe.transform.TransformPoint(p2);
-            Vector3 wp3 = pipe.transform.TransformPoint(p3);
-            Handles.DrawBezier(wp0, wp3, wp1, wp2, splineColor, null, 2f);
+            bool occluded = pass == 1;
+            Handles.zTest = occluded
+                ? UnityEngine.Rendering.CompareFunction.Greater
+                : UnityEngine.Rendering.CompareFunction.LessEqual;
+            Color color = occluded ? Occluded(s_splineColor) : s_splineColor;
+
+            for (int seg = 0; seg < pipe.SegmentCount; seg++)
+            {
+                pipe.GetSegmentControlPoints(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+                Vector3 wp0 = pipe.transform.TransformPoint(p0);
+                Vector3 wp1 = pipe.transform.TransformPoint(p1);
+                Vector3 wp2 = pipe.transform.TransformPoint(p2);
+                Vector3 wp3 = pipe.transform.TransformPoint(p3);
+                Handles.DrawBezier(wp0, wp3, wp1, wp2, color, null, 2f);
+            }
         }
+        Handles.zTest = prevZTest;
+    }
+
+    /// <summary>Faded variant of a color, used when a gizmo is occluded by other geometry.</summary>
+    static Color Occluded(Color c) => new Color(c.r, c.g, c.b, c.a * 0.30f);
+
+    /// <summary>
+    /// Returns true if the world-space point is occluded from the scene camera by any
+    /// collider that is NOT part of the given Greypipe (the pipe occludes its own vertices
+    /// trivially because they sit on the tube's center axis).
+    /// </summary>
+    static bool IsWorldPointOccluded(Vector3 worldPoint, Greypipe pipe)
+    {
+        var sv = SceneView.lastActiveSceneView;
+        if (sv == null || sv.camera == null) return false;
+        Vector3 camPos = sv.camera.transform.position;
+        Vector3 toPoint = worldPoint - camPos;
+        float dist = toPoint.magnitude;
+        if (dist < 0.001f) return false;
+        Vector3 dir = toPoint / dist;
+
+        // Pull the hit test slightly short so we don't self-occlude on the target point.
+        var hits = Physics.RaycastAll(camPos, dir, dist - 0.01f, ~0, QueryTriggerInteraction.Ignore);
+        Transform pipeT = pipe.transform;
+        for (int i = 0; i < hits.Length; i++)
+        {
+            var col = hits[i].collider;
+            if (col == null) continue;
+            // Ignore colliders belonging to the Greypipe itself.
+            if (col.transform == pipeT || col.transform.IsChildOf(pipeT)) continue;
+            return true;
+        }
+        return false;
     }
 
     static void DrawGreypipeVertexHandles(Greypipe pipe, int highlightIndex)
     {
-        // Highlight color reflects the current QT mode the user has held.
         Mode highlightMode = GetCurrentDisplayMode();
         Color highlightColor = highlightMode != Mode.None
             ? GetModeColor(highlightMode, 1f)
             : s_vertexHoverColor;
 
-        for (int i = 0; i < pipe.Vertices.Count; i++)
+        // Pre-compute occlusion for each vertex and each handle endpoint.
+        int n = pipe.Vertices.Count;
+        var worldPositions  = new Vector3[n];
+        var occludedVertex  = new bool[n];
+        for (int i = 0; i < n; i++)
         {
-            Vector3 worldPos = pipe.GetWorldVertexPosition(i);
+            worldPositions[i] = pipe.GetWorldVertexPosition(i);
+            occludedVertex[i] = IsWorldPointOccluded(worldPositions[i], pipe);
+        }
+
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 worldPos = worldPositions[i];
             float handleSize = HandleUtility.GetHandleSize(worldPos) * 0.08f;
 
             bool isHighlighted = i == highlightIndex;
-            bool isEdge = i == 0 || i == pipe.Vertices.Count - 1;
+            bool isEdge = i == 0 || i == n - 1;
+            bool vertOccluded = occludedVertex[i];
 
-            Handles.color = isHighlighted ? highlightColor : s_vertexHandleColor;
+            Color vColor = isHighlighted ? highlightColor : s_vertexHandleColor;
+            Handles.color = vertOccluded ? Occluded(vColor) : vColor;
 
             if (isEdge)
                 Handles.CubeHandleCap(0, worldPos, Quaternion.identity, handleSize * 2f, EventType.Repaint);
@@ -659,14 +717,18 @@ static partial class QuickTransform
 
             Vector3 handleDir = pipe.GetVertexHandleDirWorld(i);
             float worldHandleLen = pipe.Vertices[i].handleLength * pipe.transform.lossyScale.z;
-
-            Handles.color = s_bezierHandleColor;
             Vector3 handleA = worldPos + handleDir * worldHandleLen;
             Vector3 handleB = worldPos - handleDir * worldHandleLen;
+
+            bool occA = IsWorldPointOccluded(handleA, pipe);
+            bool occB = IsWorldPointOccluded(handleB, pipe);
+
+            // Bezier-handle line color is averaged from its two endpoints' occlusion states.
+            Color lineColor = s_bezierHandleColor;
+            Handles.color = (occA && occB) ? Occluded(lineColor) : lineColor;
             Handles.DrawLine(handleA, worldPos);
             Handles.DrawLine(worldPos, handleB);
 
-            // Endpoint dots — highlight if hovered/selected (Move mode only)
             float dotSize = handleSize * 0.8f;
             bool isMoveMode = (GetCurrentDisplayMode() == Mode.Move);
             bool hoverA = isMoveMode && greypipeHoveredBezierVertex == i && greypipeHoveredBezierSide > 0;
@@ -674,10 +736,12 @@ static partial class QuickTransform
             bool selA   = greypipeBezierHandleVertex == i && greypipeBezierHandleSide > 0;
             bool selB   = greypipeBezierHandleVertex == i && greypipeBezierHandleSide < 0;
 
-            Handles.color = (hoverA || selA) ? highlightColor : s_bezierHandleColor;
+            Color dotAColor = (hoverA || selA) ? highlightColor : s_bezierHandleColor;
+            Handles.color = occA ? Occluded(dotAColor) : dotAColor;
             Handles.DotHandleCap(0, handleA, Quaternion.identity, (hoverA || selA) ? dotSize * 1.4f : dotSize, EventType.Repaint);
 
-            Handles.color = (hoverB || selB) ? highlightColor : s_bezierHandleColor;
+            Color dotBColor = (hoverB || selB) ? highlightColor : s_bezierHandleColor;
+            Handles.color = occB ? Occluded(dotBColor) : dotBColor;
             Handles.DotHandleCap(0, handleB, Quaternion.identity, (hoverB || selB) ? dotSize * 1.4f : dotSize, EventType.Repaint);
         }
     }

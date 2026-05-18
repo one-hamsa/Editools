@@ -1,21 +1,47 @@
 using UnityEngine;
 
 /// <summary>
-/// Place anywhere above Greybox objects in the hierarchy to control their
-/// adaptive subdivision density. All Greybox components under this object
-/// poll this value and subdivide to match the target density.
+/// Place anywhere above grey primitives (Greybox, Greypipe) in the hierarchy to control
+/// their adaptive subdivision density. All primitives under this object poll these values
+/// and subdivide to match.
 /// </summary>
 [ExecuteAlways]
 public class GreyboxManager : MonoBehaviour
 {
     [SerializeField]
-    [Tooltip("Enable or disable adaptive subdivision for all Greybox components in this hierarchy.")]
+    [Tooltip("Enable or disable adaptive subdivision for all grey primitives in this hierarchy.")]
     bool _subdivisionEnabled = true;
 
     [SerializeField]
-    [Tooltip("Target vertex density in vertices per meter. Applied to all Greybox components " +
+    [Tooltip("Target vertex density in vertices per meter. Applied to all grey primitives " +
              "in this hierarchy when subdivision is enabled.")]
     float _vertexDensity = 1f;
 
+    [SerializeField]
+    [Tooltip("Global multiplier for length-axis subdivisions on Greypipes (rings along the spline). " +
+             "Stacks with each pipe's local Length Subdiv Multiplier. 1 = no extra change.")]
+    float _greypipeLengthSubdivMultiplier = 1f;
+
+    [SerializeField]
+    [Tooltip("Global multiplier for circumference subdivisions on Greypipes (sides of the tube). " +
+             "Stacks with each pipe's local Girth Subdiv Multiplier. 1 = no extra change.")]
+    float _greypipeGirthSubdivMultiplier = 1f;
+
     public float VertexDensity => _subdivisionEnabled ? Mathf.Max(0f, _vertexDensity) : 0f;
+
+    public float GreypipeLengthSubdivMultiplier => Mathf.Max(0.01f, _greypipeLengthSubdivMultiplier);
+    public float GreypipeGirthSubdivMultiplier  => Mathf.Max(0.01f, _greypipeGirthSubdivMultiplier);
+
+#if UNITY_EDITOR
+    /// <summary>
+    /// When any manager field changes in the inspector, push a rebuild flag down to every
+    /// grey primitive under this manager. The base Update poll only watches VertexDensity,
+    /// so without this push, the Greypipe-specific multipliers wouldn't trigger rebuilds.
+    /// </summary>
+    void OnValidate()
+    {
+        foreach (var prim in GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
+            prim.MarkRebuildPending();
+    }
+#endif
 }

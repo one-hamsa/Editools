@@ -5,8 +5,8 @@ using UnityEngine;
 
 static class GreypipeSettings
 {
-    const string k_GirthPref = "Editools_Greypipe_DefaultGirth";
-    const string k_SidesPref = "Editools_Greypipe_DefaultSides";
+    const string k_GirthPref  = "Editools_Greypipe_DefaultGirth";
+    const string k_LengthPref = "Editools_Greypipe_DefaultLength";
 
     internal static float DefaultGirth
     {
@@ -14,10 +14,10 @@ static class GreypipeSettings
         set => EditorPrefs.SetFloat(k_GirthPref, Mathf.Max(0.001f, value));
     }
 
-    internal static int DefaultSides
+    internal static float DefaultLength
     {
-        get => EditorPrefs.GetInt(k_SidesPref, 8);
-        set => EditorPrefs.SetInt(k_SidesPref, Mathf.Max(3, value));
+        get => EditorPrefs.GetFloat(k_LengthPref, 5f);
+        set => EditorPrefs.SetFloat(k_LengthPref, Mathf.Max(0.01f, value));
     }
 
     // ─── Menu item ───────────────────────────────────────────────
@@ -41,7 +41,10 @@ static class GreypipeSettings
         if (pipe != null)
         {
             pipe.BaseGirth = DefaultGirth;
-            pipe.Sides     = DefaultSides;
+            // Replace the default vertex list with one sized to the user's preferred length.
+            pipe.Vertices.Clear();
+            foreach (var v in Greypipe.CreateDefaultVertices(DefaultLength))
+                pipe.Vertices.Add(v);
             pipe.RebuildMesh();
         }
 
@@ -55,9 +58,9 @@ static class GreypipeSettingsGUI
         "Default Girth",
         "Base radius of the pipe's cross-section for new Greypipes.");
 
-    static readonly GUIContent k_SidesLabel = new GUIContent(
-        "Default Sides",
-        "Number of polygon sides for the circular cross-section on new Greypipes.");
+    static readonly GUIContent k_LengthLabel = new GUIContent(
+        "Default Length",
+        "Total length (between the two edge vertices) of newly created Greypipes, in local units.");
 
     internal static void DrawGUI()
     {
@@ -68,10 +71,10 @@ static class GreypipeSettingsGUI
 
         EditorGUILayout.Space(4);
 
-        int curSides  = GreypipeSettings.DefaultSides;
-        int nextSides = EditorGUILayout.IntField(k_SidesLabel, curSides);
-        if (nextSides != curSides)
-            GreypipeSettings.DefaultSides = nextSides;
+        float curLength  = GreypipeSettings.DefaultLength;
+        float nextLength = EditorGUILayout.FloatField(k_LengthLabel, curLength);
+        if (!Mathf.Approximately(nextLength, curLength))
+            GreypipeSettings.DefaultLength = nextLength;
     }
 }
 

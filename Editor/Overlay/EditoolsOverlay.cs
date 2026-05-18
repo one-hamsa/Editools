@@ -1334,10 +1334,13 @@ class QuickTransformPopup : PopupWindowContent
 	static readonly GUIContent k_LinearSensLabel = new GUIContent(
 		"  Sensitivity (\u00B0/px)",
 		"Degrees of rotation per pixel of horizontal mouse movement.");
+	static readonly GUIContent k_ShowTooltipsLabel = new GUIContent(
+		"Scene View Tooltips",
+		"Show contextual action hints at the bottom-left of the Scene View when a mode key is held.");
 
 	public override Vector2 GetWindowSize()
 	{
-		int rows = QuickTransform.LinearRotation ? 6 : 5;
+		int rows = QuickTransform.LinearRotation ? 7 : 6;
 		return new Vector2(240, rows * 22);
 	}
 
@@ -1373,6 +1376,11 @@ class QuickTransformPopup : PopupWindowContent
 			if (!Mathf.Approximately(newSens, sens))
 				QuickTransform.LinearRotSensitivity = newSens;
 		}
+
+		bool tooltips = QuickTransform.ShowTooltips;
+		bool newTooltips = EditorGUILayout.Toggle(k_ShowTooltipsLabel, tooltips);
+		if (newTooltips != tooltips)
+			QuickTransform.ShowTooltips = newTooltips;
 	}
 }
 

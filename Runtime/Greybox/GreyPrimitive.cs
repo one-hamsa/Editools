@@ -23,12 +23,16 @@ public abstract class GreyPrimitive : MonoBehaviour
     // ─── Edit-time dirty tracking ────────────────────────────────
 
 #if UNITY_EDITOR
-    GreyboxManager _cachedManager;
-    float          _cachedDensity  = -1f;
-    Vector3        _cachedScale;
-    bool           _rebuildPending;
+    int  _cachedSignature = int.MinValue;
+    bool _rebuildPending;
 
     protected void SetRebuildPending() => _rebuildPending = true;
+
+    /// <summary>
+    /// Push hook for GreyboxManager: when manager-level settings change, the manager calls
+    /// this on each child primitive to trigger a rebuild on the next editor Update tick.
+    /// </summary>
+    public void MarkRebuildPending() => _rebuildPending = true;
 #endif
 
     // ─── Unity lifecycle ─────────────────────────────────────────
@@ -59,30 +63,44 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     protected virtual void Update()
     {
-        if (_rebuildPending)
+        int sig = ComputeRebuildSignature();
+        if (_rebuildPending || sig != _cachedSignature)
         {
             _rebuildPending = false;
+            _cachedSignature = sig;
             EnsureMesh();
             RebuildMesh();
-            _cachedManager = GetComponentInParent<GreyboxManager>();
-            _cachedDensity = _cachedManager != null ? _cachedManager.VertexDensity : 0f;
-            _cachedScale   = transform.lossyScale;
-            return;
         }
+    }
 
-        var   manager = GetComponentInParent<GreyboxManager>();
-        float density = manager != null ? manager.VertexDensity : 0f;
-        var   scale   = transform.lossyScale;
-
-        if (manager == _cachedManager && density == _cachedDensity && scale == _cachedScale)
-            return;
-
-        _cachedManager = manager;
-        _cachedDensity = density;
-        _cachedScale   = scale;
-        RebuildMesh();
+    /// <summary>
+    /// Hash of every input that affects mesh output. The base mixes in the manager state,
+    /// transform scale, and subdivision multiplier. Subclasses override to mix in their own
+    /// shape data so any inspector change triggers a rebuild on the next editor tick.
+    /// </summary>
+    int ComputeRebuildSignature()
+    {
+        var manager = GetComponentInParent<GreyboxManager>();
+        int sig = 17;
+        unchecked
+        {
+            sig = sig * 31 + (manager != null ? manager.GetInstanceID() : 0);
+            sig = sig * 31 + (manager != null ? manager.VertexDensity.GetHashCode() : 0);
+            sig = sig * 31 + (manager != null ? manager.GreypipeLengthSubdivMultiplier.GetHashCode() : 0);
+            sig = sig * 31 + (manager != null ? manager.GreypipeGirthSubdivMultiplier.GetHashCode() : 0);
+            sig = sig * 31 + transform.lossyScale.GetHashCode();
+            sig = sig * 31 + _subdivisionMultiplier.GetHashCode();
+            sig = sig * 31 + GetSubclassRebuildSignature();
+        }
+        return sig;
     }
 #endif
+
+    /// <summary>
+    /// Subclasses mix in any local field that affects mesh output so that inspector edits
+    /// are reflected without requiring an explicit OnValidate call site.
+    /// </summary>
+    protected virtual int GetSubclassRebuildSignature() => 0;
 
     // ─── Public API ──────────────────────────────────────────────
 

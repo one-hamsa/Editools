@@ -34,15 +34,12 @@ public class Greypipe : GreyPrimitive
     float _baseGirth = 0.5f;
 
     [SerializeField]
-    [Tooltip("Number of polygon sides for the circular cross-section. Higher = smoother.")]
-    int _sides = 8;
-
-    [SerializeField]
-    [Tooltip("Multiplier for ring density along the pipe's length. Higher = more rings at curves.")]
+    [Tooltip("Multiplier for ring density along the pipe's length. Higher = more rings.")]
     float _lengthSubdivMultiplier = 1f;
 
     [SerializeField]
-    [Tooltip("Multiplier for circumference subdivision density. Higher = more segments around the tube.")]
+    [Tooltip("Multiplier for circumference (side) subdivision density. Side count is auto-derived " +
+             "from girth and vertex density; this multiplier tweaks the result manually.")]
     float _girthSubdivMultiplier = 1f;
 
     // ─── Public accessors ───────────────────────────────────────
@@ -53,12 +50,6 @@ public class Greypipe : GreyPrimitive
     {
         get => _baseGirth;
         set { _baseGirth = Mathf.Max(0.001f, value); }
-    }
-
-    public int Sides
-    {
-        get => _sides;
-        set { _sides = Mathf.Max(3, value); }
     }
 
     public float LengthSubdivMultiplier
@@ -355,11 +346,33 @@ public class Greypipe : GreyPrimitive
             _vertices = DefaultVertices();
     }
 
+    protected override int GetSubclassRebuildSignature()
+    {
+        unchecked
+        {
+            int sig = 17;
+            sig = sig * 31 + _baseGirth.GetHashCode();
+            sig = sig * 31 + _lengthSubdivMultiplier.GetHashCode();
+            sig = sig * 31 + _girthSubdivMultiplier.GetHashCode();
+            sig = sig * 31 + (_vertices != null ? _vertices.Count : 0);
+            if (_vertices != null)
+            {
+                for (int i = 0; i < _vertices.Count; i++)
+                {
+                    var v = _vertices[i];
+                    sig = sig * 31 + v.position.GetHashCode();
+                    sig = sig * 31 + v.handleLength.GetHashCode();
+                    sig = sig * 31 + v.girthMultiplier.GetHashCode();
+                }
+            }
+            return sig;
+        }
+    }
+
     protected override void ResetToDefaults()
     {
         _vertices = DefaultVertices();
         _baseGirth = 0.5f;
-        _sides = 8;
     }
 
     protected override void GenerateMesh(Mesh mesh)
@@ -473,21 +486,62 @@ public class Greypipe : GreyPrimitive
 
     int ComputeSegmentSubdivisions(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float density)
     {
+        // Two-stage subdivision, computed per-segment so curvature only adds rings where the
+        // bend actually is:
+        //   1. Base: length × density × length-multiplier (the "default length subdiv").
+        //   2. Curvature bonus: extra rings proportional to how much THIS segment bends.
+        //      curveRatio = (control-polygon length − chord length) / chord length.
+        //      A straight segment has curveRatio = 0 → no bonus.
+        //      A heavily curved bezier hits ratio ≈ 1 → roughly doubles the segment's rings.
         float chordLen = Vector3.Distance(p0, p3);
-        float polyLen  = Vector3.Distance(p0, p1) + Vector3.Distance(p1, p2) + Vector3.Distance(p2, p3);
-        float curvature = Mathf.Max(0f, polyLen - chordLen);
+        float densityFactor = density > 0f ? density : 1f;
+        float lengthMultiplier = Mathf.Max(0.1f, _lengthSubdivMultiplier) * GetManagerLengthMultiplier();
 
-        int baseDivs = Mathf.Max(2, Mathf.RoundToInt(chordLen * 0.5f));
-        int curveDivs = Mathf.RoundToInt(curvature * 1.5f);
+        int baseSubdivs = Mathf.Max(2, Mathf.CeilToInt(chordLen * densityFactor * lengthMultiplier));
 
-        float multiplier = Mathf.Max(0.1f, _lengthSubdivMultiplier * (density > 0f ? density : 1f));
-        return Mathf.Max(2, Mathf.RoundToInt((baseDivs + curveDivs) * multiplier));
+        float polyLen   = Vector3.Distance(p0, p1) + Vector3.Distance(p1, p2) + Vector3.Distance(p2, p3);
+        float curveRatio = chordLen > 0.001f ? (polyLen - chordLen) / chordLen : 0f;
+        int   curveBonus = Mathf.CeilToInt(baseSubdivs * Mathf.Clamp(curveRatio, 0f, 3f));
+
+        return baseSubdivs + curveBonus;
     }
 
+    /// <summary>
+    /// Auto-derives the circular cross-section side count from base girth.
+    /// Reference points (with all multipliers = 1):
+    ///   girth 0.3 → 4 sides
+    ///   girth 1.0 → 8 sides
+    ///   girth 5.0 → 12 sides
+    /// Above 5, sides grow gently by +2 per girth doubling.
+    /// </summary>
     int ComputeCircleSegments(float density)
     {
-        float multiplier = Mathf.Max(0.1f, _girthSubdivMultiplier * (density > 0f ? density : 1f));
-        return Mathf.Max(3, Mathf.RoundToInt(_sides * multiplier));
+        float g = Mathf.Max(0.001f, _baseGirth);
+        float baseSides;
+        if (g <= 0.3f)
+            baseSides = 4f;
+        else if (g <= 1f)
+            baseSides = Mathf.Lerp(4f, 8f, (g - 0.3f) / 0.7f);
+        else if (g <= 5f)
+            baseSides = Mathf.Lerp(8f, 12f, (g - 1f) / 4f);
+        else
+            baseSides = 12f + 2f * Mathf.Log(g / 5f, 2f);
+
+        float densityFactor = density > 0f ? density : 1f;
+        float girthMultiplier = Mathf.Max(0.1f, _girthSubdivMultiplier) * GetManagerGirthMultiplier();
+        return Mathf.Max(3, Mathf.RoundToInt(baseSides * densityFactor * girthMultiplier));
+    }
+
+    float GetManagerLengthMultiplier()
+    {
+        var manager = GetComponentInParent<GreyboxManager>();
+        return manager != null ? manager.GreypipeLengthSubdivMultiplier : 1f;
+    }
+
+    float GetManagerGirthMultiplier()
+    {
+        var manager = GetComponentInParent<GreyboxManager>();
+        return manager != null ? manager.GreypipeGirthSubdivMultiplier : 1f;
     }
 
     // ─── Bezier math ────────────────────────────────────────────
@@ -543,24 +597,33 @@ public class Greypipe : GreyPrimitive
 
     // ─── Defaults ────────────────────────────────────────────────
 
-    static List<SplineVertex> DefaultVertices()
+    /// <summary>
+    /// Creates a straight pipe along local Z with the given total length, centered at the origin.
+    /// Handle length defaults to half the pipe length so the bezier is smooth from the start.
+    /// </summary>
+    public static List<SplineVertex> CreateDefaultVertices(float length)
     {
+        float half = Mathf.Max(0.001f, length) * 0.5f;
+        float hLen = half;
         return new List<SplineVertex>
         {
             new SplineVertex
             {
-                position        = new Vector3(0f, 0f, -0.5f),
+                position        = new Vector3(0f, 0f, -half),
                 handleRotation  = Quaternion.identity,
-                handleLength    = 0.5f,
+                handleLength    = hLen,
                 girthMultiplier = 1f,
             },
             new SplineVertex
             {
-                position        = new Vector3(0f, 0f, 0.5f),
+                position        = new Vector3(0f, 0f,  half),
                 handleRotation  = Quaternion.identity,
-                handleLength    = 0.5f,
+                handleLength    = hLen,
                 girthMultiplier = 1f,
             },
         };
     }
+
+    const float k_DefaultLength = 5f;
+    static List<SplineVertex> DefaultVertices() => CreateDefaultVertices(k_DefaultLength);
 }

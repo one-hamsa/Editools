@@ -53,6 +53,7 @@ static partial class QuickTransform
     const string k_LinearRotPref = k_Pref + "LinearRot";
     const string k_LinearRotSensPref = k_Pref + "LinearRotSens";
     const string k_RotSnapPref      = k_Pref + "RotSnapAngle";
+    const string k_ShowTooltipsPref = k_Pref + "ShowTooltips";
     internal static bool Enabled
     {
         get => EditorPrefs.GetBool(k_EnabledPref, true);
@@ -87,6 +88,12 @@ static partial class QuickTransform
     {
         get => EditorPrefs.GetFloat(k_RotSnapPref, 15f);
         set => EditorPrefs.SetFloat(k_RotSnapPref, Mathf.Clamp(value, 1f, 90f));
+    }
+
+    internal static bool ShowTooltips
+    {
+        get => EditorPrefs.GetBool(k_ShowTooltipsPref, true);
+        set => EditorPrefs.SetBool(k_ShowTooltipsPref, value);
     }
 
     // ─── Config (legacy ScriptableObject, still used for UpAxis) ─
@@ -272,6 +279,7 @@ static partial class QuickTransform
         if (e.type == EventType.MouseLeaveWindow)
         {
             wHeld = eHeld = rHeld = qHeld = false;
+            rmbHeld = false;
             if (phase == Phase.Dragging)
             {
                 // Commit the drag — treat leaving the window as a normal release
@@ -305,7 +313,10 @@ static partial class QuickTransform
                          || (suppressKeyUpFor == Mode.Rotate  && e.keyCode == KeyCode.E)
                          || (suppressKeyUpFor == Mode.Scale   && e.keyCode == KeyCode.R)
                          || (suppressKeyUpFor == Mode.Special && e.keyCode == KeyCode.Q);
-            if (suppress) { suppressKeyUpFor = Mode.None; e.Use(); return; }
+            // Clear our flag, but do NOT consume the KeyUp — Unity needs it to update its
+            // own internal keystate (otherwise scene-view RMB nav thinks the key is still
+            // held and the camera flies in that direction next time RMB is pressed).
+            if (suppress) { suppressKeyUpFor = Mode.None; return; }
         }
 
         Transform[] selected = Selection.transforms;
@@ -320,6 +331,15 @@ static partial class QuickTransform
 
         // Hide Unity's built-in gizmo when QuickTransform is active
         Tools.hidden = heldMode != Mode.None || phase != Phase.Idle;
+
+        // While any QT mode key is held, claim default mouse-event handling so the scene-view's
+        // RMB camera fly-through doesn't activate underneath us. Modes that don't act on RMB
+        // still need to swallow it so the user doesn't lose the camera.
+        if (heldMode != Mode.None || phase != Phase.Idle)
+        {
+            int blockerId = GUIUtility.GetControlID(FocusType.Passive);
+            HandleUtility.AddDefaultControl(blockerId);
+        }
 
         switch (phase)
         {
@@ -341,7 +361,11 @@ static partial class QuickTransform
                 bool hoveringPipeVertex = previewPipe != null
                     && (greypipeHoveredVertex >= 0 || greypipeHoveredBezierVertex >= 0);
 
-                if (previewPipe != null)
+                // In Rotate mode, Greypipe rotates as a whole object — skip spline overlay so the
+                // standard OBB+gizmo flow takes over (matching every other selectable object).
+                bool greypipeHasVertexOverlay = previewPipe != null && heldMode != Mode.Rotate;
+
+                if (greypipeHasVertexOverlay)
                 {
                     // Greypipe: spline + handles. Suppress bounding box when hovering a vertex —
                     // the vertex gizmos take over.
@@ -383,6 +407,11 @@ static partial class QuickTransform
                 sv.Repaint();
         }
 
+        // ── Tooltip overlay ──
+        Mode tooltipMode = heldMode != Mode.None ? heldMode : activeMode;
+        if (tooltipMode != Mode.None && e.type == EventType.Repaint)
+            DrawTooltipOverlay(sv, tooltipMode);
+
         if (heldMode != Mode.None || phase != Phase.Idle)
         {
             EditorGUIUtility.AddCursorRect(
@@ -402,6 +431,11 @@ static partial class QuickTransform
         if (e.type == EventType.MouseDown && e.button == 1)
             rmbHeld = true;
         if (e.type == EventType.MouseUp && e.button == 1)
+            rmbHeld = false;
+        // Recovery: Unity only fires MouseMove when NO mouse buttons are held.
+        // If we ever miss a MouseUp (RMB released over another window, focus loss, etc.)
+        // the next MouseMove proves RMB is physically up — clear the stuck flag.
+        if (e.type == EventType.MouseMove)
             rmbHeld = false;
 
         if (e.type == EventType.KeyDown && !e.alt && !e.control && !rmbHeld)
@@ -538,15 +572,55 @@ static partial class QuickTransform
         if (e.type != EventType.MouseDown) return;
         if (e.button != 0 && e.button != 1 && e.button != 2) return;
 
-        // Greypipe: vertex handle click takes priority — works for all modes and all buttons,
-        // so it must be checked BEFORE the RMB-only-for-Move/Scale early return below.
+        // Greypipe: vertex / bezier-handle clicks take priority over OBB hover.
+        // Rotate mode (E) does NOT engage vertex mode — Greypipe rotates as a whole object.
         if (selected.Length == 1)
         {
             var pipe = selected[0].GetComponent<Greypipe>();
-            if (pipe != null)
+            if (pipe != null && heldMode != Mode.Rotate)
             {
-                // In Move mode, bezier endpoint dots take priority — drag them to reshape the bezier.
-                if (heldMode == Mode.Move && e.button == 0)
+                int vtx = DetectGreypipeVertexHover(sv, e.mousePosition, pipe);
+
+                // MMB on vertex in Move mode: reset handle to align with Main Axis. No drag.
+                if (vtx >= 0 && e.button == 2 && heldMode == Mode.Move)
+                {
+                    Undo.IncrementCurrentGroup();
+                    int g = Undo.GetCurrentGroup();
+                    Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
+                    pipe.ResetVertexHandle(vtx);
+                    pipe.RebuildMesh();
+                    EditorUtility.SetDirty(pipe);
+                    Undo.SetCurrentGroupName("Reset Greypipe Handle");
+                    Undo.CollapseUndoOperations(g);
+                    e.Use();
+                    return;
+                }
+                if (e.button == 2) return;  // MMB in other modes — ignore (consumed)
+
+                if (vtx >= 0)
+                {
+                    // Vertex takes priority over handle endpoints when ambiguous.
+                    activeMode = heldMode;
+                    dragTargets = selected;
+                    SnapshotTransforms();
+                    selectionPivot = ComputePivot();
+
+                    BeginGreypipeVertexTransform(pipe, vtx, activeMode, e.mousePosition);
+                    phase = Phase.Ready;
+                    mousePressPos = e.mousePosition;
+                    dragButton = e.button;
+                    shiftHeldOnPress = e.shift;
+                    didDuplicate = false;
+
+                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
+                    HandleUtility.AddDefaultControl(ctrlId);
+                    GUIUtility.hotControl = ctrlId;
+                    e.Use();
+                    return;
+                }
+
+                // No vertex hit — check for bezier handle endpoint (Move mode only).
+                if (heldMode == Mode.Move && (e.button == 0 || e.button == 1))
                 {
                     DetectGreypipeBezierHover(sv, e.mousePosition, pipe, out int bvtx, out int bside);
                     if (bvtx >= 0)
@@ -570,48 +644,20 @@ static partial class QuickTransform
                         return;
                     }
                 }
-
-                int vtx = DetectGreypipeVertexHover(sv, e.mousePosition, pipe);
-                if (vtx >= 0)
-                {
-                    // MMB on vertex in Rotate mode: reset that handle to align with the Main Axis. No drag.
-                    if (e.button == 2 && heldMode == Mode.Rotate)
-                    {
-                        Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
-                        pipe.ResetVertexHandle(vtx);
-                        pipe.RebuildMesh();
-                        EditorUtility.SetDirty(pipe);
-                        e.Use();
-                        return;
-                    }
-
-                    // MMB in other modes — ignore (we don't have a defined behaviour).
-                    if (e.button == 2) return;
-
-                    activeMode = heldMode;
-                    dragTargets = selected;
-                    SnapshotTransforms();
-                    selectionPivot = ComputePivot();
-
-                    BeginGreypipeVertexTransform(pipe, vtx, activeMode, e.mousePosition);
-                    phase = Phase.Ready;
-                    mousePressPos = e.mousePosition;
-                    dragButton = e.button;
-                    shiftHeldOnPress = e.shift;
-                    didDuplicate = false;
-
-                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
-                    HandleUtility.AddDefaultControl(ctrlId);
-                    GUIUtility.hotControl = ctrlId;
-                    e.Use();
-                    return;
-                }
             }
         }
 
-        if (e.button == 2) return;  // MMB outside Greypipe vertex: ignore
-        // RMB is used for face-normal movement (Move) and uniform scaling (Scale)
-        if (e.button == 1 && heldMode != Mode.Move && heldMode != Mode.Scale) return;
+        // MMB outside Greypipe vertex: consume to block scene-nav, but take no action.
+        if (e.button == 2) { e.Use(); return; }
+
+        // RMB is used for face-normal movement (Move) and uniform scaling (Scale).
+        // For other modes (Rotate, Special), consume the RMB MouseDown so Unity's scene-view
+        // camera fly-through doesn't engage while a QT key is held.
+        if (e.button == 1 && heldMode != Mode.Move && heldMode != Mode.Scale)
+        {
+            e.Use();
+            return;
+        }
 
         activeMode = heldMode;
         dragTargets = selected;
@@ -860,11 +906,18 @@ static partial class QuickTransform
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
+                // Greypipe vertex/handle/special drags register their own undo and capture
+                // undoGroup in BeginGreypipeVertexTransform / BeginGreypipeBezierHandleDrag /
+                // HandleGreypipeSpecialIdle. Skip the generic registration here so we don't
+                // open a later group that escapes the eventual CollapseUndoOperations call.
+                bool greypipeOwned = greypipeTarget != null;
+
                 if (extrudeNewGb != null)
                 {
                     Undo.RegisterCompleteObjectUndo(extrudeNewGb, "Greybox Extrude");
+                    undoGroup = Undo.GetCurrentGroup();
                 }
-                else
+                else if (!greypipeOwned)
                 {
                     if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
                         DuplicateAndSwapTargets();
@@ -877,8 +930,8 @@ static partial class QuickTransform
                         foreach (var t in dragTargets)
                             Undo.RegisterCompleteObjectUndo(t, undoName);
                     }
+                    undoGroup = Undo.GetCurrentGroup();
                 }
-                undoGroup = Undo.GetCurrentGroup();
 
                 phase = Phase.Dragging;
 
@@ -2442,5 +2495,157 @@ static partial class QuickTransform
         // Inactive Z disc
         Handles.color = new Color(0.3f, 0.3f, 0.8f, 0.15f);
         Handles.DrawWireDisc(center, Vector3.forward, sz);
+    }
+
+    // ─── Scene View Tooltips ────────────────────────────────────
+
+    static GUIStyle s_tooltipStyle;
+    static GUIStyle s_tooltipActiveStyle;
+    static GUIStyle s_tooltipHeaderStyle;
+    static GUIStyle s_tooltipActionStyle;
+
+    static void EnsureTooltipStyles()
+    {
+        if (s_tooltipStyle != null) return;
+
+        s_tooltipStyle = new GUIStyle(EditorStyles.label)
+        {
+            fontSize  = 11,
+            normal    = { textColor = new Color(0.7f, 0.7f, 0.7f, 0.8f) },
+            padding   = new RectOffset(0, 0, 0, 0),
+            margin    = new RectOffset(0, 0, 0, 0),
+        };
+
+        s_tooltipActiveStyle = new GUIStyle(s_tooltipStyle)
+        {
+            fontStyle = FontStyle.Bold,
+            normal    = { textColor = new Color(1f, 1f, 0.4f, 1f) },
+        };
+
+        s_tooltipHeaderStyle = new GUIStyle(s_tooltipStyle)
+        {
+            fontStyle = FontStyle.Bold,
+            normal    = { textColor = new Color(1f, 1f, 1f, 0.9f) },
+        };
+
+        s_tooltipActionStyle = new GUIStyle(s_tooltipStyle)
+        {
+            fontSize = 10,
+            normal   = { textColor = new Color(0.85f, 0.85f, 0.85f, 0.7f) },
+        };
+    }
+
+    static void DrawTooltipOverlay(SceneView sv, Mode heldMode)
+    {
+        if (!ShowTooltips) return;
+        if (heldMode == Mode.None) return;
+
+        EnsureTooltipStyles();
+
+        Handles.BeginGUI();
+
+        float x = 10f;
+        float y = sv.position.height - 46f;
+        float lineH = 15f;
+
+        var lines = new System.Collections.Generic.List<(string text, GUIStyle style)>();
+
+        bool hasSpecial = false;
+        var sel = Selection.transforms;
+        bool isGreybox  = false;
+        bool isGreypipe = false;
+        if (sel != null && sel.Length == 1 && sel[0] != null)
+        {
+            isGreybox  = sel[0].GetComponent<Greybox>() != null;
+            isGreypipe = sel[0].GetComponent<Greypipe>() != null;
+            hasSpecial = isGreybox || isGreypipe;
+        }
+
+        // Actions for the active mode
+        switch (heldMode)
+        {
+            case Mode.Move:
+                lines.Add(("LMB face — slide on face plane", s_tooltipActionStyle));
+                lines.Add(("RMB face — push/pull along normal", s_tooltipActionStyle));
+                lines.Add(("LMB outside — XZ plane movement", s_tooltipActionStyle));
+                if (isGreybox)
+                {
+                    lines.Add(("LMB edge — deform edge (Shift: snap axis)", s_tooltipActionStyle));
+                    lines.Add(("RMB edge — reset edge", s_tooltipActionStyle));
+                }
+                break;
+            case Mode.Rotate:
+                lines.Add(("LMB face — rotate around face normal", s_tooltipActionStyle));
+                lines.Add(("LMB edge — rotate around edge axis", s_tooltipActionStyle));
+                lines.Add(("LMB outside — rotate around world Y", s_tooltipActionStyle));
+                lines.Add(("Ctrl — snap to " + RotSnapAngle + "°", s_tooltipActionStyle));
+                break;
+            case Mode.Scale:
+                lines.Add(("LMB face — single-axis scale", s_tooltipActionStyle));
+                lines.Add(("RMB face — uniform scale (opposite anchor)", s_tooltipActionStyle));
+                lines.Add(("RMB outside — uniform scale (pivot anchor)", s_tooltipActionStyle));
+                break;
+            case Mode.Special:
+                if (isGreybox)
+                {
+                    lines.Add(("LMB face — toggle face", s_tooltipActionStyle));
+                    lines.Add(("RMB face — extrude (hide seam)", s_tooltipActionStyle));
+                    lines.Add(("MMB face — extrude (keep faces)", s_tooltipActionStyle));
+                }
+                else if (isGreypipe)
+                {
+                    lines.Add(("LMB edge vtx — extend pipe", s_tooltipActionStyle));
+                    lines.Add(("LMB spline — insert vertex", s_tooltipActionStyle));
+                    lines.Add(("RMB vertex — delete vertex", s_tooltipActionStyle));
+                    lines.Add(("MMB vertex — adjust girth", s_tooltipActionStyle));
+                }
+                break;
+        }
+
+        lines.Add(("Shift + drag — duplicate then transform", s_tooltipActionStyle));
+
+        // Mode header
+        string modeLabel = heldMode switch
+        {
+            Mode.Move    => "W — Move",
+            Mode.Rotate  => "E — Rotate",
+            Mode.Scale   => "R — Scale",
+            Mode.Special => "Q — Special",
+            _            => "",
+        };
+        lines.Insert(0, (modeLabel, s_tooltipHeaderStyle));
+
+        // Mode list at the bottom
+        lines.Add(("", s_tooltipStyle)); // spacer
+        AddModeLine(lines, "Q", "Special", Mode.Special, heldMode, hasSpecial);
+        AddModeLine(lines, "W", "Move",    Mode.Move,    heldMode, true);
+        AddModeLine(lines, "E", "Rotate",  Mode.Rotate,  heldMode, true);
+        AddModeLine(lines, "R", "Scale",   Mode.Scale,   heldMode, true);
+
+        // Draw bottom-up from y
+        float totalH = lines.Count * lineH;
+        float startY = y - totalH;
+
+        // Background
+        Rect bgRect = new Rect(x - 4f, startY - 2f, 260f, totalH + 6f);
+        EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.5f));
+
+        for (int i = 0; i < lines.Count; i++)
+        {
+            Rect r = new Rect(x, startY + i * lineH, 256f, lineH);
+            GUI.Label(r, lines[i].text, lines[i].style);
+        }
+
+        Handles.EndGUI();
+    }
+
+    static void AddModeLine(
+        System.Collections.Generic.List<(string text, GUIStyle style)> lines,
+        string key, string label, Mode mode, Mode activeMode, bool available)
+    {
+        if (!available) return;
+        bool active = mode == activeMode;
+        string text = $"{key} — {label}";
+        lines.Add((text, active ? s_tooltipActiveStyle : s_tooltipStyle));
     }
 }
