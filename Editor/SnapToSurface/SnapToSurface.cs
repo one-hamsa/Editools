@@ -282,13 +282,12 @@ public class SnapToSurface : EditorWindow
             Vector3 v1 = transform.TransformPoint(vertices[triangles[closestTriIndex + 1]]);
             Vector3 v2 = transform.TransformPoint(vertices[triangles[closestTriIndex + 2]]);
 
-            Vector3 barycentric = GetBarycentricCoordinates(hitPoint, v0, v1, v2);
-
-            Vector3 n0 = transform.TransformDirection(normals[triangles[closestTriIndex]]);
-            Vector3 n1 = transform.TransformDirection(normals[triangles[closestTriIndex + 1]]);
-            Vector3 n2 = transform.TransformDirection(normals[triangles[closestTriIndex + 2]]);
-
-            hitNormal = (n0 * barycentric.x + n1 * barycentric.y + n2 * barycentric.z).normalized;
+            // Use the hit triangle's true geometric normal rather than interpolating
+            // stored vertex normals. Vertex normals reflect shading intent (smooth/flat)
+            // and on deformed meshes — e.g. greybox faces with moved edges — they don't
+            // match the actual surface orientation. For snapping we always want the real
+            // angle of the triangle we hit.
+            hitNormal = Vector3.Cross(v1 - v0, v2 - v0).normalized;
         }
 
         return hitFound;

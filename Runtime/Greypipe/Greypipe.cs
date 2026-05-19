@@ -397,14 +397,37 @@ public class Greypipe : GreyPrimitive
         Vector3 mainAxis = MainAxisLocal;
         Vector3 refUp = DeriveUp(mainAxis);
 
+        // Parallel-transport (Bishop) frame state — carried ring-to-ring to avoid twists
+        // when the path's tangent passes near the global up vector.
+        Vector3 prevForward = Vector3.zero;
+        Vector3 prevRight = Vector3.zero;
+
         for (int ring = 0; ring < ringCount; ring++)
         {
             var s = samples[ring];
             Vector3 forward = s.tangent.normalized;
             if (forward.sqrMagnitude < 0.0001f) forward = mainAxis;
 
-            Vector3 right = Vector3.Cross(refUp, forward).normalized;
+            Vector3 right;
+            if (ring == 0)
+            {
+                // Seed the frame. If forward is parallel to refUp, fall back to an orthogonal axis.
+                Vector3 seedUp = refUp;
+                if (Mathf.Abs(Vector3.Dot(seedUp, forward)) > 0.999f)
+                    seedUp = Mathf.Abs(forward.y) > 0.9f ? Vector3.right : Vector3.up;
+                right = Vector3.Cross(seedUp, forward).normalized;
+            }
+            else
+            {
+                // Rotate the previous right by the minimal rotation that maps prevForward -> forward.
+                right = Quaternion.FromToRotation(prevForward, forward) * prevRight;
+                // Re-orthonormalize to prevent numerical drift.
+                right = (right - Vector3.Dot(right, forward) * forward).normalized;
+            }
             Vector3 up = Vector3.Cross(forward, right).normalized;
+
+            prevForward = forward;
+            prevRight = right;
 
             float radius = _baseGirth * s.girth;
 
