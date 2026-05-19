@@ -358,12 +358,18 @@ static partial class QuickTransform
             if (e.type == EventType.Repaint)
             {
                 Greypipe previewPipe = selected.Length == 1 ? selected[0].GetComponent<Greypipe>() : null;
+                Greyroad previewRoad = selected.Length == 1 ? selected[0].GetComponent<Greyroad>() : null;
                 bool hoveringPipeVertex = previewPipe != null
                     && (greypipeHoveredVertex >= 0 || greypipeHoveredBezierVertex >= 0);
+                bool hoveringRoadVertex = previewRoad != null
+                    && (greyroadHoveredVertex >= 0
+                        || greyroadHoveredBezierVertex >= 0
+                        || greyroadHoveredBankingVertex >= 0);
 
                 // In Rotate mode, Greypipe rotates as a whole object — skip spline overlay so the
                 // standard OBB+gizmo flow takes over (matching every other selectable object).
                 bool greypipeHasVertexOverlay = previewPipe != null && heldMode != Mode.Rotate;
+                bool greyroadHasVertexOverlay = previewRoad != null && heldMode != Mode.Rotate;
 
                 if (greypipeHasVertexOverlay)
                 {
@@ -373,6 +379,24 @@ static partial class QuickTransform
                         DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
                     DrawGreypipeSpline(previewPipe, -1);
                     DrawGreypipeVertexHandles(previewPipe, greypipeHoveredVertex);
+                }
+                else if (greyroadHasVertexOverlay)
+                {
+                    if (heldMode == Mode.Special)
+                    {
+                        // Special mode: show the road's box outline + face dots so the user
+                        // can see exactly which side they're about to toggle.
+                        DrawGreyroadBoundsOutline(previewRoad);
+                        DrawGreyroadSpline(previewRoad, -1);
+                        DrawGreyroadFaceDots(previewRoad, greyroadHoveredFace);
+                    }
+                    else
+                    {
+                        if (!hoveringRoadVertex)
+                            DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                        DrawGreyroadSpline(previewRoad, -1);
+                        DrawGreyroadVertexHandles(previewRoad, greyroadHoveredVertex);
+                    }
                 }
                 else if (heldMode == Mode.Move && selected.Length == 1)
                 {
@@ -467,7 +491,9 @@ static partial class QuickTransform
         {
             var sel = Selection.transforms;
             if (sel != null && sel.Length == 1 && sel[0] != null
-                && (sel[0].GetComponent<Greybox>() != null || sel[0].GetComponent<Greypipe>() != null))
+                && (sel[0].GetComponent<Greybox>() != null
+                 || sel[0].GetComponent<Greypipe>() != null
+                 || sel[0].GetComponent<Greyroad>() != null))
                 return Mode.Special;
         }
         return Mode.None;
@@ -487,6 +513,14 @@ static partial class QuickTransform
             if (pipe != null)
             {
                 HandleGreypipeSpecialIdle(e, sv, pipe, selected);
+                return;
+            }
+
+            // Greyroad special mode: LMB toggles a face / inserts vertex / extends; RMB deletes vertex; MMB adjusts width
+            var road = selected[0].GetComponent<Greyroad>();
+            if (road != null)
+            {
+                HandleGreyroadSpecialIdle(e, sv, road, selected);
                 return;
             }
 
@@ -581,17 +615,23 @@ static partial class QuickTransform
             {
                 int vtx = DetectGreypipeVertexHover(sv, e.mousePosition, pipe);
 
-                // MMB on vertex in Move mode: reset handle to align with Main Axis. No drag.
-                if (vtx >= 0 && e.button == 2 && heldMode == Mode.Move)
+                // MMB in Move mode resets the hovered Bezier handle to identity. MMB on the
+                // vertex itself is a no-op (the user has to grab a handle endpoint to reset it).
+                if (e.button == 2 && heldMode == Mode.Move)
                 {
-                    Undo.IncrementCurrentGroup();
-                    int g = Undo.GetCurrentGroup();
-                    Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
-                    pipe.ResetVertexHandle(vtx);
-                    pipe.RebuildMesh();
-                    EditorUtility.SetDirty(pipe);
-                    Undo.SetCurrentGroupName("Reset Greypipe Handle");
-                    Undo.CollapseUndoOperations(g);
+                    if (vtx >= 0) { e.Use(); return; }
+                    DetectGreypipeBezierHover(sv, e.mousePosition, pipe, out int rvtx, out int rside);
+                    if (rvtx >= 0)
+                    {
+                        Undo.IncrementCurrentGroup();
+                        int g = Undo.GetCurrentGroup();
+                        Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
+                        pipe.ResetVertexHandle(rvtx);
+                        pipe.RebuildMesh();
+                        EditorUtility.SetDirty(pipe);
+                        Undo.SetCurrentGroupName("Reset Greypipe Handle");
+                        Undo.CollapseUndoOperations(g);
+                    }
                     e.Use();
                     return;
                 }
@@ -640,6 +680,115 @@ static partial class QuickTransform
                         int ctrlId2 = GUIUtility.GetControlID(FocusType.Passive);
                         HandleUtility.AddDefaultControl(ctrlId2);
                         GUIUtility.hotControl = ctrlId2;
+                        e.Use();
+                        return;
+                    }
+                }
+            }
+
+            // Greyroad: vertex / banking / bezier-handle clicks take priority over OBB hover.
+            var roadSel = selected[0].GetComponent<Greyroad>();
+            if (roadSel != null && heldMode != Mode.Rotate)
+            {
+                int vtx = DetectGreyroadVertexHover(sv, e.mousePosition, roadSel);
+
+                // MMB in Move mode: reset Bezier handle (priority) or Banking handle. MMB on
+                // the vertex itself is a no-op (must grab a handle endpoint).
+                if (e.button == 2 && heldMode == Mode.Move)
+                {
+                    if (vtx >= 0) { e.Use(); return; }
+
+                    DetectGreyroadBezierHover(sv, e.mousePosition, roadSel, out int rvtx, out int rside);
+                    if (rvtx >= 0)
+                    {
+                        Undo.IncrementCurrentGroup();
+                        int g = Undo.GetCurrentGroup();
+                        Undo.RegisterCompleteObjectUndo(roadSel, "Reset Greyroad Handle");
+                        roadSel.ResetVertexHandle(rvtx);
+                        roadSel.RebuildMesh();
+                        EditorUtility.SetDirty(roadSel);
+                        Undo.SetCurrentGroupName("Reset Greyroad Handle");
+                        Undo.CollapseUndoOperations(g);
+                        e.Use();
+                        return;
+                    }
+
+                    DetectGreyroadBankingHover(sv, e.mousePosition, roadSel, out int kvtx, out int kside);
+                    if (kvtx >= 0)
+                    {
+                        HandleGreyroadBankingMMBReset(roadSel, kvtx);
+                        e.Use();
+                        return;
+                    }
+                    e.Use();
+                    return;
+                }
+                if (e.button == 2) return;
+
+                if (vtx >= 0)
+                {
+                    activeMode = heldMode;
+                    dragTargets = selected;
+                    SnapshotTransforms();
+                    selectionPivot = ComputePivot();
+
+                    BeginGreyroadVertexTransform(roadSel, vtx, activeMode, e.mousePosition);
+                    phase = Phase.Ready;
+                    mousePressPos = e.mousePosition;
+                    dragButton = e.button;
+                    shiftHeldOnPress = e.shift;
+                    didDuplicate = false;
+
+                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
+                    HandleUtility.AddDefaultControl(ctrlId);
+                    GUIUtility.hotControl = ctrlId;
+                    e.Use();
+                    return;
+                }
+
+                if (heldMode == Mode.Move && (e.button == 0 || e.button == 1))
+                {
+                    DetectGreyroadBezierHover(sv, e.mousePosition, roadSel, out int bvtx, out int bside);
+                    if (bvtx >= 0)
+                    {
+                        activeMode = heldMode;
+                        dragTargets = selected;
+                        SnapshotTransforms();
+                        selectionPivot = ComputePivot();
+
+                        BeginGreyroadBezierHandleDrag(roadSel, bvtx, bside, e.mousePosition);
+                        phase = Phase.Ready;
+                        mousePressPos = e.mousePosition;
+                        dragButton = e.button;
+                        shiftHeldOnPress = false;
+                        didDuplicate = false;
+
+                        int ctrlId2 = GUIUtility.GetControlID(FocusType.Passive);
+                        HandleUtility.AddDefaultControl(ctrlId2);
+                        GUIUtility.hotControl = ctrlId2;
+                        e.Use();
+                        return;
+                    }
+
+                    // Banking handle (lower priority, smaller hit radius).
+                    DetectGreyroadBankingHover(sv, e.mousePosition, roadSel, out int kvtx, out int kside);
+                    if (kvtx >= 0)
+                    {
+                        activeMode = heldMode;
+                        dragTargets = selected;
+                        SnapshotTransforms();
+                        selectionPivot = ComputePivot();
+
+                        BeginGreyroadBankingHandleDrag(roadSel, kvtx, kside, e.mousePosition);
+                        phase = Phase.Ready;
+                        mousePressPos = e.mousePosition;
+                        dragButton = e.button;
+                        shiftHeldOnPress = false;
+                        didDuplicate = false;
+
+                        int ctrlId3 = GUIUtility.GetControlID(FocusType.Passive);
+                        HandleUtility.AddDefaultControl(ctrlId3);
+                        GUIUtility.hotControl = ctrlId3;
                         e.Use();
                         return;
                     }
@@ -906,11 +1055,10 @@ static partial class QuickTransform
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                // Greypipe vertex/handle/special drags register their own undo and capture
-                // undoGroup in BeginGreypipeVertexTransform / BeginGreypipeBezierHandleDrag /
-                // HandleGreypipeSpecialIdle. Skip the generic registration here so we don't
-                // open a later group that escapes the eventual CollapseUndoOperations call.
-                bool greypipeOwned = greypipeTarget != null;
+                // Greypipe/Greyroad vertex/handle/special drags register their own undo and capture
+                // undoGroup in their Begin* / HandleSpecialIdle paths. Skip the generic registration
+                // here so we don't open a later group that escapes the eventual CollapseUndoOperations call.
+                bool greypipeOwned = greypipeTarget != null || greyroadTarget != null;
 
                 if (extrudeNewGb != null)
                 {
@@ -965,6 +1113,12 @@ static partial class QuickTransform
                 DrawGreypipeSpline(greypipeTarget, greypipeSelectedVertex);
                 DrawGreypipeVertexHandles(greypipeTarget, greypipeSelectedVertex);
             }
+            else if (greyroadTarget != null)
+            {
+                DrawGreyroadDragPlane();
+                DrawGreyroadSpline(greyroadTarget, greyroadSelectedVertex);
+                DrawGreyroadVertexHandles(greyroadTarget, greyroadSelectedVertex);
+            }
             else if (greyboxTarget != null)
             {
                 DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
@@ -992,6 +1146,7 @@ static partial class QuickTransform
         if ((e.type == EventType.MouseUp && e.button == dragButton) || ModeKeyReleased())
         {
             HandleGreypipeGirthRelease();
+            HandleGreyroadWidthRelease();
             Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
@@ -1014,6 +1169,7 @@ static partial class QuickTransform
     {
         if (extrudeNewGb != null) { ApplyExtrude(e.mousePosition); sv.Repaint(); return; }
         if (greypipeTarget != null) { ApplyGreypipeVertexDrag(e, sv); sv.Repaint(); return; }
+        if (greyroadTarget != null) { ApplyGreyroadVertexDrag(e, sv); sv.Repaint(); return; }
         switch (activeMode)
         {
             case Mode.Move:   ApplyMove(sv, e.mousePosition);   break;
@@ -1416,8 +1572,9 @@ static partial class QuickTransform
 
     static void DetectHover(SceneView sv, Vector2 mousePos, Mode mode)
     {
-        // Greypipe vertex hover detection (shared across all modes)
+        // Greypipe/Greyroad vertex hover detection (shared across all modes)
         DetectGreypipeHover(sv, mousePos);
+        DetectGreyroadHover(sv, mousePos);
 
         switch (mode)
         {
@@ -1947,6 +2104,7 @@ static partial class QuickTransform
         greyboxStartCorners = null;
         extrudeNewGb        = null;
         ResetGreypipeState();
+        ResetGreyroadState();
     }
 
     static bool ModeKeyReleased()
@@ -2233,6 +2391,15 @@ static partial class QuickTransform
             return;
         }
 
+        // Greyroad vertex transform feedback
+        if (greyroadTarget != null)
+        {
+            DrawGreyroadDragPlane();
+            DrawGreyroadSpline(greyroadTarget, greyroadSelectedVertex);
+            DrawGreyroadVertexHandles(greyroadTarget, greyroadSelectedVertex);
+            return;
+        }
+
         // Greybox edge deform: OBB bounding box + actual edges with the dragged edge highlighted
         if (greyboxTarget != null)
         {
@@ -2501,8 +2668,11 @@ static partial class QuickTransform
 
     static GUIStyle s_tooltipStyle;
     static GUIStyle s_tooltipActiveStyle;
-    static GUIStyle s_tooltipHeaderStyle;
+    static GUIStyle s_tooltipSubheaderStyle;
     static GUIStyle s_tooltipActionStyle;
+
+    const float kSubIndent = 14f;
+    const float kActIndent = 30f;
 
     static void EnsureTooltipStyles()
     {
@@ -2522,10 +2692,11 @@ static partial class QuickTransform
             normal    = { textColor = new Color(1f, 1f, 0.4f, 1f) },
         };
 
-        s_tooltipHeaderStyle = new GUIStyle(s_tooltipStyle)
+        s_tooltipSubheaderStyle = new GUIStyle(s_tooltipStyle)
         {
+            fontSize  = 10,
             fontStyle = FontStyle.Bold,
-            normal    = { textColor = new Color(1f, 1f, 1f, 0.9f) },
+            normal    = { textColor = new Color(0.95f, 0.95f, 0.95f, 0.85f) },
         };
 
         s_tooltipActionStyle = new GUIStyle(s_tooltipStyle)
@@ -2541,111 +2712,185 @@ static partial class QuickTransform
         if (heldMode == Mode.None) return;
 
         EnsureTooltipStyles();
-
         Handles.BeginGUI();
 
-        float x = 10f;
-        float y = sv.position.height - 46f;
-        float lineH = 15f;
-
-        var lines = new System.Collections.Generic.List<(string text, GUIStyle style)>();
-
-        bool hasSpecial = false;
         var sel = Selection.transforms;
-        bool isGreybox  = false;
-        bool isGreypipe = false;
+        bool isGreybox = false, isGreypipe = false, isGreyroad = false;
         if (sel != null && sel.Length == 1 && sel[0] != null)
         {
-            isGreybox  = sel[0].GetComponent<Greybox>() != null;
+            isGreybox  = sel[0].GetComponent<Greybox>()  != null;
             isGreypipe = sel[0].GetComponent<Greypipe>() != null;
-            hasSpecial = isGreybox || isGreypipe;
+            isGreyroad = sel[0].GetComponent<Greyroad>() != null;
         }
+        bool hasSpecial = isGreybox || isGreypipe || isGreyroad;
 
-        // Actions for the active mode
-        switch (heldMode)
-        {
-            case Mode.Move:
-                lines.Add(("LMB face — slide on face plane", s_tooltipActionStyle));
-                lines.Add(("RMB face — push/pull along normal", s_tooltipActionStyle));
-                lines.Add(("LMB outside — XZ plane movement", s_tooltipActionStyle));
-                if (isGreybox)
-                {
-                    lines.Add(("LMB edge — deform edge (Shift: snap axis)", s_tooltipActionStyle));
-                    lines.Add(("RMB edge — reset edge", s_tooltipActionStyle));
-                }
-                break;
-            case Mode.Rotate:
-                lines.Add(("LMB face — rotate around face normal", s_tooltipActionStyle));
-                lines.Add(("LMB edge — rotate around edge axis", s_tooltipActionStyle));
-                lines.Add(("LMB outside — rotate around world Y", s_tooltipActionStyle));
-                lines.Add(("Ctrl — snap to " + RotSnapAngle + "°", s_tooltipActionStyle));
-                break;
-            case Mode.Scale:
-                lines.Add(("LMB face — single-axis scale", s_tooltipActionStyle));
-                lines.Add(("RMB face — uniform scale (opposite anchor)", s_tooltipActionStyle));
-                lines.Add(("RMB outside — uniform scale (pivot anchor)", s_tooltipActionStyle));
-                break;
-            case Mode.Special:
-                if (isGreybox)
-                {
-                    lines.Add(("LMB face — toggle face", s_tooltipActionStyle));
-                    lines.Add(("RMB face — extrude (hide seam)", s_tooltipActionStyle));
-                    lines.Add(("MMB face — extrude (keep faces)", s_tooltipActionStyle));
-                }
-                else if (isGreypipe)
-                {
-                    lines.Add(("LMB edge vtx — extend pipe", s_tooltipActionStyle));
-                    lines.Add(("LMB spline — insert vertex", s_tooltipActionStyle));
-                    lines.Add(("RMB vertex — delete vertex", s_tooltipActionStyle));
-                    lines.Add(("MMB vertex — adjust girth", s_tooltipActionStyle));
-                }
-                break;
-        }
+        var lines = new System.Collections.Generic.List<(string text, GUIStyle style, float indent)>();
 
-        lines.Add(("Shift + drag — duplicate then transform", s_tooltipActionStyle));
+        // Single merged QWER list — the currently held mode is expanded inline,
+        // grouped by hovered object type (Plane / Edge / Vertex / Handle / Outside / Any).
+        AddModeBlock(lines, "Q", "Special", Mode.Special, heldMode, hasSpecial, isGreybox, isGreypipe, isGreyroad);
+        AddModeBlock(lines, "W", "Move",    Mode.Move,    heldMode, true,       isGreybox, isGreypipe, isGreyroad);
+        AddModeBlock(lines, "E", "Rotate",  Mode.Rotate,  heldMode, true,       isGreybox, isGreypipe, isGreyroad);
+        AddModeBlock(lines, "R", "Scale",   Mode.Scale,   heldMode, true,       isGreybox, isGreypipe, isGreyroad);
 
-        // Mode header
-        string modeLabel = heldMode switch
-        {
-            Mode.Move    => "W — Move",
-            Mode.Rotate  => "E — Rotate",
-            Mode.Scale   => "R — Scale",
-            Mode.Special => "Q — Special",
-            _            => "",
-        };
-        lines.Insert(0, (modeLabel, s_tooltipHeaderStyle));
+        float x       = 10f;
+        float bottomY = sv.position.height - 46f;
+        float lineH   = 14f;
+        float totalH  = lines.Count * lineH;
+        float startY  = bottomY - totalH;
 
-        // Mode list at the bottom
-        lines.Add(("", s_tooltipStyle)); // spacer
-        AddModeLine(lines, "Q", "Special", Mode.Special, heldMode, hasSpecial);
-        AddModeLine(lines, "W", "Move",    Mode.Move,    heldMode, true);
-        AddModeLine(lines, "E", "Rotate",  Mode.Rotate,  heldMode, true);
-        AddModeLine(lines, "R", "Scale",   Mode.Scale,   heldMode, true);
-
-        // Draw bottom-up from y
-        float totalH = lines.Count * lineH;
-        float startY = y - totalH;
-
-        // Background
-        Rect bgRect = new Rect(x - 4f, startY - 2f, 260f, totalH + 6f);
-        EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.5f));
+        float bgW = 340f;
+        Rect bgRect = new Rect(x - 4f, startY - 2f, bgW, totalH + 6f);
+        EditorGUI.DrawRect(bgRect, new Color(0f, 0f, 0f, 0.55f));
 
         for (int i = 0; i < lines.Count; i++)
         {
-            Rect r = new Rect(x, startY + i * lineH, 256f, lineH);
+            float ind = lines[i].indent;
+            Rect r = new Rect(x + ind, startY + i * lineH, bgW - 8f - ind, lineH);
             GUI.Label(r, lines[i].text, lines[i].style);
         }
 
         Handles.EndGUI();
     }
 
-    static void AddModeLine(
-        System.Collections.Generic.List<(string text, GUIStyle style)> lines,
-        string key, string label, Mode mode, Mode activeMode, bool available)
+    static void AddModeBlock(
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
+        string key, string label, Mode mode, Mode heldMode, bool available,
+        bool isGreybox, bool isGreypipe, bool isGreyroad)
     {
         if (!available) return;
-        bool active = mode == activeMode;
-        string text = $"{key} — {label}";
-        lines.Add((text, active ? s_tooltipActiveStyle : s_tooltipStyle));
+
+        bool active = mode == heldMode;
+        lines.Add(($"{key} — {label}", active ? s_tooltipActiveStyle : s_tooltipStyle, 0f));
+        if (!active) return;
+
+        switch (mode)
+        {
+            case Mode.Move:    AddMoveActions(lines, isGreybox, isGreypipe, isGreyroad); break;
+            case Mode.Rotate:  AddRotateActions(lines); break;
+            case Mode.Scale:   AddScaleActions(lines, isGreypipe, isGreyroad); break;
+            case Mode.Special: AddSpecialActions(lines, isGreybox, isGreypipe, isGreyroad); break;
+        }
+    }
+
+    static void AddSub(System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines, string text)
+        => lines.Add((text, s_tooltipSubheaderStyle, kSubIndent));
+
+    static void AddAct(System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines, string text)
+        => lines.Add((text, s_tooltipActionStyle, kActIndent));
+
+    static void AddMoveActions(
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
+        bool isGreybox, bool isGreypipe, bool isGreyroad)
+    {
+        AddSub(lines, "Plane");
+        AddAct(lines, "LMB — slide on face plane");
+        AddAct(lines, "RMB — push/pull along face normal");
+
+        if (isGreybox)
+        {
+            AddSub(lines, "Edge (Greybox)");
+            AddAct(lines, "LMB — deform edge (Shift snaps to local axis)");
+            AddAct(lines, "RMB — reset edge to default");
+        }
+
+        if (isGreypipe)
+        {
+            AddSub(lines, "Vertex (Greypipe)");
+            AddAct(lines, "LMB — drag in main-axis plane");
+            AddAct(lines, "RMB — drag perpendicular to main-axis plane");
+            AddAct(lines, "MMB — reset handle direction to Main Axis");
+            AddSub(lines, "Handle (Greypipe)");
+            AddAct(lines, "LMB / RMB — drag bezier handle endpoint");
+        }
+
+        if (isGreyroad)
+        {
+            AddSub(lines, "Vertex (Greyroad)");
+            AddAct(lines, "LMB — drag on horizontal (XZ) plane");
+            AddAct(lines, "RMB — drag vertically (elevation)");
+            AddAct(lines, "MMB — reset spline handle alignment");
+            AddSub(lines, "Bezier Handle (Greyroad)");
+            AddAct(lines, "LMB — drag on horizontal plane");
+            AddAct(lines, "RMB — drag vertically");
+            AddSub(lines, "Banking Handle (Greyroad)");
+            AddAct(lines, "LMB — bank around spline tangent");
+            AddAct(lines, "MMB — reset banking to 0°");
+        }
+
+        AddSub(lines, "Outside");
+        AddAct(lines, "LMB — drag on world XZ plane");
+
+        AddSub(lines, "Any");
+        AddAct(lines, "Shift + drag — duplicate then transform");
+    }
+
+    static void AddRotateActions(
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines)
+    {
+        AddSub(lines, "Plane");
+        AddAct(lines, "LMB — rotate around face normal (pivot = face center)");
+        AddSub(lines, "Edge");
+        AddAct(lines, "LMB — rotate around edge axis (pivot = grab point)");
+        AddSub(lines, "Outside");
+        AddAct(lines, "LMB — rotate around world Y (pivot = selection)");
+        AddSub(lines, "Any");
+        AddAct(lines, "Ctrl — snap to " + RotSnapAngle + "°");
+        AddAct(lines, "Shift + drag — duplicate then transform");
+    }
+
+    static void AddScaleActions(
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
+        bool isGreypipe, bool isGreyroad)
+    {
+        AddSub(lines, "Plane");
+        AddAct(lines, "LMB — single-axis scale (anchor = opposite face)");
+        AddAct(lines, "RMB — uniform scale (anchor = opposite face)");
+
+        if (isGreypipe || isGreyroad)
+        {
+            AddSub(lines, "Vertex");
+            AddAct(lines, "LMB — scale spline handle length");
+        }
+
+        AddSub(lines, "Outside");
+        AddAct(lines, "RMB — uniform scale (anchor = selection pivot)");
+        AddSub(lines, "Any");
+        AddAct(lines, "Shift + drag — duplicate then transform");
+    }
+
+    static void AddSpecialActions(
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
+        bool isGreybox, bool isGreypipe, bool isGreyroad)
+    {
+        if (isGreybox)
+        {
+            AddSub(lines, "Plane");
+            AddAct(lines, "LMB — toggle face on/off");
+            AddAct(lines, "RMB — extrude face (hide seam faces)");
+            AddAct(lines, "MMB — extrude face (keep all faces)");
+        }
+        else if (isGreypipe)
+        {
+            AddSub(lines, "Vertex (end)");
+            AddAct(lines, "LMB — extend pipe");
+            AddSub(lines, "Vertex (any)");
+            AddAct(lines, "RMB — delete vertex");
+            AddAct(lines, "MMB drag — adjust girth (quick-click resets to 1)");
+            AddSub(lines, "Spline");
+            AddAct(lines, "LMB — insert vertex");
+        }
+        else if (isGreyroad)
+        {
+            AddSub(lines, "Plane");
+            AddAct(lines, "LMB — toggle face on/off");
+            AddSub(lines, "Vertex (end)");
+            AddAct(lines, "LMB — extend road");
+            AddSub(lines, "Vertex (any)");
+            AddAct(lines, "RMB — delete vertex");
+            AddAct(lines, "MMB drag — adjust width (quick-click resets to 1)");
+            AddSub(lines, "Spline");
+            AddAct(lines, "LMB — insert vertex");
+        }
     }
 }

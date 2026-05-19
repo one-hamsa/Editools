@@ -158,7 +158,7 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
 {
     static GUIStyle s_sectionHeader;
 
-    public override Vector2 GetWindowSize() => new Vector2(280, 360);
+    public override Vector2 GetWindowSize() => new Vector2(280, 460);
 
     public override void OnGUI(Rect rect)
     {
@@ -174,6 +174,10 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         EditorGUILayout.Space(8);
         EditorGUILayout.LabelField("Greypipe", s_sectionHeader);
         GreypipeSettingsGUI.DrawGUI();
+
+        EditorGUILayout.Space(8);
+        EditorGUILayout.LabelField("Greyroad", s_sectionHeader);
+        GreyroadSettingsGUI.DrawGUI();
     }
 }
 #endif

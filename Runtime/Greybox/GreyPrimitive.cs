@@ -88,6 +88,9 @@ public abstract class GreyPrimitive : MonoBehaviour
             sig = sig * 31 + (manager != null ? manager.VertexDensity.GetHashCode() : 0);
             sig = sig * 31 + (manager != null ? manager.GreypipeLengthSubdivMultiplier.GetHashCode() : 0);
             sig = sig * 31 + (manager != null ? manager.GreypipeGirthSubdivMultiplier.GetHashCode() : 0);
+            sig = sig * 31 + (manager != null ? manager.GreyroadLengthSubdivMultiplier.GetHashCode() : 0);
+            sig = sig * 31 + (manager != null ? manager.GreyroadWidthSubdivMultiplier.GetHashCode() : 0);
+            sig = sig * 31 + (manager != null ? manager.GreyroadSideSubdivMultiplier.GetHashCode() : 0);
             sig = sig * 31 + transform.lossyScale.GetHashCode();
             sig = sig * 31 + _subdivisionMultiplier.GetHashCode();
             sig = sig * 31 + GetSubclassRebuildSignature();
