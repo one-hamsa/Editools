@@ -17,6 +17,7 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     // ─── Mesh ───────────────────────────────────────────────────
 
+    [SerializeField, HideInInspector]
     Mesh _mesh;
     protected Mesh SharedMesh => _mesh;
 
@@ -25,20 +26,46 @@ public abstract class GreyPrimitive : MonoBehaviour
 #if UNITY_EDITOR
     int  _cachedSignature = int.MinValue;
     bool _rebuildPending;
+    [System.NonSerialized] bool _meshIsLive;
+    public bool MeshIsLive => _meshIsLive;
 
     protected void SetRebuildPending() => _rebuildPending = true;
 
     /// <summary>
     /// Push hook for GreyboxManager: when manager-level settings change, the manager calls
     /// this on each child primitive to trigger a rebuild on the next editor Update tick.
+    /// Skipped when the serialized mesh is already in sync with the current signature so
+    /// that the manager's OnValidate firing on scene load doesn't trigger spurious rebuilds.
     /// </summary>
-    public void MarkRebuildPending() => _rebuildPending = true;
+    public void MarkRebuildPending()
+    {
+        if (_mesh != null && _mesh.vertexCount > 0 && _cachedSignature == ComputeRebuildSignature())
+            return;
+        _rebuildPending = true;
+    }
+
+    /// <summary>
+    /// Called by the scene-save hook. The on-disk mesh now matches the in-memory mesh,
+    /// so the indicator should flip back to "Serialized".
+    /// </summary>
+    public void NotifyMeshSaved() => _meshIsLive = false;
 #endif
 
     // ─── Unity lifecycle ─────────────────────────────────────────
 
     protected virtual void OnEnable()
     {
+        if (_mesh != null && _mesh.vertexCount > 0)
+        {
+            var mf = GetComponent<MeshFilter>();
+            if (mf != null) mf.sharedMesh = _mesh;
+            var mc = GetComponent<MeshCollider>();
+            if (mc != null) mc.sharedMesh = _mesh;
+#if UNITY_EDITOR
+            _cachedSignature = ComputeRebuildSignature();
+#endif
+            return;
+        }
         EnsureMesh();
         RebuildMesh();
     }
@@ -46,10 +73,9 @@ public abstract class GreyPrimitive : MonoBehaviour
     protected virtual void OnValidate()
     {
 #if UNITY_EDITOR
+        if (_mesh != null && _mesh.vertexCount > 0 && _cachedSignature == ComputeRebuildSignature())
+            return;
         _rebuildPending = true;
-#else
-        EnsureMesh();
-        RebuildMesh();
 #endif
     }
 
@@ -109,6 +135,9 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     public void RebuildMesh()
     {
+#if UNITY_EDITOR
+        _meshIsLive = true;
+#endif
         OnBeforeRebuild();
         EnsureMesh();
         GenerateMesh(_mesh);
@@ -144,6 +173,6 @@ public abstract class GreyPrimitive : MonoBehaviour
     void EnsureMesh()
     {
         if (_mesh != null) return;
-        _mesh = new Mesh { name = $"{GetType().Name} Mesh", hideFlags = HideFlags.HideAndDontSave };
+        _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
     }
 }
