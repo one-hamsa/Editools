@@ -97,6 +97,14 @@ public class SnapToSurface : EditorWindow
             if (mr == null || !mr.enabled)
                 continue;
 
+            // Skip renderers whose materials don't write depth. ZWrite Off is the
+            // universal signal for "I'm a glow/additive/transparent surface" — those
+            // shouldn't act as snap targets even when their RenderType tag lies
+            // (e.g. Toon 2.0 Glow Sphere Lighten claims Opaque/Geometry but uses
+            // BlendOp Max + ZWrite Off).
+            if (!AnyMaterialWritesDepth(mr))
+                continue;
+
             Mesh mesh = mf.sharedMesh;
             if (mesh == null)
                 continue;
@@ -124,6 +132,66 @@ public class SnapToSurface : EditorWindow
                 normals   = norms,
             });
         }
+    }
+
+    /// <summary>
+    /// Returns true if at least one of the renderer's shared materials writes to the
+    /// depth buffer. Reads the shader's first SubShader pass via ShaderUtil since
+    /// ZWrite is a render-state token, not a uniform property (so `_ZWrite` isn't
+    /// always exposed as a material property). Falls back to allowing the snap if
+    /// the state can't be read — better to over-snap than to silently skip everything.
+    /// </summary>
+    private static bool AnyMaterialWritesDepth(MeshRenderer mr) {
+        var mats = mr.sharedMaterials;
+        if (mats == null || mats.Length == 0)
+            return true;
+
+        for (int i = 0; i < mats.Length; i++) {
+            var mat = mats[i];
+            if (mat == null || mat.shader == null) continue;
+            if (ShaderWritesDepth(mat))
+                return true;
+        }
+        return false;
+    }
+
+    private static readonly Dictionary<Shader, bool> s_shaderZWriteCache = new();
+
+    private static bool ShaderWritesDepth(Material mat) {
+        var shader = mat.shader;
+        if (s_shaderZWriteCache.TryGetValue(shader, out bool cached))
+            return cached;
+
+        bool writes = true; // default to "writes" so unknown shaders still snap
+
+        // First try the material property — many shaders expose _ZWrite as a float
+        // toggle (URP Lit, ASE-generated, etc.). 0 = Off, 1 = On.
+        if (mat.HasProperty("_ZWrite")) {
+            writes = mat.GetFloat("_ZWrite") > 0.5f;
+            s_shaderZWriteCache[shader] = writes;
+            return writes;
+        }
+
+        // Fallback: parse the shader source for a top-level `ZWrite Off`. This
+        // catches hand-written shaders (like Toon 2.0 Glow Sphere variants) that
+        // hardcode ZWrite Off without exposing it as a property.
+        string path = AssetDatabase.GetAssetPath(shader);
+        if (!string.IsNullOrEmpty(path) && path.EndsWith(".shader")) {
+            try {
+                string src = System.IO.File.ReadAllText(path);
+                // Strip block + line comments before scanning so commented-out
+                // `// ZWrite Off` doesn't trigger a false positive.
+                src = System.Text.RegularExpressions.Regex.Replace(src, @"/\*.*?\*/", "", System.Text.RegularExpressions.RegexOptions.Singleline);
+                src = System.Text.RegularExpressions.Regex.Replace(src, @"//.*?$", "", System.Text.RegularExpressions.RegexOptions.Multiline);
+                if (System.Text.RegularExpressions.Regex.IsMatch(src, @"\bZWrite\s+Off\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    writes = false;
+            } catch {
+                // Read failure — leave writes = true.
+            }
+        }
+
+        s_shaderZWriteCache[shader] = writes;
+        return writes;
     }
 
     private static void ReleaseSnapMeshCache() {

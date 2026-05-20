@@ -1318,9 +1318,13 @@ static partial class QuickTransform
     {
         hit = Vector3.zero;
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        Plane plane = new Plane(planeNormal, planePoint);
-        if (!plane.Raycast(ray, out float enter)) return false;
-        hit = ray.GetPoint(enter);
+        // Two-sided plane intersection: Unity's Plane.Raycast rejects negative t,
+        // which silently kills drags when the camera is on the "back" side of the
+        // plane (common when zoomed in close to an edge/face).
+        float denom = Vector3.Dot(ray.direction, planeNormal);
+        if (Mathf.Abs(denom) < 1e-6f) return false;
+        float enter = Vector3.Dot(planePoint - ray.origin, planeNormal) / denom;
+        hit = ray.origin + ray.direction * enter;
         return true;
     }
 
