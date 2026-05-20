@@ -268,6 +268,9 @@ static partial class QuickTransform
             GUIUtility.hotControl = 0;
             ResetState();
         }
+
+        foreach (var gp in GameObject.FindObjectsByType<GreyPrimitive>(FindObjectsSortMode.None))
+            gp.RebuildMesh();
     }
 
     // ─── Main Loop ──────────────────────────────────────────────
@@ -384,10 +387,9 @@ static partial class QuickTransform
                 {
                     if (heldMode == Mode.Special)
                     {
-                        // Special mode: show the road's box outline + face dots so the user
-                        // can see exactly which side they're about to toggle.
                         DrawGreyroadBoundsOutline(previewRoad);
                         DrawGreyroadSpline(previewRoad, -1);
+                        DrawGreyroadVertexHandles(previewRoad, greyroadHoveredVertex);
                         DrawGreyroadFaceDots(previewRoad, greyroadHoveredFace);
                     }
                     else
@@ -1606,13 +1608,13 @@ static partial class QuickTransform
 
     static void DetectMoveHover(SceneView sv, Vector2 mousePos)
     {
-        // Face handles override everything
-        int handle = CheckFaceHandleHover(sv, mousePos);
-        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
-
-        // Greybox: edge hover — dragging an edge deforms the mesh
+        // Edges take priority in move mode
         int gbEdge = GetActiveGreyboxEdge(mousePos);
         if (gbEdge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = gbEdge; return; }
+
+        // Face handles
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
 
         // Y face hover → axis-locked Y movement
         int yFace = CheckYFaceHover(sv, mousePos);
@@ -1629,13 +1631,13 @@ static partial class QuickTransform
 
     static void DetectRotateHover(SceneView sv, Vector2 mousePos)
     {
-        // Face handles override everything
-        int handle = CheckFaceHandleHover(sv, mousePos);
-        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
-
-        // Edge proximity
+        // Edges take priority in rotation mode
         int edge = DetectNearestEdge(mousePos);
         if (edge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = edge; return; }
+
+        // Face handles
+        int handle = CheckFaceHandleHover(sv, mousePos);
+        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
 
         // Y face hover
         int yFace = CheckYFaceHover(sv, mousePos);

@@ -302,16 +302,22 @@ public class Greypipe : GreyPrimitive
     {
         var edge = _vertices[edgeIndex];
         float dist = Vector3.Distance(localPosition, edge.position);
+        float handleLen = Mathf.Max(0.01f, dist / 3f);
 
-        Vector3 dir = (localPosition - edge.position);
-        if (dir.sqrMagnitude < 0.0001f) dir = MainAxisLocal * (edgeIndex == 0 ? -1f : 1f);
-        dir.Normalize();
+        Vector3 toNew = (localPosition - edge.position);
+        if (toNew.sqrMagnitude < 0.0001f) toNew = MainAxisLocal * (edgeIndex == 0 ? -1f : 1f);
+        toNew.Normalize();
+
+        // Handle points in the spline's forward direction (toward higher indices).
+        // Prepend (index 0): forward = toward old first vertex = -toNew.
+        // Append  (last):    forward = continuation away from pipe = toNew.
+        Vector3 handleDir = edgeIndex == 0 ? -toNew : toNew;
 
         var newVert = new SplineVertex
         {
             position        = localPosition,
-            handleRotation  = Quaternion.identity,  // will be set after insertion (depends on new main axis)
-            handleLength    = Mathf.Max(0.01f, dist * 0.5f),
+            handleRotation  = Quaternion.identity,
+            handleLength    = handleLen,
             girthMultiplier = edge.girthMultiplier,
         };
 
@@ -327,8 +333,7 @@ public class Greypipe : GreyPrimitive
             insertedIdx = _vertices.Count - 1;
         }
 
-        // Now set the new vertex's handle to point along the extension direction (main-axis-relative)
-        SetVertexHandleDirLocal(insertedIdx, dir);
+        SetVertexHandleDirLocal(insertedIdx, handleDir);
     }
 
     public bool RemoveVertex(int index)

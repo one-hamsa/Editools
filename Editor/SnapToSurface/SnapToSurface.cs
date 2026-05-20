@@ -294,8 +294,10 @@ public class SnapToSurface : EditorWindow
             Debug.Log($"[SnapToSurface] Aligned to surface: {lastHitSurfaceObject.name}");
 
         if (!confirm && selectedObject != null) {
-            // Revert via undo so no stale undo entry remains
-            Undo.PerformUndo();
+            selectedObject.transform.position = originalPosition;
+            selectedObject.transform.rotation = originalRotation;
+            Undo.ClearUndo(selectedObject.transform);
+            EditorUtility.SetDirty(selectedObject);
         }
 
         EditorApplication.delayCall += CleanupSnapMode;
@@ -370,7 +372,8 @@ public class SnapToSurface : EditorWindow
         Vector3 h = Vector3.Cross(ray.direction, edge2);
         float a = Vector3.Dot(edge1, h);
 
-        if (a > -0.00001f && a < 0.00001f)
+        // Reject backfaces (a < 0) and parallel rays (a ≈ 0)
+        if (a < 0.00001f)
             return false;
 
         float f = 1.0f / a;

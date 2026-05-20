@@ -30,8 +30,8 @@ public class Greyroad : GreyPrimitive
         [Tooltip("Local-space position of this spline control point.")]
         public Vector3 position;
 
-        [Tooltip("Bezier handle rotation expressed relative to the spline's Main Axis frame. " +
-                 "Identity = handle aligned with the Main Axis. Symmetric on both sides.")]
+        [Tooltip("Bezier handle direction in absolute local space. " +
+                 "Identity = handle points along local +Z. Symmetric on both sides.")]
         public Quaternion handleRotation;
 
         [Tooltip("Length of each bezier handle (symmetric on both sides), in local units.")]
@@ -136,20 +136,8 @@ public class Greyroad : GreyPrimitive
 
     public Vector3 MainAxisWorld => transform.TransformDirection(MainAxisLocal);
 
-    public Quaternion MainAxisFrameLocal
-    {
-        get
-        {
-            Vector3 axis = MainAxisLocal;
-            Vector3 upRef = Vector3.up;
-            if (Mathf.Abs(Vector3.Dot(axis, upRef)) > 0.99f)
-                upRef = Vector3.right;
-            return Quaternion.LookRotation(axis, upRef);
-        }
-    }
-
     public Vector3 GetVertexHandleDirLocal(int index)
-        => MainAxisFrameLocal * _vertices[index].handleRotation * Vector3.forward;
+        => _vertices[index].handleRotation * Vector3.forward;
 
     public Vector3 GetVertexHandleDirWorld(int index)
         => transform.TransformDirection(GetVertexHandleDirLocal(index));
@@ -177,10 +165,8 @@ public class Greyroad : GreyPrimitive
     public void SetVertexHandleDirLocal(int index, Vector3 localDir)
     {
         if (localDir.sqrMagnitude < 0.0001f) return;
-        Vector3 relDir = Quaternion.Inverse(MainAxisFrameLocal) * localDir.normalized;
-        if (relDir.sqrMagnitude < 0.0001f) return;
         var v = _vertices[index];
-        v.handleRotation = Quaternion.LookRotation(relDir, Vector3.up);
+        v.handleRotation = Quaternion.LookRotation(localDir.normalized, Vector3.up);
         _vertices[index] = v;
     }
 
@@ -258,57 +244,6 @@ public class Greyroad : GreyPrimitive
         upWorld    = bank * up0;
     }
 
-    // ─── Edge-driven reshape ────────────────────────────────────
-
-    public Vector3[] CaptureEdgeAxisRelativePositions()
-    {
-        var result = new Vector3[_vertices.Count];
-        Vector3 origin  = _vertices[0].position;
-        Vector3 axis    = _vertices[_vertices.Count - 1].position - origin;
-        float   axisLen = axis.magnitude;
-        if (axisLen < 0.0001f) return result;
-        Vector3 forward = axis / axisLen;
-        Quaternion frameInv = Quaternion.Inverse(BuildEdgeFrame(forward));
-
-        for (int i = 0; i < _vertices.Count; i++)
-        {
-            Vector3 delta  = _vertices[i].position - origin;
-            Vector3 framed = frameInv * delta;
-            float fraction = framed.z / axisLen;
-            result[i] = new Vector3(framed.x, framed.y, fraction);
-        }
-        return result;
-    }
-
-    public void ApplyEdgeAxisRelativePositions(Vector3[] snapshot)
-    {
-        if (snapshot == null || snapshot.Length != _vertices.Count) return;
-
-        Vector3 origin  = _vertices[0].position;
-        Vector3 axis    = _vertices[_vertices.Count - 1].position - origin;
-        float   axisLen = axis.magnitude;
-        if (axisLen < 0.0001f) return;
-        Vector3 forward = axis / axisLen;
-        Quaternion frame = BuildEdgeFrame(forward);
-
-        for (int i = 1; i < _vertices.Count - 1; i++)
-        {
-            Vector3 rel        = snapshot[i];
-            Vector3 framed     = new Vector3(rel.x, rel.y, rel.z * axisLen);
-            Vector3 worldDelta = frame * framed;
-            var v = _vertices[i];
-            v.position = origin + worldDelta;
-            _vertices[i] = v;
-        }
-    }
-
-    static Quaternion BuildEdgeFrame(Vector3 forward)
-    {
-        Vector3 up = Vector3.up;
-        if (Mathf.Abs(Vector3.Dot(forward, up)) > 0.99f) up = Vector3.right;
-        return Quaternion.LookRotation(forward, up);
-    }
-
     // ─── Pivot recenter ─────────────────────────────────────────
 
     public void RecenterPivot()
@@ -347,15 +282,12 @@ public class Greyroad : GreyPrimitive
             _vertices[i] = v;
         }
 
-        Quaternion frameInv = Quaternion.Inverse(MainAxisFrameLocal);
         for (int i = 0; i < _vertices.Count; i++)
         {
             Vector3 localDir = transform.InverseTransformDirection(worldHandleDirs[i]).normalized;
             if (localDir.sqrMagnitude < 0.0001f) continue;
-            Vector3 relDir = frameInv * localDir;
-            if (relDir.sqrMagnitude < 0.0001f) continue;
             var v = _vertices[i];
-            v.handleRotation = Quaternion.LookRotation(relDir, Vector3.up);
+            v.handleRotation = Quaternion.LookRotation(localDir, Vector3.up);
             _vertices[i] = v;
         }
     }
@@ -374,19 +306,18 @@ public class Greyroad : GreyPrimitive
         Vector3 pos = EvaluateBezier(p0, p1, p2, p3, t);
         Vector3 tan = EvaluateBezierTangent(p0, p1, p2, p3, t).normalized;
 
-        float widthMul  = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  t);
-        float heightMul = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, t);
+        float st = t * t * (3f - 2f * t);
+        float widthMul  = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  st);
+        float heightMul = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, st);
         float banking   = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
-                                          b.bankingAngle * Mathf.Rad2Deg, t) * Mathf.Deg2Rad;
+                                          b.bankingAngle * Mathf.Rad2Deg, st) * Mathf.Deg2Rad;
 
         float distA = Vector3.Distance(pos, a.position);
         float distB = Vector3.Distance(pos, b.position);
         float hLen  = (distA + distB) * 0.25f;
 
-        Quaternion frameInv = Quaternion.Inverse(MainAxisFrameLocal);
-        Vector3 relTan = frameInv * tan;
-        Quaternion handleRot = relTan.sqrMagnitude > 0.0001f
-            ? Quaternion.LookRotation(relTan, Vector3.up)
+        Quaternion handleRot = tan.sqrMagnitude > 0.0001f
+            ? Quaternion.LookRotation(tan, Vector3.up)
             : Quaternion.identity;
 
         var newVert = new RoadVertex
@@ -406,34 +337,34 @@ public class Greyroad : GreyPrimitive
     {
         var edge = _vertices[edgeIndex];
         float dist = Vector3.Distance(localPosition, edge.position);
+        float handleLen = Mathf.Max(0.01f, dist / 3f);
 
-        Vector3 dir = (localPosition - edge.position);
-        if (dir.sqrMagnitude < 0.0001f) dir = MainAxisLocal * (edgeIndex == 0 ? -1f : 1f);
-        dir.Normalize();
+        Vector3 toNew = (localPosition - edge.position);
+        if (toNew.sqrMagnitude < 0.0001f) toNew = MainAxisLocal * (edgeIndex == 0 ? -1f : 1f);
+        toNew.Normalize();
+
+        // Handle points in the spline's forward direction (toward higher indices).
+        // Prepend (index 0): forward = toward old first vertex = -toNew.
+        // Append  (last):    forward = continuation away from road = toNew.
+        Vector3 handleDir = edgeIndex == 0 ? -toNew : toNew;
+        Quaternion handleRot = handleDir.sqrMagnitude > 0.0001f
+            ? Quaternion.LookRotation(handleDir, Vector3.up)
+            : Quaternion.identity;
 
         var newVert = new RoadVertex
         {
             position         = localPosition,
-            handleRotation   = Quaternion.identity,
-            handleLength     = Mathf.Max(0.01f, dist * 0.5f),
+            handleRotation   = handleRot,
+            handleLength     = handleLen,
             widthMultiplier  = edge.widthMultiplier,
             heightMultiplier = edge.heightMultiplier,
             bankingAngle     = edge.bankingAngle,
         };
 
-        int insertedIdx;
         if (edgeIndex == 0)
-        {
             _vertices.Insert(0, newVert);
-            insertedIdx = 0;
-        }
         else
-        {
             _vertices.Add(newVert);
-            insertedIdx = _vertices.Count - 1;
-        }
-
-        SetVertexHandleDirLocal(insertedIdx, dir);
     }
 
     public bool RemoveVertex(int index)
@@ -539,9 +470,9 @@ public class Greyroad : GreyPrimitive
         int wN = widthSubs + 1;
         int sN = sideSubs  + 1;
 
-        // Compute frames at every ring with Bishop transport, then bake banking on top.
         var frames = new RingFrame[ringCount];
-        ComputeRingFrames(samples, frames);
+        Vector3 refUp = transform.InverseTransformDirection(Vector3.up).normalized;
+        ComputeRingFrames(samples, frames, refUp);
 
         // Accumulators
         var verts = new List<Vector3>(ringCount * 8);
@@ -567,36 +498,23 @@ public class Greyroad : GreyPrimitive
         mesh.SetTriangles(tris, 0);
     }
 
-    static void ComputeRingFrames(List<SplineSample> samples, RingFrame[] frames)
+    static void ComputeRingFrames(List<SplineSample> samples, RingFrame[] frames, Vector3 refUp)
     {
-        Vector3 prevForward = Vector3.zero;
-        Vector3 prevRight   = Vector3.zero;
-
         for (int ring = 0; ring < samples.Count; ring++)
         {
             var s = samples[ring];
             Vector3 forward = s.tangent.normalized;
             if (forward.sqrMagnitude < 0.0001f) forward = Vector3.forward;
 
-            Vector3 right;
-            if (ring == 0)
-            {
-                Vector3 seedUp = Vector3.up;
-                if (Mathf.Abs(Vector3.Dot(seedUp, forward)) > 0.999f)
-                    seedUp = Mathf.Abs(forward.y) > 0.9f ? Vector3.right : Vector3.up;
-                right = Vector3.Cross(seedUp, forward).normalized;
-            }
-            else
-            {
-                right = Quaternion.FromToRotation(prevForward, forward) * prevRight;
-                right = (right - Vector3.Dot(right, forward) * forward).normalized;
-            }
-            Vector3 up = Vector3.Cross(forward, right).normalized;
+            // Derive frame from tangent + world up (in local space) at every ring
+            // independently. No transport — banking handles are the sole twist authority.
+            Vector3 upRef = refUp;
+            if (Mathf.Abs(Vector3.Dot(upRef, forward)) > 0.99f)
+                upRef = Vector3.Cross(forward, Vector3.one).normalized;
 
-            prevForward = forward;
-            prevRight   = right;
+            Vector3 right = Vector3.Cross(upRef, forward).normalized;
+            Vector3 up    = Vector3.Cross(forward, right).normalized;
 
-            // Apply Banking: rotate (right, up) around forward by bankingAngle.
             float bank = s.bankingAngle;
             if (Mathf.Abs(bank) > 0.00001f)
             {
@@ -605,17 +523,10 @@ public class Greyroad : GreyPrimitive
                 up    = q * up;
             }
 
-            frames[ring].position = s.position;
-            frames[ring].tangent  = forward;
-            frames[ring].right    = right;
-            frames[ring].up       = up;
-            frames[ring].halfWidth  = 0f;  // set below
-            frames[ring].halfHeight = 0f;
-        }
-
-        for (int ring = 0; ring < samples.Count; ring++)
-        {
-            var s = samples[ring];
+            frames[ring].position   = s.position;
+            frames[ring].tangent    = forward;
+            frames[ring].right      = right;
+            frames[ring].up         = up;
             frames[ring].halfWidth  = 0.5f * Mathf.Max(0f, s.widthMul);
             frames[ring].halfHeight = 0.5f * Mathf.Max(0f, s.heightMul);
         }
@@ -765,14 +676,15 @@ public class Greyroad : GreyPrimitive
             for (int i = startT; i <= subdivs; i++)
             {
                 float t = i / (float)subdivs;
+                float st = t * t * (3f - 2f * t);
                 samples.Add(new SplineSample
                 {
                     position    = EvaluateBezier(p0, p1, p2, p3, t),
                     tangent     = EvaluateBezierTangent(p0, p1, p2, p3, t),
-                    widthMul    = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  t),
-                    heightMul   = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, t),
+                    widthMul    = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  st),
+                    heightMul   = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, st),
                     bankingAngle = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
-                                                   b.bankingAngle * Mathf.Rad2Deg, t) * Mathf.Deg2Rad,
+                                                   b.bankingAngle * Mathf.Rad2Deg, st) * Mathf.Deg2Rad,
                 });
             }
         }
@@ -866,9 +778,8 @@ public class Greyroad : GreyPrimitive
     {
         var a = _vertices[segmentIndex];
         var b = _vertices[segmentIndex + 1];
-        Quaternion frame = MainAxisFrameLocal;
-        Vector3 aDir = frame * a.handleRotation * Vector3.forward;
-        Vector3 bDir = frame * b.handleRotation * Vector3.forward;
+        Vector3 aDir = a.handleRotation * Vector3.forward;
+        Vector3 bDir = b.handleRotation * Vector3.forward;
         p0 = a.position;
         p1 = a.position + aDir * a.handleLength;
         p2 = b.position - bDir * b.handleLength;

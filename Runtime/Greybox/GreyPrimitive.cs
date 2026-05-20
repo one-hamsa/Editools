@@ -19,6 +19,8 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     [SerializeField, HideInInspector]
     Mesh _mesh;
+    [SerializeField, HideInInspector]
+    int _meshOwnerId;
     protected Mesh SharedMesh => _mesh;
 
     // ─── Edit-time dirty tracking ────────────────────────────────
@@ -172,7 +174,8 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     void EnsureMesh()
     {
-        if (_mesh != null) return;
+        if (_mesh != null && _meshOwnerId == GetInstanceID()) return;
         _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
+        _meshOwnerId = GetInstanceID();
     }
 }

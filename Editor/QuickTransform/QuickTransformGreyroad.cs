@@ -20,12 +20,6 @@ static partial class QuickTransform
     static Vector3 greyroadDragHitStart;
     static float   greyroadDragStartDist;
 
-    // Edge-vertex reshape state
-    static bool      greyroadReshapeMode;
-    static Vector3[] greyroadEdgeSnapshot;
-    static Vector3   greyroadFixedEdgeWorldPos;
-    static int       greyroadMovingEdgeIdx;
-
     // Bezier handle endpoint drag state
     static int     greyroadBezierHandleVertex = -1;
     static int     greyroadBezierHandleSide;
@@ -59,8 +53,6 @@ static partial class QuickTransform
         greyroadHoveredFace          = -1;
         greyroadExtending            = false;
         greyroadWidthDragging        = false;
-        greyroadReshapeMode          = false;
-        greyroadEdgeSnapshot         = null;
         greyroadBezierHandleVertex   = -1;
         greyroadHoveredBezierVertex  = -1;
         greyroadBankingHandleVertex  = -1;
@@ -204,16 +196,6 @@ static partial class QuickTransform
 
         Vector3 vertexWorld = road.GetWorldVertexPosition(vertexIndex);
 
-        bool isEdge = vertexIndex == 0 || vertexIndex == road.Vertices.Count - 1;
-        greyroadReshapeMode = isEdge && mode == Mode.Move && road.Vertices.Count > 2;
-        if (greyroadReshapeMode)
-        {
-            greyroadEdgeSnapshot      = road.CaptureEdgeAxisRelativePositions();
-            greyroadMovingEdgeIdx     = vertexIndex;
-            int fixedIdx              = vertexIndex == 0 ? road.Vertices.Count - 1 : 0;
-            greyroadFixedEdgeWorldPos = road.GetWorldVertexPosition(fixedIdx);
-        }
-
         greyroadDragPlanePoint  = vertexWorld;
         greyroadDragPlaneNormal = ComputeRoadMainPlaneNormal();
 
@@ -340,14 +322,15 @@ static partial class QuickTransform
             delta = hit - greyroadDragHitStart;
         }
 
+        // Shift constrains movement to horizontal in world space.
+        if (Event.current.shift)
+            delta.y = 0f;
+
         var verts = greyroadTarget.Vertices;
         var v = greyroadStartVertex;
         v.position = greyroadTarget.transform.InverseTransformPoint(
             greyroadTarget.transform.TransformPoint(greyroadStartVertex.position) + delta);
         verts[greyroadSelectedVertex] = v;
-
-        if (greyroadReshapeMode && greyroadEdgeSnapshot != null)
-            greyroadTarget.ApplyEdgeAxisRelativePositions(greyroadEdgeSnapshot);
     }
 
     static void ApplyGreyroadBezierHandleDrag(Event e, Vector2 mousePos)
@@ -426,104 +409,21 @@ static partial class QuickTransform
 
     // ─── Special Mode (Q held on Greyroad) ──────────────────────
 
-    static int DetectGreyroadFaceHover(SceneView sv, Vector2 mousePos, Greyroad road)
-    {
-        // Find the closest face by sampling face centroids along the spline and picking the
-        // face whose face-center sample is nearest the mouse cursor in screen space.
-        float bestDist = EdgeHoverPx * 4f;
-        int bestFace = -1;
-
-        for (int face = 0; face < 6; face++)
-        {
-            if (!road.ActiveFaces[face]) continue;
-            // Skip caps if degenerate; otherwise sample at midpoint.
-            int segs = Mathf.Max(1, road.SegmentCount);
-            int samplesPerSeg = 6;
-            int sampleCount = (face == Greyroad.FaceStartCap || face == Greyroad.FaceEndCap) ? 1 : segs * samplesPerSeg;
-
-            for (int i = 0; i < sampleCount; i++)
-            {
-                Vector3 worldPt;
-                if (face == Greyroad.FaceStartCap)
-                    worldPt = road.GetWorldVertexPosition(0);
-                else if (face == Greyroad.FaceEndCap)
-                    worldPt = road.GetWorldVertexPosition(road.Vertices.Count - 1);
-                else
-                {
-                    int seg = i / samplesPerSeg;
-                    float t = (i % samplesPerSeg) / (float)(samplesPerSeg - 1);
-                    worldPt = road.EvaluateSplineWorld(seg, t);
-                    // Offset to the face surface so its screen position is more accurate.
-                    int vtxIdx = Mathf.Clamp(seg, 0, road.Vertices.Count - 1);
-                    road.ComputeBankingHandleAxisWorld(vtxIdx, out Vector3 upW, out Vector3 rightW);
-                    var rv = road.Vertices[vtxIdx];
-                    float halfW = road.BaseWidth  * 0.5f * Mathf.Max(0.001f, rv.widthMultiplier);
-                    float halfH = road.BaseHeight * 0.5f * Mathf.Max(0.001f, rv.heightMultiplier);
-                    Vector3 offset = face switch
-                    {
-                        Greyroad.FaceTop       => upW    * halfH,
-                        Greyroad.FaceBottom    => -upW   * halfH,
-                        Greyroad.FaceLeftSide  => -rightW * halfW,
-                        Greyroad.FaceRightSide =>  rightW * halfW,
-                        _ => Vector3.zero,
-                    };
-                    worldPt += offset;
-                }
-
-                Vector2 screenPt = HandleUtility.WorldToGUIPoint(worldPt);
-                float d = Vector2.Distance(mousePos, screenPt);
-                if (d < bestDist) { bestDist = d; bestFace = face; }
-            }
-        }
-        return bestFace;
-    }
-
     /// <summary>
-    /// Variant that also considers hidden faces — for re-enabling them in Special mode.
+    /// Detects which face dot handle the mouse is near. Tests against the same centroid
+    /// positions that DrawGreyroadFaceDots renders, so hit zones match the visuals exactly.
+    /// Considers all 6 faces (including hidden ones) for re-enabling in Special mode.
     /// </summary>
     static int DetectGreyroadFaceHoverAll(SceneView sv, Vector2 mousePos, Greyroad road)
     {
-        // Temporarily search all faces by toggling ActiveFaces would be invasive; just inline.
-        float bestDist = EdgeHoverPx * 4f;
+        float bestDist = EdgeHoverPx * 2f;
         int bestFace = -1;
-        int segs = Mathf.Max(1, road.SegmentCount);
-        int samplesPerSeg = 6;
-
         for (int face = 0; face < 6; face++)
         {
-            int sampleCount = (face == Greyroad.FaceStartCap || face == Greyroad.FaceEndCap) ? 1 : segs * samplesPerSeg;
-            for (int i = 0; i < sampleCount; i++)
-            {
-                Vector3 worldPt;
-                if (face == Greyroad.FaceStartCap)
-                    worldPt = road.GetWorldVertexPosition(0);
-                else if (face == Greyroad.FaceEndCap)
-                    worldPt = road.GetWorldVertexPosition(road.Vertices.Count - 1);
-                else
-                {
-                    int seg = i / samplesPerSeg;
-                    float t = (i % samplesPerSeg) / (float)(samplesPerSeg - 1);
-                    worldPt = road.EvaluateSplineWorld(seg, t);
-                    int vtxIdx = Mathf.Clamp(seg, 0, road.Vertices.Count - 1);
-                    road.ComputeBankingHandleAxisWorld(vtxIdx, out Vector3 upW, out Vector3 rightW);
-                    var rv = road.Vertices[vtxIdx];
-                    float halfW = road.BaseWidth  * 0.5f * Mathf.Max(0.001f, rv.widthMultiplier);
-                    float halfH = road.BaseHeight * 0.5f * Mathf.Max(0.001f, rv.heightMultiplier);
-                    Vector3 offset = face switch
-                    {
-                        Greyroad.FaceTop       => upW     * halfH,
-                        Greyroad.FaceBottom    => -upW    * halfH,
-                        Greyroad.FaceLeftSide  => -rightW * halfW,
-                        Greyroad.FaceRightSide =>  rightW * halfW,
-                        _ => Vector3.zero,
-                    };
-                    worldPt += offset;
-                }
-
-                Vector2 screenPt = HandleUtility.WorldToGUIPoint(worldPt);
-                float d = Vector2.Distance(mousePos, screenPt);
-                if (d < bestDist) { bestDist = d; bestFace = face; }
-            }
+            Vector3 center = ComputeGreyroadFaceCenter(road, face);
+            Vector2 screenPt = HandleUtility.WorldToGUIPoint(center);
+            float d = Vector2.Distance(mousePos, screenPt);
+            if (d < bestDist) { bestDist = d; bestFace = face; }
         }
         return bestFace;
     }
@@ -609,12 +509,12 @@ static partial class QuickTransform
                 return;
             }
 
-            // Vertex is not an edge — try face toggle first, then mid-spline insert.
-            int face = DetectGreyroadFaceHoverAll(sv, e.mousePosition, road);
-            if (face >= 0)
+            // Vertex is not an edge — try face handle toggle, then mid-spline insert.
+            // Only toggle when clicking directly on a face dot handle, not the face area.
+            if (hoveredVtx < 0 && greyroadHoveredFace >= 0)
             {
                 Undo.RegisterCompleteObjectUndo(road, "Toggle Greyroad Face");
-                road.ActiveFaces[face] = !road.ActiveFaces[face];
+                road.ActiveFaces[greyroadHoveredFace] = !road.ActiveFaces[greyroadHoveredFace];
                 road.RebuildMesh();
                 EditorUtility.SetDirty(road);
                 e.Use();
@@ -677,6 +577,25 @@ static partial class QuickTransform
         if (!RaycastPlane(mousePos, greyroadDragPlanePoint, greyroadDragPlaneNormal, out Vector3 hit)) return;
         Vector3 delta = hit - greyroadDragHitStart;
         Vector3 newWorldPos = greyroadTarget.transform.TransformPoint(greyroadStartVertex.position) + delta;
+
+        // Shift: snap world Y to the closest existing vertex.
+        if (Event.current.shift)
+        {
+            float bestDist = float.MaxValue;
+            float bestY = newWorldPos.y;
+            var allVerts = greyroadTarget.Vertices;
+            for (int i = 0; i < allVerts.Count; i++)
+            {
+                if (i == greyroadSelectedVertex) continue;
+                Vector3 wp = greyroadTarget.transform.TransformPoint(allVerts[i].position);
+                float d = Vector2.Distance(
+                    new Vector2(newWorldPos.x, newWorldPos.z),
+                    new Vector2(wp.x, wp.z));
+                if (d < bestDist) { bestDist = d; bestY = wp.y; }
+            }
+            newWorldPos.y = bestY;
+        }
+
         Vector3 newLocalPos = greyroadTarget.transform.InverseTransformPoint(newWorldPos);
 
         var verts = greyroadTarget.Vertices;
@@ -684,12 +603,13 @@ static partial class QuickTransform
         v.position = newLocalPos;
         verts[greyroadSelectedVertex] = v;
 
-        Vector3 dir = (newLocalPos - greyroadStartVertex.position);
-        if (dir.sqrMagnitude > 0.001f)
+        Vector3 toNew = (newLocalPos - greyroadStartVertex.position);
+        if (toNew.sqrMagnitude > 0.001f)
         {
-            greyroadTarget.SetVertexHandleDirLocal(greyroadSelectedVertex, dir.normalized);
+            Vector3 handleDir = greyroadExtendEdgeIndex == 0 ? -toNew.normalized : toNew.normalized;
+            greyroadTarget.SetVertexHandleDirLocal(greyroadSelectedVertex, handleDir);
             v = verts[greyroadSelectedVertex];
-            v.handleLength = Mathf.Max(0.01f, dir.magnitude * 0.5f);
+            v.handleLength = Mathf.Max(0.01f, toNew.magnitude / 3f);
             verts[greyroadSelectedVertex] = v;
         }
     }
@@ -718,6 +638,17 @@ static partial class QuickTransform
                 var v = verts[greyroadWidthVertex];
                 v.widthMultiplier = 1f;
                 verts[greyroadWidthVertex] = v;
+            }
+        }
+
+        // Cancel extend if the mouse didn't move past the drag threshold (click without drag).
+        if (greyroadExtending)
+        {
+            float dragDist = Vector2.Distance(Event.current.mousePosition, mousePressPos);
+            if (dragDist < DragThresholdPx)
+            {
+                Undo.PerformUndo();
+                return;
             }
         }
 

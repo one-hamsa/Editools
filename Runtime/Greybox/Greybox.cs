@@ -57,6 +57,22 @@ public class Greybox : GreyPrimitive
 
     // ─── GreyPrimitive overrides ─────────────────────────────────
 
+    protected override int GetSubclassRebuildSignature()
+    {
+        unchecked
+        {
+            int h = 17;
+            if (_corners != null)
+                for (int i = 0; i < _corners.Length; i++)
+                    h = h * 31 + _corners[i].GetHashCode();
+            if (_activeFaces != null)
+                for (int i = 0; i < _activeFaces.Length; i++)
+                    h = h * 31 + (_activeFaces[i] ? 1 : 0);
+            h = h * 31 + _uvTileScale.GetHashCode();
+            return h;
+        }
+    }
+
     protected override void OnBeforeRebuild() => ValidateArrays();
 
     protected override void ResetToDefaults()

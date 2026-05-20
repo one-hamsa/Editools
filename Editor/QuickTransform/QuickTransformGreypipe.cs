@@ -284,7 +284,6 @@ static partial class QuickTransform
         Vector3 delta;
         if (button == 1)
         {
-            // RMB: move perpendicular to Main Axis plane
             Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
             float currentDist = ProjectRayOntoLine(mouseRay, greypipeDragPlanePoint, greypipeDragPlaneNormal);
             float startDist = ProjectRayOntoLine(
@@ -298,14 +297,50 @@ static partial class QuickTransform
         }
 
         var verts = greypipeTarget.Vertices;
+        var xform = greypipeTarget.transform;
+        bool altHeld = Event.current.alt;
+
+        // Alt + edge drag: snapshot all other vertices' world state before moving,
+        // then restore after — so only the dragged edge vertex moves.
+        Vector3[] snapshotWorldPos = null;
+        Vector3[] snapshotWorldDir = null;
+        float[] snapshotHandleLen = null;
+        if (greypipeReshapeMode && altHeld)
+        {
+            int count = verts.Count;
+            snapshotWorldPos = new Vector3[count];
+            snapshotWorldDir = new Vector3[count];
+            snapshotHandleLen = new float[count];
+            for (int i = 0; i < count; i++)
+            {
+                snapshotWorldPos[i] = xform.TransformPoint(verts[i].position);
+                snapshotWorldDir[i] = greypipeTarget.GetVertexHandleDirWorld(i);
+                snapshotHandleLen[i] = verts[i].handleLength;
+            }
+        }
+
         var v = greypipeStartVertex;
-        v.position = greypipeTarget.transform.InverseTransformPoint(
-            greypipeTarget.transform.TransformPoint(greypipeStartVertex.position) + delta);
+        v.position = xform.InverseTransformPoint(
+            xform.TransformPoint(greypipeStartVertex.position) + delta);
         verts[greypipeSelectedVertex] = v;
 
-        // Edge reshape: re-apply the captured edge-axis snapshot so interior vertices follow.
-        if (greypipeReshapeMode && greypipeEdgeSnapshot != null)
+        if (greypipeReshapeMode && altHeld && snapshotWorldPos != null)
+        {
+            for (int i = 0; i < verts.Count; i++)
+            {
+                if (i == greypipeSelectedVertex) continue;
+                var vert = verts[i];
+                vert.position = xform.InverseTransformPoint(snapshotWorldPos[i]);
+                vert.handleLength = snapshotHandleLen[i];
+                verts[i] = vert;
+                greypipeTarget.SetVertexHandleDirLocal(i,
+                    xform.InverseTransformDirection(snapshotWorldDir[i]));
+            }
+        }
+        else if (greypipeReshapeMode && greypipeEdgeSnapshot != null)
+        {
             greypipeTarget.ApplyEdgeAxisRelativePositions(greypipeEdgeSnapshot);
+        }
     }
 
     static void ApplyGreypipeBezierHandleDrag(Event e, Vector2 mousePos)
@@ -517,14 +552,13 @@ static partial class QuickTransform
         v.position = newLocalPos;
         verts[greypipeSelectedVertex] = v;
 
-        // Update handle: point along the drag direction, scaled to half the distance.
-        // SetVertexHandleDirLocal converts to Main Axis frame internally.
-        Vector3 dir = (newLocalPos - greypipeStartVertex.position);
-        if (dir.sqrMagnitude > 0.001f)
+        Vector3 toNew = (newLocalPos - greypipeStartVertex.position);
+        if (toNew.sqrMagnitude > 0.001f)
         {
-            greypipeTarget.SetVertexHandleDirLocal(greypipeSelectedVertex, dir.normalized);
+            Vector3 handleDir = greypipeExtendEdgeIndex == 0 ? -toNew.normalized : toNew.normalized;
+            greypipeTarget.SetVertexHandleDirLocal(greypipeSelectedVertex, handleDir);
             v = verts[greypipeSelectedVertex];
-            v.handleLength = Mathf.Max(0.01f, dir.magnitude * 0.5f);
+            v.handleLength = Mathf.Max(0.01f, toNew.magnitude / 3f);
             verts[greypipeSelectedVertex] = v;
         }
     }
