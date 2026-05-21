@@ -384,40 +384,6 @@ public class Greyroad : GreyPrimitive
             _activeFaces = DefaultActiveFaces();
     }
 
-    protected override int GetSubclassRebuildSignature()
-    {
-        unchecked
-        {
-            int sig = 17;
-            sig = sig * 31 + _baseWidth.GetHashCode();
-            sig = sig * 31 + _baseHeight.GetHashCode();
-            sig = sig * 31 + _lengthSubdivMultiplier.GetHashCode();
-            sig = sig * 31 + _widthSubdivMultiplier.GetHashCode();
-            sig = sig * 31 + _sideSubdivMultiplier.GetHashCode();
-            sig = sig * 31 + (_vertices != null ? _vertices.Count : 0);
-            if (_vertices != null)
-            {
-                for (int i = 0; i < _vertices.Count; i++)
-                {
-                    var v = _vertices[i];
-                    sig = sig * 31 + v.position.GetHashCode();
-                    sig = sig * 31 + v.handleLength.GetHashCode();
-                    sig = sig * 31 + v.widthMultiplier.GetHashCode();
-                    sig = sig * 31 + v.heightMultiplier.GetHashCode();
-                    sig = sig * 31 + v.bankingAngle.GetHashCode();
-                    // handleRotation: quaternion hash is stable enough for dirty detection
-                    sig = sig * 31 + v.handleRotation.GetHashCode();
-                }
-            }
-            if (_activeFaces != null)
-            {
-                for (int i = 0; i < _activeFaces.Length; i++)
-                    sig = sig * 31 + (_activeFaces[i] ? 1 : 0);
-            }
-            return sig;
-        }
-    }
-
     protected override void ResetToDefaults()
     {
         _vertices    = DefaultVertices();

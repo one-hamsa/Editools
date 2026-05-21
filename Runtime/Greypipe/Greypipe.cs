@@ -351,29 +351,6 @@ public class Greypipe : GreyPrimitive
             _vertices = DefaultVertices();
     }
 
-    protected override int GetSubclassRebuildSignature()
-    {
-        unchecked
-        {
-            int sig = 17;
-            sig = sig * 31 + _baseGirth.GetHashCode();
-            sig = sig * 31 + _lengthSubdivMultiplier.GetHashCode();
-            sig = sig * 31 + _girthSubdivMultiplier.GetHashCode();
-            sig = sig * 31 + (_vertices != null ? _vertices.Count : 0);
-            if (_vertices != null)
-            {
-                for (int i = 0; i < _vertices.Count; i++)
-                {
-                    var v = _vertices[i];
-                    sig = sig * 31 + v.position.GetHashCode();
-                    sig = sig * 31 + v.handleLength.GetHashCode();
-                    sig = sig * 31 + v.girthMultiplier.GetHashCode();
-                }
-            }
-            return sig;
-        }
-    }
-
     protected override void ResetToDefaults()
     {
         _vertices = DefaultVertices();

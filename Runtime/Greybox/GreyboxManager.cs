@@ -5,7 +5,6 @@ using UnityEngine;
 /// control their adaptive subdivision density. All primitives under this object poll these
 /// values and subdivide to match.
 /// </summary>
-[ExecuteAlways]
 public class GreyboxManager : MonoBehaviour
 {
     [SerializeField]
@@ -50,17 +49,4 @@ public class GreyboxManager : MonoBehaviour
     public float GreyroadLengthSubdivMultiplier => Mathf.Max(0.01f, _greyroadLengthSubdivMultiplier);
     public float GreyroadWidthSubdivMultiplier  => Mathf.Max(0.01f, _greyroadWidthSubdivMultiplier);
     public float GreyroadSideSubdivMultiplier   => Mathf.Max(0.01f, _greyroadSideSubdivMultiplier);
-
-#if UNITY_EDITOR
-    /// <summary>
-    /// When any manager field changes in the inspector, push a rebuild flag down to every
-    /// grey primitive under this manager. The base Update poll only watches VertexDensity,
-    /// so without this push, the Greypipe-specific multipliers wouldn't trigger rebuilds.
-    /// </summary>
-    void OnValidate()
-    {
-        foreach (var prim in GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
-            prim.MarkRebuildPending();
-    }
-#endif
 }

@@ -21,6 +21,19 @@ public class GreyPrimitiveEditor : Editor
         };
         EditorGUI.LabelField(rect, label, style);
 
+        EditorGUI.BeginChangeCheck();
         DrawDefaultInspector();
+        if (EditorGUI.EndChangeCheck())
+        {
+            foreach (var t in targets)
+                if (t is GreyPrimitive p) p.RebuildMesh();
+        }
+
+        EditorGUILayout.Space();
+        if (GUILayout.Button("Rebuild Mesh"))
+        {
+            foreach (var t in targets)
+                if (t is GreyPrimitive p) p.RebuildMesh();
+        }
     }
 }
