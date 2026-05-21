@@ -15,6 +15,17 @@ public abstract class GreyPrimitive : MonoBehaviour
         set => _subdivisionMultiplier = value;
     }
 
+    // ─── Manager cache ───────────────────────────────────────────
+
+    GreyboxManager _manager;
+    bool _managerCached;
+
+    void CacheManager()
+    {
+        _manager = GetComponentInParent<GreyboxManager>();
+        _managerCached = true;
+    }
+
     // ─── Mesh ───────────────────────────────────────────────────
 
     [SerializeField, HideInInspector]
@@ -57,6 +68,7 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     protected virtual void OnEnable()
     {
+        CacheManager();
         if (_mesh != null && _mesh.vertexCount > 0)
         {
             var mf = GetComponent<MeshFilter>();
@@ -71,6 +83,8 @@ public abstract class GreyPrimitive : MonoBehaviour
         EnsureMesh();
         RebuildMesh();
     }
+
+    protected virtual void OnTransformParentChanged() => CacheManager();
 
     protected virtual void OnValidate()
     {
@@ -108,17 +122,19 @@ public abstract class GreyPrimitive : MonoBehaviour
     /// </summary>
     int ComputeRebuildSignature()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
         int sig = 17;
         unchecked
         {
-            sig = sig * 31 + (manager != null ? manager.GetInstanceID() : 0);
-            sig = sig * 31 + (manager != null ? manager.VertexDensity.GetHashCode() : 0);
-            sig = sig * 31 + (manager != null ? manager.GreypipeLengthSubdivMultiplier.GetHashCode() : 0);
-            sig = sig * 31 + (manager != null ? manager.GreypipeGirthSubdivMultiplier.GetHashCode() : 0);
-            sig = sig * 31 + (manager != null ? manager.GreyroadLengthSubdivMultiplier.GetHashCode() : 0);
-            sig = sig * 31 + (manager != null ? manager.GreyroadWidthSubdivMultiplier.GetHashCode() : 0);
-            sig = sig * 31 + (manager != null ? manager.GreyroadSideSubdivMultiplier.GetHashCode() : 0);
+            if (_manager is not null)
+            {
+                sig = sig * 31 + _manager.GetInstanceID();
+                sig = sig * 31 + _manager.VertexDensity.GetHashCode();
+                sig = sig * 31 + _manager.GreypipeLengthSubdivMultiplier.GetHashCode();
+                sig = sig * 31 + _manager.GreypipeGirthSubdivMultiplier.GetHashCode();
+                sig = sig * 31 + _manager.GreyroadLengthSubdivMultiplier.GetHashCode();
+                sig = sig * 31 + _manager.GreyroadWidthSubdivMultiplier.GetHashCode();
+                sig = sig * 31 + _manager.GreyroadSideSubdivMultiplier.GetHashCode();
+            }
             sig = sig * 31 + transform.lossyScale.GetHashCode();
             sig = sig * 31 + _subdivisionMultiplier.GetHashCode();
             sig = sig * 31 + GetSubclassRebuildSignature();
@@ -158,8 +174,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     {
         float multiplier = Mathf.Max(0f, _subdivisionMultiplier);
         if (multiplier == 0f) return 0f;
-        var manager = GetComponentInParent<GreyboxManager>();
-        float density = manager != null ? manager.VertexDensity : 0f;
+        float density = _managerCached && _manager != null ? _manager.VertexDensity : 0f;
         return density * multiplier;
     }
 
