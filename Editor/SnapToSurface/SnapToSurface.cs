@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEditor.ShortcutManagement;
 using System.Collections.Generic;
 using UnityEngine.Pool;
@@ -87,7 +88,13 @@ public class SnapToSurface : EditorWindow
     private static void BuildSnapMeshCache() {
         ReleaseSnapMeshCache();
 
-        var meshFilters = GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
+        // When editing a prefab in isolation, Unity loads it into a separate preview
+        // scene that FindObjectsByType doesn't see — without this branch the cache
+        // would contain the (hidden) main-scene meshes instead of the prefab contents.
+        var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
+        MeshFilter[] meshFilters = prefabStage != null
+            ? prefabStage.prefabContentsRoot.GetComponentsInChildren<MeshFilter>(true)
+            : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
         foreach (var mf in meshFilters) {
             GameObject obj = mf.gameObject;
             if (ignoredObjects.Contains(obj))

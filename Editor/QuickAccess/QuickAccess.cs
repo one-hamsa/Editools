@@ -1,5 +1,7 @@
 #if UNITY_EDITOR
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -15,7 +17,8 @@ using Object = UnityEngine.Object;
 /// Add items by dragging from Hierarchy/Project. Remove via right-click (undoable).
 /// Reorder within a section by dragging (swap). Drag out to use like Hierarchy/Project.
 ///
-/// Selection Groups (0-9): QuickAccess owns its own selection groups stored in EditorPrefs.
+/// Selection Groups (0-9): QuickAccess owns its own selection groups, stored
+/// per-scene alongside the scene's item list in UserSettings/QuickAccess/<sceneGuid>.json.
 /// Save via Ctrl+1..0, recall via 1..0. Multi-object items supported.
 /// </summary>
 public class QuickAccess : EditorWindow
@@ -64,40 +67,35 @@ public class QuickAccess : EditorWindow
 
 	static QuickAccess s_instance;
 
-	// ─── Prefs Keys ────────────────────────────────────────────
+	// ─── Storage ───────────────────────────────────────────────
 	//
-	// Scene list is keyed by the scene asset's GUID — NOT its name — so that
-	// renames, duplicates, and same-named scenes in different folders don't
-	// collide. Unsaved / untitled scenes have no asset GUID; for those we
-	// skip persistence entirely (the in-memory list works during the session,
-	// but nothing is written to EditorPrefs).
+	// Per-user data lives under UserSettings/QuickAccess/ — a folder Unity
+	// preserves across cache nukes, never ships in builds, and that the
+	// project's .gitignore keeps out of source control.
+	//
+	// - <sceneGuid>.json — one file per scene: item list + selection groups.
+	//                     Keyed by scene-asset GUID so renames/duplicates can't collide.
+	// - _project.json   — the project-wide item list.
+	//
+	// Writes go through QuickAccessStore which writes atomically (tmp + replace),
+	// so a crashed editor can never leave a half-written file. Untitled scenes
+	// (no asset GUID) keep their list in memory for the session only.
 
-	static string PrefKeyProject         => Application.dataPath + "QuickAccess_Project";
-	static string PrefKeySelectionGroups => Application.dataPath + "QuickAccess_SelectionGroups_V2";
+	/// <summary>GUID of the scene whose data is currently loaded into sceneIds/selectionGroups.
+	/// Empty string = untitled scene → persistence disabled for this scene.</summary>
+	string currentSceneGuid = "";
 
-	/// <summary>Key under which the current scene's list is stored, cached at load time.
-	/// Empty string = scene has no asset GUID (untitled) → persistence is disabled for this scene.</summary>
-	string currentSceneKey = "";
-
-	/// <summary>Build the EditorPrefs key for a scene, or "" if the scene is untitled / has no GUID.</summary>
-	static string SceneKeyForScene(Scene scene)
+	/// <summary>Get the asset GUID of a scene, or "" if it's untitled / unsaved.</summary>
+	static string GuidForScene(Scene scene)
 	{
 		if (!scene.IsValid()) return "";
 		var path = scene.path;
 		if (string.IsNullOrEmpty(path)) return "";
 		var guid = AssetDatabase.AssetPathToGUID(path);
-		if (string.IsNullOrEmpty(guid)) return "";
-		return Application.dataPath + "QuickAccess_Scene_" + guid;
+		return string.IsNullOrEmpty(guid) ? "" : guid;
 	}
 
-	static string SceneKeyForActiveScene() => SceneKeyForScene(SceneManager.GetActiveScene());
-
-	/// <summary>Legacy name-based key for one-time migration. Do not use for new writes.</summary>
-	static string LegacySceneKeyForScene(Scene scene)
-	{
-		if (!scene.IsValid() || string.IsNullOrEmpty(scene.name)) return "";
-		return Application.dataPath + "QuickAccess_Scene_" + scene.name;
-	}
+	static string GuidForActiveScene() => GuidForScene(SceneManager.GetActiveScene());
 
 	// ─── Window access ─────────────────────────────────────────
 
@@ -120,52 +118,127 @@ public class QuickAccess : EditorWindow
 			ShowWindow();
 	}
 
-	// ─── One-time V1 → V2 Migration ───────────────────────────
+	// ─── One-time EditorPrefs → Files Migration ───────────────
+	//
+	// On first load after the storage rewrite, copy any existing data out of
+	// EditorPrefs and into the file store, then delete the prefs keys so this
+	// only ever runs once. Selection groups were previously global; we attach
+	// them to whatever scene is open at migration time and warn in the console.
 
 	[InitializeOnLoadMethod]
-	static void MigrateSelectionGroupsV1ToV2()
+	static void MigrateFromEditorPrefsOnce()
 	{
-		// Old V1 key stored item→group mappings. Migrate to V2 (group→items) once.
-		var v1Key = Application.dataPath + "QuickAccess_SelectionGroups";
-		var v1Data = EditorPrefs.GetString(v1Key, "");
-		if (string.IsNullOrEmpty(v1Data)) return;
+		const string kMigrationFlagKey = "QuickAccess_MigratedToFiles_V1";
+		if (EditorPrefs.GetBool(kMigrationFlagKey, false)) return;
 
-		// Only migrate if V2 doesn't exist yet
-		var v2Key = Application.dataPath + "QuickAccess_SelectionGroups_V2";
-		if (EditorPrefs.HasKey(v2Key))
+		try
 		{
-			EditorPrefs.DeleteKey(v1Key);
-			return;
+			// 1. Project list
+			var legacyProjectKey = Application.dataPath + "QuickAccess_Project";
+			var projectData = EditorPrefs.GetString(legacyProjectKey, "");
+			if (!string.IsNullOrEmpty(projectData))
+			{
+				var items = projectData.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList();
+				if (items.Count > 0)
+				{
+					var store = QuickAccessStore.LoadProject();
+					store.items = items;
+					QuickAccessStore.SaveProject(store);
+				}
+				EditorPrefs.DeleteKey(legacyProjectKey);
+			}
+
+			// 2. Per-scene lists. Keys are stored as
+			//    <dataPath>QuickAccess_Scene_<guid-or-name>. We can't enumerate
+			//    EditorPrefs, so we migrate lazily on scene open as well — this
+			//    just handles the currently-open scene proactively.
+			var activeScene = SceneManager.GetActiveScene();
+			var activeGuid = GuidForScene(activeScene);
+			if (!string.IsNullOrEmpty(activeGuid))
+				MigrateSceneFromPrefs(activeScene, activeGuid, alsoMigrateGlobalGroups: true);
+
+			EditorPrefs.SetBool(kMigrationFlagKey, true);
+		}
+		catch (Exception e)
+		{
+			Debug.LogWarning($"[QuickAccess] EditorPrefs→file migration failed: {e.Message}");
+		}
+	}
+
+	/// <summary>
+	/// Migrate a single scene's data from EditorPrefs to its sidecar file.
+	/// Called from <see cref="MigrateFromEditorPrefsOnce"/> and lazily from
+	/// <see cref="ReloadSceneItems"/> for scenes opened after first run.
+	/// </summary>
+	static void MigrateSceneFromPrefs(Scene scene, string sceneGuid, bool alsoMigrateGlobalGroups)
+	{
+		var guidKey   = Application.dataPath + "QuickAccess_Scene_" + sceneGuid;
+		var nameKey   = !string.IsNullOrEmpty(scene.name)
+			? Application.dataPath + "QuickAccess_Scene_" + scene.name
+			: null;
+
+		string raw = EditorPrefs.GetString(guidKey, "");
+		string usedKey = guidKey;
+		if (string.IsNullOrEmpty(raw) && nameKey != null && EditorPrefs.HasKey(nameKey))
+		{
+			raw = EditorPrefs.GetString(nameKey, "");
+			usedKey = nameKey;
 		}
 
-		// Parse V1: "id1=0;id2=1;id3=2" → invert to group→items
-		var groups = new Dictionary<int, List<string>>();
-		foreach (var entry in v1Data.Split(';'))
+		var data = QuickAccessStore.LoadScene(sceneGuid);
+		bool changed = false;
+
+		if (!string.IsNullOrEmpty(raw))
+		{
+			var items = raw.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList();
+			if (items.Count > 0 && data.items.Count == 0)
+			{
+				data.items = items;
+				changed = true;
+			}
+			EditorPrefs.DeleteKey(usedKey);
+			if (nameKey != null && nameKey != usedKey) EditorPrefs.DeleteKey(nameKey);
+		}
+
+		if (alsoMigrateGlobalGroups)
+		{
+			var groupsKey = Application.dataPath + "QuickAccess_SelectionGroups_V2";
+			var groupsRaw = EditorPrefs.GetString(groupsKey, "");
+			if (!string.IsNullOrEmpty(groupsRaw))
+			{
+				var parsed = new Dictionary<int, List<string>>();
+				ParseLegacySelectionGroups(groupsRaw, parsed);
+				foreach (var kvp in parsed)
+					data.SetGroup(kvp.Key, kvp.Value);
+				if (parsed.Count > 0)
+				{
+					changed = true;
+					Debug.Log($"[QuickAccess] Migrated {parsed.Count} selection group(s) to scene '{scene.name}'.");
+				}
+				EditorPrefs.DeleteKey(groupsKey);
+			}
+			// Also clean up the V1 key if it somehow still exists
+			EditorPrefs.DeleteKey(Application.dataPath + "QuickAccess_SelectionGroups");
+		}
+
+		if (changed) QuickAccessStore.SaveScene(sceneGuid, data);
+	}
+
+	static void ParseLegacySelectionGroups(string data, Dictionary<int, List<string>> target)
+	{
+		foreach (var entry in data.Split(';'))
 		{
 			if (string.IsNullOrEmpty(entry)) continue;
-			int eq = entry.LastIndexOf('=');
+			int eq = entry.IndexOf('=');
 			if (eq <= 0) continue;
-			var id = entry.Substring(0, eq);
-			if (int.TryParse(entry.Substring(eq + 1), out int group) && group >= 0 && group <= 9)
+			if (int.TryParse(entry.Substring(0, eq), out int slot) && slot >= 0 && slot <= 9)
 			{
-				if (!groups.TryGetValue(group, out var list))
-				{
-					list = new List<string>();
-					groups[group] = list;
-				}
-				list.Add(id);
+				var itemIds = entry.Substring(eq + 1).Split('\t')
+					.Where(s => !string.IsNullOrEmpty(s)).ToList();
+				if (itemIds.Count > 0)
+					target[slot] = itemIds;
 			}
 		}
-
-		// Write V2 format and delete V1
-		if (groups.Count > 0)
-		{
-			var parts = new List<string>();
-			foreach (var kvp in groups)
-				parts.Add($"{kvp.Key}={string.Join("\t", kvp.Value)}");
-			EditorPrefs.SetString(v2Key, string.Join(";", parts));
-		}
-		EditorPrefs.DeleteKey(v1Key);
 	}
 
 	// ─── Lifecycle ─────────────────────────────────────────────
@@ -189,6 +262,10 @@ public class QuickAccess : EditorWindow
 
 	void OnDisable()
 	{
+		// Flush before tear-down — catches data that lived only in memory
+		// across a domain reload or window close.
+		try { SaveToPrefs(); } catch (Exception e) { Debug.LogWarning($"[QuickAccess] Save on disable failed: {e.Message}"); }
+
 		if (s_instance == this)
 			s_instance = null;
 
@@ -733,14 +810,10 @@ public class QuickAccess : EditorWindow
 
 	void OnActiveSceneChanged(Scene oldScene, Scene newScene)
 	{
-		// Save old scene's list under the key it was loaded with — not a key
-		// re-derived from oldScene, which may now differ from what's in memory
-		// (e.g. if the scene was renamed, or if we bailed on load because the
-		// scene was untitled). currentSceneKey is the single source of truth
-		// for where sceneIds came from.
-		if (!string.IsNullOrEmpty(currentSceneKey))
-			EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
-
+		// Flush old scene's state under the GUID it was loaded with —
+		// currentSceneGuid is the single source of truth, never re-derive
+		// from oldScene (it may have been renamed / unloaded since load).
+		FlushCurrentSceneToDisk();
 		ReloadSceneItems(newScene);
 	}
 
@@ -751,41 +824,47 @@ public class QuickAccess : EditorWindow
 			ReloadSceneItems(scene);
 	}
 
+	/// <summary>Write the in-memory scene state to disk under currentSceneGuid.
+	/// No-op for untitled scenes.</summary>
+	void FlushCurrentSceneToDisk()
+	{
+		if (string.IsNullOrEmpty(currentSceneGuid)) return;
+		var data = new QuickAccessStore.SceneData
+		{
+			items = new List<string>(sceneIds),
+		};
+		foreach (var kvp in selectionGroups)
+			data.SetGroup(kvp.Key, kvp.Value);
+		QuickAccessStore.SaveScene(currentSceneGuid, data);
+	}
+
 	void ReloadSceneItems(Scene scene)
 	{
 		InvalidateCache(); // Scene objects may have changed
 		sceneIds.Clear();
+		selectionGroups.Clear();
 
-		currentSceneKey = SceneKeyForScene(scene);
-		if (!string.IsNullOrEmpty(currentSceneKey))
+		currentSceneGuid = GuidForScene(scene);
+		if (!string.IsNullOrEmpty(currentSceneGuid))
 		{
-			LoadListFromPrefs(sceneIds, currentSceneKey);
+			// Lazy migration: if a sidecar doesn't exist yet but EditorPrefs has
+			// data for this scene, migrate now. Cheap if there's nothing to do.
+			if (!QuickAccessStore.SceneFileExists(currentSceneGuid))
+				MigrateSceneFromPrefs(scene, currentSceneGuid, alsoMigrateGlobalGroups: false);
 
-			// One-time migration from the old name-based key.
-			// If the new GUID key is empty but the legacy name-based key has
-			// data, copy it over. Best-effort — same-named scenes in the old
-			// scheme collided, so whichever scene loads first wins.
-			if (sceneIds.Count == 0)
-			{
-				var legacyKey = LegacySceneKeyForScene(scene);
-				if (!string.IsNullOrEmpty(legacyKey) && EditorPrefs.HasKey(legacyKey))
-				{
-					LoadListFromPrefs(sceneIds, legacyKey);
-					if (sceneIds.Count > 0)
-					{
-						EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
-						EditorPrefs.DeleteKey(legacyKey);
-					}
-				}
-			}
+			var data = QuickAccessStore.LoadScene(currentSceneGuid);
+			sceneIds.AddRange(data.items);
+			foreach (var g in data.groups)
+				selectionGroups[g.slot] = new List<string>(g.items);
 		}
 
 		// Flush stale undo records that reference the old scene's sceneIds.
 		// Without this, Ctrl+Z can revert sceneIds to old-scene data and
-		// OnUndoRedo would save it under the new scene's prefs key.
+		// OnUndoRedo would save it under the new scene's GUID.
 		Undo.ClearUndo(this);
 
 		RebuildRows(isScene: true);
+		RefreshAllBadges();
 	}
 
 	// ─── Persistence ───────────────────────────────────────────
@@ -793,84 +872,45 @@ public class QuickAccess : EditorWindow
 	void LoadFromPrefs()
 	{
 		projectIds.Clear();
-		LoadListFromPrefs(projectIds, PrefKeyProject);
-		// Scene list + currentSceneKey are established via ReloadSceneItems
-		// (called from OnSceneOpened / OnActiveSceneChanged, and explicitly here).
+		var proj = QuickAccessStore.LoadProject();
+		projectIds.AddRange(proj.items);
+
+		// Scene list, selectionGroups and currentSceneGuid are established
+		// via ReloadSceneItems (also called from OnSceneOpened / OnActiveSceneChanged).
 		ReloadSceneItems(SceneManager.GetActiveScene());
-		LoadSelectionGroupsFromPrefs();
-	}
-
-	void LoadListFromPrefs(List<string> ids, string key)
-	{
-		var data = EditorPrefs.GetString(key, "");
-		if (string.IsNullOrEmpty(data)) return;
-
-		foreach (var id in data.Split(','))
-			if (!string.IsNullOrEmpty(id))
-				ids.Add(id);
 	}
 
 	void SaveToPrefs()
 	{
-		EditorPrefs.SetString(PrefKeyProject, string.Join(",", projectIds));
-		// Only persist scene list if we have a stable key. Untitled scenes
-		// (no asset GUID) keep their list in-memory for the session only —
-		// writing under an empty key would pollute a shared bucket.
-		if (!string.IsNullOrEmpty(currentSceneKey))
-			EditorPrefs.SetString(currentSceneKey, string.Join(",", sceneIds));
+		// Project file
+		QuickAccessStore.SaveProject(new QuickAccessStore.ProjectData
+		{
+			items = new List<string>(projectIds),
+		});
+
+		// Scene file (items + per-scene selection groups). Untitled scenes
+		// (no asset GUID) keep their state in memory for the session only —
+		// writing under an empty GUID would pollute a shared bucket.
+		FlushCurrentSceneToDisk();
 	}
 
 	// ─── Selection Group Persistence ───────────────────────────
+	//
+	// Selection groups are part of the per-scene sidecar file. The window
+	// keeps a live in-memory copy; SaveSelectionGroupsToPrefs simply flushes
+	// the whole scene state via SaveToPrefs (one codepath for everything).
 
-	void SaveSelectionGroupsToPrefs()
-	{
-		if (selectionGroups.Count == 0)
-		{
-			EditorPrefs.DeleteKey(PrefKeySelectionGroups);
-			return;
-		}
-		var parts = new List<string>(selectionGroups.Count);
-		foreach (var kvp in selectionGroups)
-		{
-			// Tab separates multiple items per slot (pipe is used inside multi: IDs)
-			parts.Add($"{kvp.Key}={string.Join("\t", kvp.Value)}");
-		}
-		EditorPrefs.SetString(PrefKeySelectionGroups, string.Join(";", parts));
-	}
+	void SaveSelectionGroupsToPrefs() => SaveToPrefs();
 
-	void LoadSelectionGroupsFromPrefs()
+	/// <summary>Load the selection groups for the active scene without needing the window open.</summary>
+	static Dictionary<int, List<string>> LoadSelectionGroupsForActiveScene()
 	{
-		selectionGroups.Clear();
-		var data = EditorPrefs.GetString(PrefKeySelectionGroups, "");
-		if (string.IsNullOrEmpty(data)) return;
-		ParseSelectionGroupsV2(data, selectionGroups);
-	}
-
-	static void ParseSelectionGroupsV2(string data, Dictionary<int, List<string>> target)
-	{
-		foreach (var entry in data.Split(';'))
-		{
-			if (string.IsNullOrEmpty(entry)) continue;
-			int eq = entry.IndexOf('=');
-			if (eq <= 0) continue;
-			if (int.TryParse(entry.Substring(0, eq), out int slot) && slot >= 0 && slot <= 9)
-			{
-				var itemIds = entry.Substring(eq + 1).Split('\t')
-					.Where(s => !string.IsNullOrEmpty(s)).ToList();
-				if (itemIds.Count > 0)
-					target[slot] = itemIds;
-			}
-		}
-	}
-
-	/// <summary>Static version for when window is closed.</summary>
-	static Dictionary<int, List<string>> LoadSelectionGroupsFromPrefsStatic()
-	{
+		var guid = GuidForActiveScene();
+		if (string.IsNullOrEmpty(guid)) return new Dictionary<int, List<string>>();
+		var data = QuickAccessStore.LoadScene(guid);
 		var groups = new Dictionary<int, List<string>>();
-		var key = Application.dataPath + "QuickAccess_SelectionGroups_V2";
-		var data = EditorPrefs.GetString(key, "");
-		if (string.IsNullOrEmpty(data)) return groups;
-		ParseSelectionGroupsV2(data, groups);
+		foreach (var g in data.groups)
+			groups[g.slot] = new List<string>(g.items);
 		return groups;
 	}
 
@@ -1021,45 +1061,25 @@ public class QuickAccess : EditorWindow
 
 	static void SaveSelectionGroupWithoutWindow(int slot, Object[] sceneObjects, Object[] projectObjects)
 	{
-		// Capture the scene key once so it stays consistent throughout this method,
-		// even if the active scene changes mid-call. Empty = untitled scene;
-		// scene objects cannot be persisted in that case (we skip, but still
-		// persist project objects and the group mapping).
-		var sceneKey = SceneKeyForActiveScene();
-		bool canPersistScene = !string.IsNullOrEmpty(sceneKey);
+		// Load both sidecars, mutate in memory, write back. Single-writer per
+		// file (no other process touches these), so no race.
+		var sceneGuid = GuidForActiveScene();
+		bool canPersistScene = !string.IsNullOrEmpty(sceneGuid);
 
-		var groups = LoadSelectionGroupsFromPrefsStatic();
+		var sceneData   = canPersistScene ? QuickAccessStore.LoadScene(sceneGuid) : new QuickAccessStore.SceneData();
+		var projectData = QuickAccessStore.LoadProject();
 
-		// Remove old multi items from lists
-		if (groups.TryGetValue(slot, out var oldIds))
+		// Drop old multi-items that existed solely to back this slot
+		if (sceneData.TryGetGroup(slot, out var oldIds))
 		{
-			// Load current lists from prefs
-			var sceneList = new List<string>();
-			var projList = new List<string>();
-			if (canPersistScene)
-			{
-				var sceneData = EditorPrefs.GetString(sceneKey, "");
-				if (!string.IsNullOrEmpty(sceneData))
-					foreach (var id in sceneData.Split(','))
-						if (!string.IsNullOrEmpty(id)) sceneList.Add(id);
-			}
-			var projData = EditorPrefs.GetString(PrefKeyProject, "");
-			if (!string.IsNullOrEmpty(projData))
-				foreach (var id in projData.Split(','))
-					if (!string.IsNullOrEmpty(id)) projList.Add(id);
-
 			foreach (var oldId in oldIds)
 			{
 				if (oldId.StartsWith("multi:"))
 				{
-					sceneList.Remove(oldId);
-					projList.Remove(oldId);
+					sceneData.items.Remove(oldId);
+					projectData.items.Remove(oldId);
 				}
 			}
-
-			if (canPersistScene)
-				EditorPrefs.SetString(sceneKey, string.Join(",", sceneList));
-			EditorPrefs.SetString(PrefKeyProject, string.Join(",", projList));
 		}
 
 		var newSlotIds = new List<string>();
@@ -1069,15 +1089,7 @@ public class QuickAccess : EditorWindow
 			var id = ObjectsToID(sceneObjects);
 			if (!string.IsNullOrEmpty(id))
 			{
-				// Add to scene list if not present
-				var data = EditorPrefs.GetString(sceneKey, "");
-				var list = string.IsNullOrEmpty(data) ? new List<string>() :
-					data.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList();
-				if (!list.Contains(id))
-				{
-					list.Add(id);
-					EditorPrefs.SetString(sceneKey, string.Join(",", list));
-				}
+				if (!sceneData.items.Contains(id)) sceneData.items.Add(id);
 				newSlotIds.Add(id);
 			}
 		}
@@ -1087,36 +1099,18 @@ public class QuickAccess : EditorWindow
 			var id = ObjectsToID(projectObjects);
 			if (!string.IsNullOrEmpty(id))
 			{
-				var data = EditorPrefs.GetString(PrefKeyProject, "");
-				var list = string.IsNullOrEmpty(data) ? new List<string>() :
-					data.Split(',').Where(s => !string.IsNullOrEmpty(s)).ToList();
-				if (!list.Contains(id))
-				{
-					list.Add(id);
-					EditorPrefs.SetString(PrefKeyProject, string.Join(",", list));
-				}
+				if (!projectData.items.Contains(id)) projectData.items.Add(id);
 				newSlotIds.Add(id);
 			}
 		}
 
 		if (newSlotIds.Count > 0)
-			groups[slot] = newSlotIds;
+			sceneData.SetGroup(slot, newSlotIds);
 		else
-			groups.Remove(slot);
+			sceneData.RemoveGroup(slot);
 
-		// Save groups
-		var key = Application.dataPath + "QuickAccess_SelectionGroups_V2";
-		if (groups.Count == 0)
-		{
-			EditorPrefs.DeleteKey(key);
-		}
-		else
-		{
-			var parts = new List<string>();
-			foreach (var kvp in groups)
-				parts.Add($"{kvp.Key}={string.Join("\t", kvp.Value)}");
-			EditorPrefs.SetString(key, string.Join(";", parts));
-		}
+		if (canPersistScene) QuickAccessStore.SaveScene(sceneGuid, sceneData);
+		QuickAccessStore.SaveProject(projectData);
 	}
 
 	static void DoRecallSelectionGroup(int slot)
@@ -1127,7 +1121,7 @@ public class QuickAccess : EditorWindow
 			s_instance.selectionGroups.TryGetValue(slot, out itemIds);
 		else
 		{
-			var groups = LoadSelectionGroupsFromPrefsStatic();
+			var groups = LoadSelectionGroupsForActiveScene();
 			groups.TryGetValue(slot, out itemIds);
 		}
 
@@ -1414,7 +1408,18 @@ public class QuickAccess : EditorWindow
 		else if (id.StartsWith("globalid:"))
 		{
 			if (GlobalObjectId.TryParse(id.Substring("globalid:".Length), out var gid))
-				result = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(gid);
+			{
+				// Guard: GlobalObjectIdentifierToObjectSlow will *synchronously load
+				// the referenced scene* in the background if the embedded scene GUID
+				// is not the active scene — that's what caused the multi-minute
+				// "QuickAccess.OnSceneOpened" stalls. Skip cross-scene refs entirely.
+				var activeGuid = GuidForActiveScene();
+				if (string.IsNullOrEmpty(activeGuid)
+				    || gid.assetGUID.ToString() == activeGuid)
+				{
+					result = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(gid);
+				}
+			}
 		}
 		// Legacy path-based format — kept for backward compatibility
 		else if (id.StartsWith("gameObject:"))
@@ -1573,6 +1578,142 @@ public class QuickAccess : EditorWindow
 	{
 		return EditorGUIUtility.ObjectContent(obj,
 			obj != null ? obj.GetType() : typeof(Object)).image;
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// QuickAccessStore — per-user file persistence under UserSettings/QuickAccess/.
+//
+// One file per scene (<sceneGuid>.json) carrying both the scene's item list
+// and its selection groups; one file (_project.json) for the project items.
+// Writes are atomic (tmp file + File.Replace) so a crash can never leave a
+// half-written sidecar. Files live in UserSettings/ — Unity preserves it
+// across Library nukes, it's gitignored by convention, and it never ships
+// in builds. There is only ever one writer (this editor session), so reads
+// and writes don't need locking.
+// ─────────────────────────────────────────────────────────────────────────────
+internal static class QuickAccessStore
+{
+	[Serializable]
+	internal class GroupEntry
+	{
+		public int slot;
+		public List<string> items = new List<string>();
+	}
+
+	[Serializable]
+	internal class SceneData
+	{
+		public List<string>     items  = new List<string>();
+		public List<GroupEntry> groups = new List<GroupEntry>();
+
+		public bool TryGetGroup(int slot, out List<string> ids)
+		{
+			foreach (var g in groups)
+				if (g.slot == slot) { ids = g.items; return true; }
+			ids = null;
+			return false;
+		}
+
+		public void SetGroup(int slot, List<string> ids)
+		{
+			foreach (var g in groups)
+				if (g.slot == slot) { g.items = new List<string>(ids); return; }
+			groups.Add(new GroupEntry { slot = slot, items = new List<string>(ids) });
+		}
+
+		public void RemoveGroup(int slot)
+		{
+			for (int i = 0; i < groups.Count; i++)
+				if (groups[i].slot == slot) { groups.RemoveAt(i); return; }
+		}
+	}
+
+	[Serializable]
+	internal class ProjectData
+	{
+		public List<string> items = new List<string>();
+	}
+
+	/// <summary>Root folder for all QuickAccess sidecar files. Resolved relative to the
+	/// project root, NOT Application.dataPath, so it sits next to Assets/ rather than inside it.</summary>
+	internal static string Root
+	{
+		get
+		{
+			var projectRoot = Directory.GetParent(Application.dataPath).FullName;
+			return Path.Combine(projectRoot, "UserSettings", "QuickAccess");
+		}
+	}
+
+	internal static string SceneFilePath(string sceneGuid) =>
+		Path.Combine(Root, sceneGuid + ".json");
+
+	internal static string ProjectFilePath =>
+		Path.Combine(Root, "_project.json");
+
+	internal static bool SceneFileExists(string sceneGuid) =>
+		!string.IsNullOrEmpty(sceneGuid) && File.Exists(SceneFilePath(sceneGuid));
+
+	internal static SceneData LoadScene(string sceneGuid)
+	{
+		if (string.IsNullOrEmpty(sceneGuid)) return new SceneData();
+		return LoadJson<SceneData>(SceneFilePath(sceneGuid));
+	}
+
+	internal static void SaveScene(string sceneGuid, SceneData data)
+	{
+		if (string.IsNullOrEmpty(sceneGuid) || data == null) return;
+		SaveJson(SceneFilePath(sceneGuid), data);
+	}
+
+	internal static ProjectData LoadProject() => LoadJson<ProjectData>(ProjectFilePath);
+
+	internal static void SaveProject(ProjectData data)
+	{
+		if (data == null) return;
+		SaveJson(ProjectFilePath, data);
+	}
+
+	// ─── JSON I/O (shared codepath for both file kinds) ────────
+
+	static T LoadJson<T>(string path) where T : class, new()
+	{
+		try
+		{
+			if (!File.Exists(path)) return new T();
+			var json = File.ReadAllText(path);
+			if (string.IsNullOrEmpty(json)) return new T();
+			var parsed = JsonUtility.FromJson<T>(json);
+			return parsed ?? new T();
+		}
+		catch (Exception e)
+		{
+			Debug.LogWarning($"[QuickAccess] Failed to load {path}: {e.Message}");
+			return new T();
+		}
+	}
+
+	static void SaveJson<T>(string path, T data) where T : class
+	{
+		try
+		{
+			Directory.CreateDirectory(Path.GetDirectoryName(path));
+			var json = JsonUtility.ToJson(data, prettyPrint: true);
+
+			// Atomic write: write to .tmp, then replace. Either the old file
+			// stays intact, or the new file is fully on disk — never partial.
+			var tmp = path + ".tmp";
+			File.WriteAllText(tmp, json);
+			if (File.Exists(path))
+				File.Replace(tmp, path, destinationBackupFileName: null);
+			else
+				File.Move(tmp, path);
+		}
+		catch (Exception e)
+		{
+			Debug.LogWarning($"[QuickAccess] Failed to save {path}: {e.Message}");
+		}
 	}
 }
 #endif
