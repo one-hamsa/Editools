@@ -28,6 +28,13 @@ public class QuickAccess : EditorWindow
 	[SerializeField] List<string> sceneIds   = new List<string>();
 	[SerializeField] List<string> projectIds = new List<string>();
 
+	/// <summary>GUID of the scene that <c>sceneIds</c> belongs to. Travels in the same
+	/// <c>Undo.RecordObject</c> snapshot as <c>sceneIds</c>, so an undo that reverts our state
+	/// also reverts the owner stamp. After a scene switch, the new scene's data has a different
+	/// owner GUID; <c>OnUndoRedo</c> compares this against <c>currentSceneGuid</c> to detect
+	/// cross-scene undos and reject them without writing them back to disk.</summary>
+	[SerializeField] string sceneIdsOwnerGuid = "";
+
 	// ─── UI ────────────────────────────────────────────────────
 
 	ScrollView    sceneRows, projectRows;
@@ -277,6 +284,17 @@ public class QuickAccess : EditorWindow
 
 	void OnUndoRedo()
 	{
+		// Cross-scene undo guard: Unity's undo system is global, but sceneIds is scoped per-scene.
+		// An undo can land us on a snapshot taken under the previous active scene — the reverted
+		// sceneIds belong to that scene, not this one. sceneIdsOwnerGuid was captured into the
+		// same snapshot, so a mismatch with currentSceneGuid means "this revert is for a different
+		// scene's data." Drop it; reload current scene's data from disk so we don't persist the
+		// reverted values under the wrong GUID.
+		if (sceneIdsOwnerGuid != currentSceneGuid)
+		{
+			ReloadSceneItems(SceneManager.GetActiveScene());
+			return;
+		}
 		RebuildAllRows();
 		SaveToPrefs();
 	}
@@ -858,10 +876,10 @@ public class QuickAccess : EditorWindow
 				selectionGroups[g.slot] = new List<string>(g.items);
 		}
 
-		// Flush stale undo records that reference the old scene's sceneIds.
-		// Without this, Ctrl+Z can revert sceneIds to old-scene data and
-		// OnUndoRedo would save it under the new scene's GUID.
-		Undo.ClearUndo(this);
+		// Stamp the in-memory state with its owning scene. Read in OnUndoRedo to detect when an
+		// undo reverted us to a different scene's data — see the field comment for the full
+		// rationale.
+		sceneIdsOwnerGuid = currentSceneGuid;
 
 		RebuildRows(isScene: true);
 		RefreshAllBadges();
