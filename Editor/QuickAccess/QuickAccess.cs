@@ -270,8 +270,9 @@ public class QuickAccess : EditorWindow
 	void OnDisable()
 	{
 		// Flush before tear-down — catches data that lived only in memory
-		// across a domain reload or window close.
-		try { SaveToPrefs(); } catch (Exception e) { Debug.LogWarning($"[QuickAccess] Save on disable failed: {e.Message}"); }
+		// across a domain reload or window close. Synchronous: delayCall
+		// would not fire after the window is gone.
+		try { SaveToPrefsImmediate(); } catch (Exception e) { Debug.LogWarning($"[QuickAccess] Save on disable failed: {e.Message}"); }
 
 		if (s_instance == this)
 			s_instance = null;
@@ -652,7 +653,6 @@ public class QuickAccess : EditorWindow
 			RemoveItemFromSelectionGroups(id);
 			RebuildRows(isScene);
 			SaveToPrefs();
-			SaveSelectionGroupsToPrefs();
 			evt.StopPropagation();
 		});
 
@@ -898,7 +898,27 @@ public class QuickAccess : EditorWindow
 		ReloadSceneItems(SceneManager.GetActiveScene());
 	}
 
+	bool saveQueued;
+
+	// Coalesces multiple mutations in the same frame into a single disk write.
+	// Selection changes, undo/redo and slot edits can all fire back-to-back;
+	// without this, File.Replace on _project.json races its own previous swap.
 	void SaveToPrefs()
+	{
+		if (saveQueued) return;
+		saveQueued = true;
+		EditorApplication.delayCall += FlushPendingSave;
+	}
+
+	void FlushPendingSave()
+	{
+		EditorApplication.delayCall -= FlushPendingSave;
+		if (!saveQueued) return;
+		saveQueued = false;
+		SaveToPrefsImmediate();
+	}
+
+	void SaveToPrefsImmediate()
 	{
 		// Project file
 		QuickAccessStore.SaveProject(new QuickAccessStore.ProjectData
@@ -915,10 +935,8 @@ public class QuickAccess : EditorWindow
 	// ─── Selection Group Persistence ───────────────────────────
 	//
 	// Selection groups are part of the per-scene sidecar file. The window
-	// keeps a live in-memory copy; SaveSelectionGroupsToPrefs simply flushes
-	// the whole scene state via SaveToPrefs (one codepath for everything).
-
-	void SaveSelectionGroupsToPrefs() => SaveToPrefs();
+	// keeps a live in-memory copy; SaveToPrefs flushes the whole scene state
+	// (one codepath for everything).
 
 	/// <summary>Load the selection groups for the active scene without needing the window open.</summary>
 	static Dictionary<int, List<string>> LoadSelectionGroupsForActiveScene()
@@ -1020,7 +1038,6 @@ public class QuickAccess : EditorWindow
 			selectionGroups[slot] = newSlotIds;
 
 		SaveToPrefs();
-		SaveSelectionGroupsToPrefs();
 
 		if (sceneChanged)  RebuildRows(isScene: true);
 		if (projectChanged) RebuildRows(isScene: false);
@@ -1057,7 +1074,6 @@ public class QuickAccess : EditorWindow
 				}
 				s_instance.selectionGroups.Remove(slot);
 				s_instance.SaveToPrefs();
-				s_instance.SaveSelectionGroupsToPrefs();
 				s_instance.RebuildAllRows();
 			}
 			return;
@@ -1719,14 +1735,15 @@ internal static class QuickAccessStore
 			Directory.CreateDirectory(Path.GetDirectoryName(path));
 			var json = JsonUtility.ToJson(data, prettyPrint: true);
 
-			// Atomic write: write to .tmp, then replace. Either the old file
-			// stays intact, or the new file is fully on disk — never partial.
+			// Write to .tmp, then swap into place. Delete + Move is used
+			// instead of File.Replace because Replace briefly holds the
+			// destination open during the swap, which on Windows can return
+			// "Unable to remove the file to be replaced" when called twice
+			// in quick succession on the same path.
 			var tmp = path + ".tmp";
 			File.WriteAllText(tmp, json);
-			if (File.Exists(path))
-				File.Replace(tmp, path, destinationBackupFileName: null);
-			else
-				File.Move(tmp, path);
+			if (File.Exists(path)) File.Delete(path);
+			File.Move(tmp, path);
 		}
 		catch (Exception e)
 		{
