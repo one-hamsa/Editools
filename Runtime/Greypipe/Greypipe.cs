@@ -357,6 +357,33 @@ public class Greypipe : GreyPrimitive
         _baseGirth = 0.5f;
     }
 
+#if UNITY_EDITOR
+    protected override int ComputeMeshHash()
+    {
+        unchecked
+        {
+            int h = base.ComputeMeshHash();
+            h = h * 31 + _baseGirth.GetHashCode();
+            h = h * 31 + _lengthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _girthSubdivMultiplier.GetHashCode();
+            h = h * 31 + GetManagerLengthMultiplier().GetHashCode();
+            h = h * 31 + GetManagerGirthMultiplier().GetHashCode();
+            if (_vertices != null)
+            {
+                for (int i = 0; i < _vertices.Count; i++)
+                {
+                    var v = _vertices[i];
+                    h = h * 31 + v.position.GetHashCode();
+                    h = h * 31 + v.handleRotation.GetHashCode();
+                    h = h * 31 + v.handleLength.GetHashCode();
+                    h = h * 31 + v.girthMultiplier.GetHashCode();
+                }
+            }
+            return h;
+        }
+    }
+#endif
+
     protected override void GenerateMesh(Mesh mesh)
     {
         int vertCount = _vertices.Count;

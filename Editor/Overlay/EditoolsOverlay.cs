@@ -1151,7 +1151,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 9 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 10 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1223,6 +1223,12 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Greypipe — Ctrl+T — spline-based tube. Hold Q to insert/extend/delete vertices.\n\n" +
 		"Click ▸ to edit shared defaults (material, layer, collider, shadows) and per-primitive defaults.");
 
+	static readonly GUIContent k_Sticker = new GUIContent(
+		"Sticker",
+		"Ctrl+Shift+K — planar mesh that conforms to nearby static geometry. " +
+		"Drives size + texture from a MainTex field and pushes it through LocalMaterial.\n\n" +
+		"Click ▸ to edit Sticker defaults (material, layer, static, subdivisions, raycast slab, relax, offset).");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1257,6 +1263,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawSubmenuOnlyRow(k_GreyPrimitives,
 			rect => UnityEditor.PopupWindow.Show(rect, new GreyPrimitivesSettingsPopup()));
+
+		DrawSubmenuOnlyRow(k_Sticker,
+			rect => UnityEditor.PopupWindow.Show(rect, new StickerSettingsPopup()));
 	}
 
 	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)

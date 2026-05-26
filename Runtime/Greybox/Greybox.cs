@@ -65,6 +65,24 @@ public class Greybox : GreyPrimitive
         _activeFaces = DefaultActiveFaces();
     }
 
+#if UNITY_EDITOR
+    protected override int ComputeMeshHash()
+    {
+        unchecked
+        {
+            int h = base.ComputeMeshHash();
+            if (_corners != null)
+                for (int i = 0; i < _corners.Length; i++)
+                    h = h * 31 + _corners[i].GetHashCode();
+            if (_activeFaces != null)
+                for (int i = 0; i < _activeFaces.Length; i++)
+                    h = h * 31 + (_activeFaces[i] ? 1 : 0);
+            h = h * 31 + _uvTileScale.GetHashCode();
+            return h;
+        }
+    }
+#endif
+
     protected override void GenerateMesh(Mesh mesh)
     {
         float effective = ComputeEffectiveDensity();

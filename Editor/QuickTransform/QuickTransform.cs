@@ -286,6 +286,8 @@ static partial class QuickTransform
             if (phase == Phase.Dragging)
             {
                 // Commit the drag — treat leaving the window as a normal release
+                CaptureDragForUndo();
+                Undo.FlushUndoRecordObjects();
                 Undo.CollapseUndoOperations(undoGroup);
                 GUIUtility.hotControl = 0;
                 suppressKeyUpFor = activeMode;
@@ -1069,18 +1071,24 @@ static partial class QuickTransform
                 }
                 else if (!greypipeOwned)
                 {
+                    Undo.IncrementCurrentGroup();
+                    undoGroup = Undo.GetCurrentGroup();
+
                     if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
                         DuplicateAndSwapTargets();
 
                     if (greyboxTarget != null)
+                    {
                         Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
+                        Undo.SetCurrentGroupName("Greybox Edge Move");
+                    }
                     else
                     {
-                        string undoName = GetUndoName();
-                        foreach (var t in dragTargets)
-                            Undo.RegisterCompleteObjectUndo(t, undoName);
+                        // Regular transform path: the snapshot is taken at drag release via
+                        // CaptureDragForUndo so Unity records the entire drag as a single pre→post
+                        // diff. Registering here would only capture the first frame's delta.
+                        Undo.SetCurrentGroupName(GetUndoName());
                     }
-                    undoGroup = Undo.GetCurrentGroup();
                 }
 
                 phase = Phase.Dragging;
@@ -1149,6 +1157,8 @@ static partial class QuickTransform
         {
             HandleGreypipeGirthRelease();
             HandleGreyroadWidthRelease();
+            CaptureDragForUndo();
+            Undo.FlushUndoRecordObjects();
             Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
@@ -2065,6 +2075,44 @@ static partial class QuickTransform
             dragTargets[i].position   = startPositions[i];
             dragTargets[i].rotation   = startRotations[i];
             dragTargets[i].localScale = startScales[i];
+        }
+    }
+
+    /// <summary>
+    /// Records the full pre→post drag as a single undo step. Bounces the transforms
+    /// back to their pre-drag snapshot, calls RecordObjects so Unity captures that as
+    /// the "before" state, then reapplies the post-drag values — the next undo flush
+    /// diffs the two and stores one clean step. Specialized paths (Greybox edge,
+    /// Greypipe/Greyroad vertex, Extrude) register their own undo and are skipped.
+    /// </summary>
+    static void CaptureDragForUndo()
+    {
+        if (dragTargets == null || dragTargets.Length == 0) return;
+        if (startPositions == null) return;
+        if (greyboxTarget != null || greypipeTarget != null || greyroadTarget != null) return;
+        if (extrudeNewGb != null) return;
+
+        int n = dragTargets.Length;
+        var endPos   = new Vector3[n];
+        var endRot   = new Quaternion[n];
+        var endScale = new Vector3[n];
+        for (int i = 0; i < n; i++)
+        {
+            if (dragTargets[i] == null) continue;
+            endPos[i]   = dragTargets[i].position;
+            endRot[i]   = dragTargets[i].rotation;
+            endScale[i] = dragTargets[i].localScale;
+        }
+
+        RevertToSnapshot();
+        Undo.RecordObjects(dragTargets, GetUndoName());
+
+        for (int i = 0; i < n; i++)
+        {
+            if (dragTargets[i] == null) continue;
+            dragTargets[i].position   = endPos[i];
+            dragTargets[i].rotation   = endRot[i];
+            dragTargets[i].localScale = endScale[i];
         }
     }
 

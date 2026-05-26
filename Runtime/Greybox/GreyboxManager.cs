@@ -3,7 +3,9 @@ using UnityEngine;
 /// <summary>
 /// Place anywhere above grey primitives (Greybox, Greypipe, Greyroad) in the hierarchy to
 /// control their adaptive subdivision density. All primitives under this object poll these
-/// values and subdivide to match.
+/// values and subdivide to match. Changes to this component push <see cref="GreyPrimitive.RebuildMesh"/>
+/// to every descendant primitive via <see cref="OnValidate"/>, since a child's own OnValidate
+/// does not fire when only the parent's serialized fields change.
 /// </summary>
 public class GreyboxManager : MonoBehaviour
 {
@@ -49,4 +51,40 @@ public class GreyboxManager : MonoBehaviour
     public float GreyroadLengthSubdivMultiplier => Mathf.Max(0.01f, _greyroadLengthSubdivMultiplier);
     public float GreyroadWidthSubdivMultiplier  => Mathf.Max(0.01f, _greyroadWidthSubdivMultiplier);
     public float GreyroadSideSubdivMultiplier   => Mathf.Max(0.01f, _greyroadSideSubdivMultiplier);
+
+#if UNITY_EDITOR
+    // Hash of every field that influences child primitives. Persisted so deserialization (which
+    // fires OnValidate) sees a matching hash and skips the push — only real edits trigger work.
+    [SerializeField, HideInInspector] int _pushHash;
+
+    void OnValidate()
+    {
+        int h = ComputePushHash();
+        if (h == _pushHash) return;
+        _pushHash = h;
+        PushRebuildToChildren();
+    }
+
+    int ComputePushHash()
+    {
+        unchecked
+        {
+            int hash = 17;
+            hash = hash * 31 + (_subdivisionEnabled ? 1 : 0);
+            hash = hash * 31 + _vertexDensity.GetHashCode();
+            hash = hash * 31 + _greypipeLengthSubdivMultiplier.GetHashCode();
+            hash = hash * 31 + _greypipeGirthSubdivMultiplier.GetHashCode();
+            hash = hash * 31 + _greyroadLengthSubdivMultiplier.GetHashCode();
+            hash = hash * 31 + _greyroadWidthSubdivMultiplier.GetHashCode();
+            hash = hash * 31 + _greyroadSideSubdivMultiplier.GetHashCode();
+            return hash;
+        }
+    }
+
+    public void PushRebuildToChildren()
+    {
+        foreach (var prim in GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
+            prim.RebuildMesh();
+    }
+#endif
 }

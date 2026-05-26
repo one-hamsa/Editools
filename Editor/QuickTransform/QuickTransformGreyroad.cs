@@ -190,7 +190,10 @@ static partial class QuickTransform
 
         Undo.IncrementCurrentGroup();
         undoGroup = Undo.GetCurrentGroup();
-        Undo.RegisterCompleteObjectUndo(road.transform, $"Greyroad Vertex {mode}");
+        // Transform uses RecordObject so Unity's change-tracking captures the post-drag state for redo.
+        // Component uses RegisterCompleteObjectUndo because the vertex array mutations aren't tracked
+        // by the property-diff system.
+        Undo.RecordObject(road.transform, $"Greyroad Vertex {mode}");
         Undo.RegisterCompleteObjectUndo(road, $"Greyroad Vertex {mode}");
         Undo.SetCurrentGroupName($"Greyroad Vertex {mode}");
 

@@ -1,11 +1,12 @@
 using UnityEngine;
 
 /// <summary>
-/// Base class for grey primitives. The MonoBehaviour is inert: it owns the serialized mesh
-/// and exposes <see cref="RebuildMesh"/>, but no Unity lifecycle callback ever regenerates.
-/// Rebuilds are triggered exclusively from editor code (custom inspectors, scene tools).
+/// Base class for grey primitives. Owns the serialized mesh and exposes <see cref="RebuildMesh"/>;
+/// no runtime Unity callback regenerates. In edit mode, <see cref="OnValidate"/> rebuilds when the
+/// serialized hash of mesh-defining params (see <see cref="ComputeMeshHash"/>) no longer matches
+/// — so changing an inspector field on the primitive, or on the parent <see cref="GreyboxManager"/>
+/// (whose multipliers feed into the hash), triggers exactly one rebuild on the next OnValidate tick.
 /// </summary>
-[ExecuteAlways]
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public abstract class GreyPrimitive : MonoBehaviour
 {
@@ -26,6 +27,8 @@ public abstract class GreyPrimitive : MonoBehaviour
     Mesh _mesh;
     [SerializeField, HideInInspector]
     int _meshOwnerId;
+    [SerializeField, HideInInspector]
+    int _builtHash;
     protected Mesh SharedMesh => _mesh;
 
 #if UNITY_EDITOR
@@ -37,19 +40,6 @@ public abstract class GreyPrimitive : MonoBehaviour
 #endif
 
     // ─── Unity lifecycle ─────────────────────────────────────────
-    //
-    // Intentionally inert. We do NOT rebuild in OnEnable, OnValidate, or Update. The only
-    // thing OnEnable does is re-bind the serialized mesh to MeshFilter / MeshCollider if
-    // the references were dropped — assignment only, never regeneration.
-
-    protected virtual void OnEnable()
-    {
-        if (_mesh == null) return;
-        var mf = GetComponent<MeshFilter>();
-        if (mf != null && mf.sharedMesh != _mesh) mf.sharedMesh = _mesh;
-        var mc = GetComponent<MeshCollider>();
-        if (mc != null && mc.sharedMesh != _mesh) mc.sharedMesh = _mesh;
-    }
 
 #if UNITY_EDITOR
     protected virtual void Reset()
@@ -57,6 +47,42 @@ public abstract class GreyPrimitive : MonoBehaviour
         ResetToDefaults();
         EnsureMesh();
         RebuildMesh();
+    }
+
+    /// <summary>
+    /// Rebinds the serialized mesh to MeshFilter/MeshCollider if references drifted, then
+    /// rebuilds when mesh-defining params changed since the last build. Both branches are
+    /// no-ops in the steady state (no ref drift, hash matches).
+    /// </summary>
+    protected virtual void OnValidate()
+    {
+        if (_mesh != null)
+        {
+            var mf = GetComponent<MeshFilter>();
+            if (mf != null && mf.sharedMesh != _mesh) mf.sharedMesh = _mesh;
+            var mc = GetComponent<MeshCollider>();
+            if (mc != null && mc.sharedMesh != _mesh) mc.sharedMesh = _mesh;
+        }
+
+        if (ComputeMeshHash() != _builtHash)
+            RebuildMesh();
+    }
+
+    /// <summary>
+    /// Hash of every input that influences <see cref="GenerateMesh"/>. Subclasses MUST override
+    /// and fold in their own serialized fields and any inherited <see cref="GreyboxManager"/>
+    /// multipliers they read. <see cref="OnValidate"/> uses this to skip rebuilds when nothing
+    /// has changed since the last build.
+    /// </summary>
+    protected virtual int ComputeMeshHash()
+    {
+        unchecked
+        {
+            int h = 17;
+            h = h * 31 + _subdivisionMultiplier.GetHashCode();
+            h = h * 31 + ComputeEffectiveDensity().GetHashCode();
+            return h;
+        }
     }
 #endif
 
@@ -77,6 +103,10 @@ public abstract class GreyPrimitive : MonoBehaviour
 
         var mc = GetComponent<MeshCollider>();
         if (mc != null) mc.sharedMesh = _mesh;
+
+#if UNITY_EDITOR
+        _builtHash = ComputeMeshHash();
+#endif
     }
 
     // ─── Subdivision ─────────────────────────────────────────────

@@ -166,7 +166,10 @@ static partial class QuickTransform
         // (HandleReady's re-registration) can land in a later group and split the entry in two.
         Undo.IncrementCurrentGroup();
         undoGroup = Undo.GetCurrentGroup();
-        Undo.RegisterCompleteObjectUndo(pipe.transform, $"Greypipe Vertex {mode}");
+        // Transform uses RecordObject so Unity's change-tracking captures the post-drag state for redo.
+        // Component uses RegisterCompleteObjectUndo because the vertex array mutations aren't tracked
+        // by the property-diff system.
+        Undo.RecordObject(pipe.transform, $"Greypipe Vertex {mode}");
         Undo.RegisterCompleteObjectUndo(pipe, $"Greypipe Vertex {mode}");
         Undo.SetCurrentGroupName($"Greypipe Vertex {mode}");
 

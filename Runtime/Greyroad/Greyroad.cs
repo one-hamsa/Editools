@@ -392,6 +392,41 @@ public class Greyroad : GreyPrimitive
         _activeFaces = DefaultActiveFaces();
     }
 
+#if UNITY_EDITOR
+    protected override int ComputeMeshHash()
+    {
+        unchecked
+        {
+            int h = base.ComputeMeshHash();
+            h = h * 31 + _baseWidth.GetHashCode();
+            h = h * 31 + _baseHeight.GetHashCode();
+            h = h * 31 + _lengthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _widthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _sideSubdivMultiplier.GetHashCode();
+            h = h * 31 + GetManagerLengthMultiplier().GetHashCode();
+            h = h * 31 + GetManagerWidthMultiplier().GetHashCode();
+            h = h * 31 + GetManagerSideMultiplier().GetHashCode();
+            if (_activeFaces != null)
+                for (int i = 0; i < _activeFaces.Length; i++)
+                    h = h * 31 + (_activeFaces[i] ? 1 : 0);
+            if (_vertices != null)
+            {
+                for (int i = 0; i < _vertices.Count; i++)
+                {
+                    var v = _vertices[i];
+                    h = h * 31 + v.position.GetHashCode();
+                    h = h * 31 + v.handleRotation.GetHashCode();
+                    h = h * 31 + v.handleLength.GetHashCode();
+                    h = h * 31 + v.widthMultiplier.GetHashCode();
+                    h = h * 31 + v.heightMultiplier.GetHashCode();
+                    h = h * 31 + v.bankingAngle.GetHashCode();
+                }
+            }
+            return h;
+        }
+    }
+#endif
+
     // ─── Mesh generation ────────────────────────────────────────
 
     struct SplineSample
