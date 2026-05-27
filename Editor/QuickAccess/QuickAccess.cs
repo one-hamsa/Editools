@@ -35,11 +35,20 @@ public class QuickAccess : EditorWindow
 	/// cross-scene undos and reject them without writing them back to disk.</summary>
 	[SerializeField] string sceneIdsOwnerGuid = "";
 
+	/// <summary>Per-scene Scene View camera bookmarks. Each entry stores a camera position +
+	/// rotation; recalled by aligning the last active Scene View camera back to it. Numbered
+	/// 1..9 by list order; adding past <see cref="k_MaxAnchors"/> drops the oldest (FIFO).
+	/// Serialized so add/remove travel in the same undo snapshot as <c>sceneIds</c> — the
+	/// cross-scene undo guard in <c>OnUndoRedo</c> covers them too.</summary>
+	[SerializeField] List<QuickAccessStore.AnchorEntry> viewAnchors = new List<QuickAccessStore.AnchorEntry>();
+
+	const int k_MaxAnchors = 9;
+
 	// ─── UI ────────────────────────────────────────────────────
 
-	ScrollView    sceneRows, projectRows;
+	ScrollView    sceneRows, projectRows, anchorRows;
 	VisualElement sceneDropZone, projectDropZone;
-	Label         sceneEmptyHint, projectEmptyHint;
+	Label         sceneEmptyHint, projectEmptyHint, anchorEmptyHint;
 
 	// ─── Drag State ────────────────────────────────────────────
 
@@ -304,6 +313,38 @@ public class QuickAccess : EditorWindow
 
 	void BuildLayout()
 	{
+		// View Anchors header — title with an inline "add" button on the same line
+		var anchorHeader = new VisualElement();
+		anchorHeader.AddToClassList("section-header");
+		anchorHeader.AddToClassList("header-with-button");
+
+		var anchorTitle = new Label("View Anchors");
+		anchorTitle.style.flexGrow = 1;
+		anchorHeader.Add(anchorTitle);
+
+		var addAnchorButton = new Button(AddCurrentViewAsAnchor) { text = "+" };
+		addAnchorButton.tooltip = "Capture the current Scene View camera as a numbered anchor";
+		addAnchorButton.AddToClassList("add-button");
+		anchorHeader.Add(addAnchorButton);
+
+		rootVisualElement.Add(anchorHeader);
+
+		var anchorContainer = new VisualElement();
+		anchorContainer.AddToClassList("section");
+
+		anchorRows = new ScrollView();
+		anchorContainer.Add(anchorRows);
+
+		anchorEmptyHint = new Label("Click + to capture the Scene View");
+		anchorEmptyHint.AddToClassList("empty-hint");
+		anchorContainer.Add(anchorEmptyHint);
+
+		rootVisualElement.Add(anchorContainer);
+
+		var anchorSep = new VisualElement();
+		anchorSep.AddToClassList("separator");
+		rootVisualElement.Add(anchorSep);
+
 		// Scene header
 		var sceneHeader = new Label("Scene");
 		sceneHeader.AddToClassList("section-header");
@@ -597,6 +638,66 @@ public class QuickAccess : EditorWindow
 		if (sceneChanged || projectChanged) SaveToPrefs();
 	}
 
+	// ─── View Anchors ──────────────────────────────────────────
+	//
+	// Per-scene Scene View camera bookmarks. The "+" button captures the last active
+	// Scene View camera transform; recall (click row or Shift+1..9) aligns that camera
+	// back to the stored position/orientation. Only the transform is recalled — zoom
+	// (SceneView.size) is left untouched.
+
+	void AddCurrentViewAsAnchor()
+	{
+		var sv = SceneView.lastActiveSceneView;
+		if (sv == null || sv.camera == null)
+		{
+			Debug.LogWarning("[QuickAccess] No active Scene View to capture a view anchor from.");
+			return;
+		}
+
+		Undo.RecordObject(this, "Add View Anchor");
+		var t = sv.camera.transform;
+		viewAnchors.Add(new QuickAccessStore.AnchorEntry { position = t.position, rotation = t.rotation });
+		if (viewAnchors.Count > k_MaxAnchors)
+			viewAnchors.RemoveAt(0);  // FIFO: oldest drops out, the rest renumber on rebuild
+
+		RebuildAnchorRows();
+		SaveToPrefs();
+	}
+
+	void RemoveAnchorAt(int index)
+	{
+		if (index < 0 || index >= viewAnchors.Count) return;
+		Undo.RecordObject(this, "Remove View Anchor");
+		viewAnchors.RemoveAt(index);
+		RebuildAnchorRows();
+		SaveToPrefs();
+	}
+
+	/// <summary>Align the last active Scene View camera to a stored anchor. Works whether or not
+	/// the window is open (falls back to reading the active scene's sidecar).</summary>
+	static void DoRecallAnchor(int index)
+	{
+		var anchors = s_instance != null ? s_instance.viewAnchors : LoadAnchorsForActiveScene();
+		if (anchors == null || index < 0 || index >= anchors.Count) return;
+
+		var sv = SceneView.lastActiveSceneView;
+		if (sv == null) return;
+
+		var anchor = anchors[index];
+		sv.rotation = anchor.rotation;
+		// SceneView orbits its pivot, not the camera. Place the pivot ahead of the target
+		// position along the view direction so the camera itself lands on the stored transform.
+		sv.pivot = anchor.position + anchor.rotation * Vector3.forward * sv.cameraDistance;
+		sv.Repaint();
+	}
+
+	static List<QuickAccessStore.AnchorEntry> LoadAnchorsForActiveScene()
+	{
+		var guid = GuidForActiveScene();
+		if (string.IsNullOrEmpty(guid)) return null;
+		return QuickAccessStore.LoadScene(guid).viewAnchors;
+	}
+
 	// ─── Row Creation ──────────────────────────────────────────
 
 	VisualElement CreateRow(string id, bool isScene)
@@ -850,6 +951,7 @@ public class QuickAccess : EditorWindow
 		var data = new QuickAccessStore.SceneData
 		{
 			items = new List<string>(sceneIds),
+			viewAnchors = new List<QuickAccessStore.AnchorEntry>(viewAnchors),
 		};
 		foreach (var kvp in selectionGroups)
 			data.SetGroup(kvp.Key, kvp.Value);
@@ -861,6 +963,7 @@ public class QuickAccess : EditorWindow
 		InvalidateCache(); // Scene objects may have changed
 		sceneIds.Clear();
 		selectionGroups.Clear();
+		viewAnchors.Clear();
 
 		currentSceneGuid = GuidForScene(scene);
 		if (!string.IsNullOrEmpty(currentSceneGuid))
@@ -872,6 +975,7 @@ public class QuickAccess : EditorWindow
 
 			var data = QuickAccessStore.LoadScene(currentSceneGuid);
 			sceneIds.AddRange(data.items);
+			viewAnchors.AddRange(data.viewAnchors);
 			foreach (var g in data.groups)
 				selectionGroups[g.slot] = new List<string>(g.items);
 		}
@@ -881,6 +985,7 @@ public class QuickAccess : EditorWindow
 		// rationale.
 		sceneIdsOwnerGuid = currentSceneGuid;
 
+		RebuildAnchorRows();
 		RebuildRows(isScene: true);
 		RefreshAllBadges();
 	}
@@ -1213,6 +1318,27 @@ public class QuickAccess : EditorWindow
 	[Shortcut("Editools/QuickAccess Recall Group 0", KeyCode.Alpha0)]
 	static void RecallGroup0() => DoRecallSelectionGroup(9);
 
+	// View anchor recall — Shift+1..9, only while the Scene View has focus so they
+	// don't collide with Shift+number bindings in other editor windows.
+	[Shortcut("Editools/QuickAccess Recall View Anchor 1", typeof(SceneView), KeyCode.Alpha1, ShortcutModifiers.Shift)]
+	static void RecallAnchor1() => DoRecallAnchor(0);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 2", typeof(SceneView), KeyCode.Alpha2, ShortcutModifiers.Shift)]
+	static void RecallAnchor2() => DoRecallAnchor(1);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 3", typeof(SceneView), KeyCode.Alpha3, ShortcutModifiers.Shift)]
+	static void RecallAnchor3() => DoRecallAnchor(2);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 4", typeof(SceneView), KeyCode.Alpha4, ShortcutModifiers.Shift)]
+	static void RecallAnchor4() => DoRecallAnchor(3);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 5", typeof(SceneView), KeyCode.Alpha5, ShortcutModifiers.Shift)]
+	static void RecallAnchor5() => DoRecallAnchor(4);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 6", typeof(SceneView), KeyCode.Alpha6, ShortcutModifiers.Shift)]
+	static void RecallAnchor6() => DoRecallAnchor(5);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 7", typeof(SceneView), KeyCode.Alpha7, ShortcutModifiers.Shift)]
+	static void RecallAnchor7() => DoRecallAnchor(6);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 8", typeof(SceneView), KeyCode.Alpha8, ShortcutModifiers.Shift)]
+	static void RecallAnchor8() => DoRecallAnchor(7);
+	[Shortcut("Editools/QuickAccess Recall View Anchor 9", typeof(SceneView), KeyCode.Alpha9, ShortcutModifiers.Shift)]
+	static void RecallAnchor9() => DoRecallAnchor(8);
+
 	// ─── Badge Refresh ─────────────────────────────────────────
 
 	void RefreshAllBadges()
@@ -1232,8 +1358,62 @@ public class QuickAccess : EditorWindow
 
 	void RebuildAllRows()
 	{
+		RebuildAnchorRows();
 		RebuildRows(isScene: true);
 		RebuildRows(isScene: false);
+	}
+
+	void RebuildAnchorRows()
+	{
+		// UI not built yet (shortcut fired before window layout)
+		if (anchorRows == null) return;
+
+		anchorRows.Clear();
+
+		for (int i = 0; i < viewAnchors.Count; i++)
+		{
+			var row = CreateAnchorRow(i);
+			row.EnableInClassList("variant1", i % 2 == 0);
+			row.EnableInClassList("variant2", i % 2 == 1);
+			anchorRows.Add(row);
+		}
+
+		anchorEmptyHint.style.display = viewAnchors.Count == 0 ? DisplayStyle.Flex : DisplayStyle.None;
+	}
+
+	VisualElement CreateAnchorRow(int index)
+	{
+		var row = new VisualElement();
+		row.AddToClassList("row");
+		row.tooltip = $"Recall (Shift+{index + 1})  ·  right-click to remove";
+
+		var title = new VisualElement();
+		title.AddToClassList("title");
+
+		var icon = new Image();
+		icon.AddToClassList("icon");
+		icon.image = EditorGUIUtility.IconContent("d_SceneViewCamera").image;
+		title.Add(icon);
+
+		var label = new Label($"Anchor {index + 1}");
+		title.Add(label);
+
+		row.Add(title);
+
+		// Auto number 1..9, reusing the selection-group badge styling
+		var numberBadge = new Label((index + 1).ToString());
+		numberBadge.AddToClassList("selection-badge");
+		row.Add(numberBadge);
+
+		row.RegisterCallback<ClickEvent>(_ => DoRecallAnchor(index));
+
+		row.RegisterCallback<ContextClickEvent>(evt =>
+		{
+			RemoveAnchorAt(index);
+			evt.StopPropagation();
+		});
+
+		return row;
 	}
 
 	void RebuildRows(bool isScene)
@@ -1636,10 +1816,18 @@ internal static class QuickAccessStore
 	}
 
 	[Serializable]
+	internal class AnchorEntry
+	{
+		public Vector3    position;
+		public Quaternion rotation;
+	}
+
+	[Serializable]
 	internal class SceneData
 	{
-		public List<string>     items  = new List<string>();
-		public List<GroupEntry> groups = new List<GroupEntry>();
+		public List<string>      items       = new List<string>();
+		public List<GroupEntry>  groups      = new List<GroupEntry>();
+		public List<AnchorEntry> viewAnchors = new List<AnchorEntry>();
 
 		public bool TryGetGroup(int slot, out List<string> ids)
 		{
