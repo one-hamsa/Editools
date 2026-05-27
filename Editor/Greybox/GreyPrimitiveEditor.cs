@@ -5,10 +5,9 @@ using UnityEngine;
 [CanEditMultipleObjects]
 public class GreyPrimitiveEditor : Editor
 {
-    // Inspector edits fire OnValidate (via DrawDefaultInspector's ApplyModifiedProperties), which
-    // hash-gates a rebuild. Undo/redo restores serialized fields including _builtHash, so the hash
-    // matches the restored state and OnValidate skips — leaving the in-memory mesh stale relative
-    // to the restored params. Force-rebuild on undo/redo to keep the mesh in sync.
+    // Rebuilds are push-only: every path that mutates the primitive's state explicitly triggers
+    // RebuildMesh. Inspector edits go through the change-check below. Undo/redo restores serialized
+    // fields but leaves the in-memory mesh built from the pre-undo state, so we rebuild explicitly.
     protected virtual void OnEnable()  => Undo.undoRedoPerformed += OnUndoRedo;
     protected virtual void OnDisable() => Undo.undoRedoPerformed -= OnUndoRedo;
 
@@ -34,7 +33,13 @@ public class GreyPrimitiveEditor : Editor
         };
         EditorGUI.LabelField(rect, label, style);
 
+        EditorGUI.BeginChangeCheck();
         DrawDefaultInspector();
+        if (EditorGUI.EndChangeCheck())
+        {
+            foreach (var t in targets)
+                if (t is GreyPrimitive p) p.RebuildMesh();
+        }
 
         EditorGUILayout.Space();
         if (GUILayout.Button("Rebuild Mesh"))

@@ -120,37 +120,10 @@ public class Sticker : GreyPrimitive
         // All defaults live on the serialized field initializers above. Nothing extra to clear.
     }
 
-#if UNITY_EDITOR
-    protected override int ComputeMeshHash()
-    {
-        unchecked
-        {
-            int h = base.ComputeMeshHash();
-            h = h * 31 + (_mainTex != null ? _mainTex.GetInstanceID() : 0);
-            h = h * 31 + (_mainTex != null ? _mainTex.width  : 0);
-            h = h * 31 + (_mainTex != null ? _mainTex.height : 0);
-            h = h * 31 + _columns;
-            h = h * 31 + _rows;
-            h = h * 31 + _rayDistAbove.GetHashCode();
-            h = h * 31 + _rayDistBelow.GetHashCode();
-            h = h * 31 + _retryBendAngle.GetHashCode();
-            h = h * 31 + _relaxIterations;
-            h = h * 31 + _relaxStrength.GetHashCode();
-            h = h * 31 + _relaxRigidity.GetHashCode();
-            h = h * 31 + _surfaceOffset.GetHashCode();
-            // Pose participates because the conformation depends on world placement.
-            h = h * 31 + transform.position.GetHashCode();
-            h = h * 31 + transform.rotation.GetHashCode();
-            return h;
-        }
-    }
-
-    protected override void OnValidate()
-    {
-        base.OnValidate();
-        SyncMainTexToLocalMaterial();
-    }
-#endif
+    // Runs ahead of every RebuildMesh — inspector change-check, undo, scene tools, Reset, button.
+    // Mirrors the texture into the sibling LocalMaterial's _MainTex slot in the same push tick
+    // that rebuilds the mesh (texture drives mesh dimensions anyway).
+    protected override void OnBeforeRebuild() => SyncMainTexToLocalMaterial();
 
     protected override void GenerateMesh(Mesh mesh)
     {
