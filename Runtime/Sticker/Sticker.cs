@@ -123,7 +123,13 @@ public class Sticker : GreyPrimitive
     // Runs ahead of every RebuildMesh — inspector change-check, undo, scene tools, Reset, button.
     // Mirrors the texture into the sibling LocalMaterial's _MainTex slot in the same push tick
     // that rebuilds the mesh (texture drives mesh dimensions anyway).
-    protected override void OnBeforeRebuild() => SyncMainTexToLocalMaterial();
+    protected override void OnBeforeRebuild()
+    {
+#if UNITY_EDITOR
+        // SyncMainTexToLocalMaterial() is only defined in the editor, it will throw a compiler error if we don't put it in this guard.
+        SyncMainTexToLocalMaterial();
+#endif
+    }
 
     protected override void GenerateMesh(Mesh mesh)
     {
