@@ -301,10 +301,12 @@ public class SnapToSurface : EditorWindow
             Debug.Log($"[SnapToSurface] Aligned to surface: {lastHitSurfaceObject.name}");
 
         if (!confirm && selectedObject != null) {
-            selectedObject.transform.position = originalPosition;
-            selectedObject.transform.rotation = originalRotation;
-            Undo.ClearUndo(selectedObject.transform);
-            EditorUtility.SetDirty(selectedObject);
+            // Revert through Unity's undo stack rather than restoring the transform
+            // by hand. The snap entry (or, on the BeginSnap/greybox path, the caller's
+            // RegisterCreatedObjectUndo) is the top group, so PerformUndo rolls back
+            // exactly the snap and removes only that record — the object's earlier
+            // undo history is left intact, and a no-op snap reverts cleanly.
+            Undo.PerformUndo();
         }
 
         EditorApplication.delayCall += CleanupSnapMode;
