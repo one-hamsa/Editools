@@ -5,17 +5,27 @@ using UnityEngine;
 [CanEditMultipleObjects]
 public class GreyPrimitiveEditor : Editor
 {
+    static readonly GUIContent s_booleanLabel = new GUIContent(
+        "Boolean",
+        "Optional Operator to subtract from this object. Drag a Grey object here, or use Pick to " +
+        "click one in the scene. Creates a baked 'Boolean Result' child (Subject minus Operator).");
+
     // Rebuilds are push-only: every path that mutates the primitive's state explicitly triggers
     // RebuildMesh. Inspector edits go through the change-check below. Undo/redo restores serialized
     // fields but leaves the in-memory mesh built from the pre-undo state, so we rebuild explicitly.
-    protected virtual void OnEnable()  => Undo.undoRedoPerformed += OnUndoRedo;
-    protected virtual void OnDisable() => Undo.undoRedoPerformed -= OnUndoRedo;
-
-    void OnUndoRedo()
+    protected virtual void OnEnable()
     {
-        foreach (var t in targets)
-            if (t is GreyPrimitive p) p.RebuildMesh();
+        Undo.undoRedoPerformed += OnUndoRedo;
+        GreyBooleanLiveWatcher.Acquire();
     }
+
+    protected virtual void OnDisable()
+    {
+        Undo.undoRedoPerformed -= OnUndoRedo;
+        GreyBooleanLiveWatcher.Release();
+    }
+
+    void OnUndoRedo() => RebuildAndSyncTargets();
 
     public override void OnInspectorGUI()
     {
@@ -33,19 +43,43 @@ public class GreyPrimitiveEditor : Editor
         };
         EditorGUI.LabelField(rect, label, style);
 
+        serializedObject.Update();
         EditorGUI.BeginChangeCheck();
-        DrawDefaultInspector();
-        if (EditorGUI.EndChangeCheck())
-        {
-            foreach (var t in targets)
-                if (t is GreyPrimitive p) p.RebuildMesh();
-        }
+        DrawPropertiesExcluding(serializedObject, "m_Script", "_booleanOperator");
+        DrawBooleanRow();
+        bool changed = EditorGUI.EndChangeCheck();
+        serializedObject.ApplyModifiedProperties();
+
+        if (changed) RebuildAndSyncTargets();
 
         EditorGUILayout.Space();
         if (GUILayout.Button("Rebuild Mesh"))
+            RebuildAndSyncTargets();
+    }
+
+    // The Boolean field is exposed only on Greybox and Boolean Results (so it can be chained),
+    // keeping Greypipe/Greyroad inspectors clean. Drawn with a Pick button beside it.
+    void DrawBooleanRow()
+    {
+        if (!(target is Greybox) && !(target is GreyBooleanResult)) return;
+
+        var prop = serializedObject.FindProperty("_booleanOperator");
+        if (prop == null) return;
+
+        using (new EditorGUILayout.HorizontalScope())
         {
-            foreach (var t in targets)
-                if (t is GreyPrimitive p) p.RebuildMesh();
+            EditorGUILayout.PropertyField(prop, s_booleanLabel);
+
+            bool picking = GreyBooleanPicker.IsPicking
+                           && GreyBooleanPicker.PickingSubject == (GreyPrimitive)target;
+            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f)))
+                GreyBooleanPicker.Begin((GreyPrimitive)target);
         }
+    }
+
+    void RebuildAndSyncTargets()
+    {
+        foreach (var t in targets)
+            if (t is GreyPrimitive p) { p.RebuildMesh(); GreyBooleanOrchestrator.Sync(p); }
     }
 }

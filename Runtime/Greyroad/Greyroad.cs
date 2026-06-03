@@ -78,6 +78,25 @@ public class Greyroad : GreyPrimitive
     float _sideSubdivMultiplier = 1f;
 
     [SerializeField]
+    [Range(0f, 1f)]
+    [Tooltip("How relaxed the transitions of banking, width and height are between handles. " +
+             "0 = stiff (each transition eases to a flat stop at every handle), 1 = fully relaxed " +
+             "flow through handles. Never overshoots, and the value is always exact at each handle " +
+             "(road edges stay locked to the banking handles' outward vectors). " +
+             "Multiplies with the Greybox Manager's global Greyroad Edge Smoothing.")]
+    float _edgeSmoothing = 1f;
+
+    [SerializeField]
+    [Range(0f, 1f)]
+    [Tooltip("Relaxes (smooths) the banking/twist across the whole road. Unlike Edge Smoothing, " +
+             "this lets the twist STRAY from the banking handles: 0 = banking passes exactly " +
+             "through each handle's angle; higher values pull the in-between angles toward a smooth, " +
+             "gentle twist so the outer rims flow instead of snapping to each handle; 1 = fully " +
+             "relaxed (an even twist straight from the first handle to the last). Affects banking " +
+             "only — width and height are untouched. The two end points keep their angle.")]
+    float _bankingRelaxation = 0f;
+
+    [SerializeField]
     [Tooltip("6 flags controlling which faces are included in the mesh. " +
              "Toggle via Q + LMB on a face in the Scene View. " +
              "Indices: 0=Top, 1=Bottom, 2=LeftSide, 3=RightSide, 4=StartCap, 5=EndCap.")]
@@ -115,6 +134,18 @@ public class Greyroad : GreyPrimitive
     {
         get => _sideSubdivMultiplier;
         set { _sideSubdivMultiplier = value; }
+    }
+
+    public float EdgeSmoothing
+    {
+        get => _edgeSmoothing;
+        set { _edgeSmoothing = Mathf.Clamp01(value); }
+    }
+
+    public float BankingRelaxation
+    {
+        get => _bankingRelaxation;
+        set { _bankingRelaxation = Mathf.Clamp01(value); }
     }
 
     public bool[] ActiveFaces => _activeFaces;
@@ -627,50 +658,123 @@ public class Greyroad : GreyPrimitive
     List<SplineSample> SampleSpline(float density)
     {
         var samples = new List<SplineSample>();
-        int segCount = _vertices.Count - 1;
+        int vertCount = _vertices.Count;
+        int segCount = vertCount - 1;
+        if (segCount < 1) return samples;
 
+        // Per-vertex property values. Banking is unwrapped into a continuous degree sequence so
+        // the smoothing math sees no ±180° jumps.
+        var widthVals  = new float[vertCount];
+        var heightVals = new float[vertCount];
+        var bankVals   = new float[vertCount];
+        for (int i = 0; i < vertCount; i++)
+        {
+            widthVals[i]  = _vertices[i].widthMultiplier;
+            heightVals[i] = _vertices[i].heightMultiplier;
+            float deg = _vertices[i].bankingAngle * Mathf.Rad2Deg;
+            bankVals[i] = i == 0 ? deg : bankVals[i - 1] + Mathf.DeltaAngle(bankVals[i - 1], deg);
+        }
+
+        // Cache each segment's bezier control points (reused for the length table and emission).
+        var ctrl0 = new Vector3[segCount];
+        var ctrl1 = new Vector3[segCount];
+        var ctrl2 = new Vector3[segCount];
+        var ctrl3 = new Vector3[segCount];
+        for (int seg = 0; seg < segCount; seg++)
+            GetSegmentControlPoints(seg, out ctrl0[seg], out ctrl1[seg], out ctrl2[seg], out ctrl3[seg]);
+
+        // ── Arc-length table over the whole spline ──
+        // Rings are placed by even DISTANCE, not by even parameter t. Uniform t bunches rings up
+        // in curves and stretches them on straights (uneven, clumped tessellation); even
+        // arc-length keeps the loft uniform. A global parameter g = segment + t maps a distance
+        // back to a (segment, t) pair; vertexLen[i] is the cumulative distance to each control
+        // point, used to ease banking / width / height by distance too (not by parameter).
+        const int lutPerSeg = 64;
+        var lutLen = new float[segCount * lutPerSeg + 1];
+        var lutG   = new float[segCount * lutPerSeg + 1];
+        var vertexLen = new float[vertCount];
+
+        int w = 0;
+        float accum = 0f;
+        Vector3 prev = ctrl0[0];
         for (int seg = 0; seg < segCount; seg++)
         {
-            var a = _vertices[seg];
-            var b = _vertices[seg + 1];
-
-            GetSegmentControlPoints(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
-
-            int subdivs = ComputeSegmentSubdivisions(p0, p1, p2, p3, density);
-
-            int startT = (seg == 0) ? 0 : 1;
-            for (int i = startT; i <= subdivs; i++)
+            int kStart = seg == 0 ? 0 : 1; // shared endpoint already recorded by the previous segment
+            for (int k = kStart; k <= lutPerSeg; k++)
             {
-                float t = i / (float)subdivs;
-                float st = t * t * (3f - 2f * t);
-                samples.Add(new SplineSample
-                {
-                    position    = EvaluateBezier(p0, p1, p2, p3, t),
-                    tangent     = EvaluateBezierTangent(p0, p1, p2, p3, t),
-                    widthMul    = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  st),
-                    heightMul   = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, st),
-                    bankingAngle = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
-                                                   b.bankingAngle * Mathf.Rad2Deg, st) * Mathf.Deg2Rad,
-                });
+                float t = k / (float)lutPerSeg;
+                Vector3 pos = EvaluateBezier(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t);
+                if (w > 0) accum += Vector3.Distance(prev, pos);
+                lutLen[w] = accum;
+                lutG[w]   = seg + t;
+                prev = pos;
+                w++;
+            }
+            vertexLen[seg + 1] = accum;
+        }
+        int lutN = w;
+        float totalLen = lutLen[lutN - 1];
+        if (totalLen < 1e-5f) return samples;
+
+        // Banking relaxation (banking only): pull interior banking angles toward an even twist
+        // running straight from the first handle to the last (by distance). This lets the twist
+        // stray from the authored handle angles so the outer rims flow smoothly; the two end
+        // points keep their angle. 0 = exact (no straying), 1 = fully relaxed even twist.
+        float bankRelax = Mathf.Clamp01(_bankingRelaxation);
+        if (bankRelax > 0f && vertCount >= 3)
+        {
+            float startBank = bankVals[0];
+            float endBank   = bankVals[vertCount - 1];
+            for (int i = 1; i < vertCount - 1; i++)
+            {
+                float evenTwist = Mathf.Lerp(startBank, endBank, vertexLen[i] / totalLen);
+                bankVals[i] = Mathf.Lerp(bankVals[i], evenTwist, bankRelax);
             }
         }
 
-        return samples;
-    }
+        // Monotone (overshoot-free) tangents measured over arc length, scaled by Edge Smoothing,
+        // so the twist eases evenly by distance regardless of bezier handle lengths.
+        float smoothing = GetEffectiveEdgeSmoothing();
+        var widthTan  = new float[vertCount];
+        var heightTan = new float[vertCount];
+        var bankTan   = new float[vertCount];
+        ComputeMonotoneTangents(widthVals,  vertexLen, widthTan,  smoothing);
+        ComputeMonotoneTangents(heightVals, vertexLen, heightTan, smoothing);
+        ComputeMonotoneTangents(bankVals,   vertexLen, bankTan,   smoothing);
 
-    int ComputeSegmentSubdivisions(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float density)
-    {
-        float chordLen = Vector3.Distance(p0, p3);
-        float densityFactor = density > 0f ? density : 1f;
+        // Ring count from total length × density — uniform vertices-per-meter along the road.
         float lengthMultiplier = Mathf.Max(0.1f, _lengthSubdivMultiplier) * GetManagerLengthMultiplier();
+        float densityFactor = density > 0f ? density : 1f;
+        int ringCount = Mathf.Max(2, Mathf.CeilToInt(totalLen * densityFactor * lengthMultiplier));
 
-        int baseSubdivs = Mathf.Max(2, Mathf.CeilToInt(chordLen * densityFactor * lengthMultiplier));
+        // ── Emit rings at even arc-length; geometry uses parameter t, properties use distance ──
+        int cursor = 0;
+        for (int r = 0; r < ringCount; r++)
+        {
+            float target = totalLen * r / (ringCount - 1);
+            while (cursor < lutN - 2 && lutLen[cursor + 1] < target) cursor++;
+            float spanLen = lutLen[cursor + 1] - lutLen[cursor];
+            float frac = spanLen > 1e-6f ? Mathf.Clamp01((target - lutLen[cursor]) / spanLen) : 0f;
+            float g = Mathf.Lerp(lutG[cursor], lutG[cursor + 1], frac);
 
-        float polyLen   = Vector3.Distance(p0, p1) + Vector3.Distance(p1, p2) + Vector3.Distance(p2, p3);
-        float curveRatio = chordLen > 0.001f ? (polyLen - chordLen) / chordLen : 0f;
-        int   curveBonus = Mathf.CeilToInt(baseSubdivs * Mathf.Clamp(curveRatio, 0f, 3f));
+            int seg = Mathf.Clamp(Mathf.FloorToInt(g), 0, segCount - 1);
+            float t = Mathf.Clamp01(g - seg);
 
-        return baseSubdivs + curveBonus;
+            // Banking / width / height ease by distance within the segment, not by parameter.
+            float segLen = vertexLen[seg + 1] - vertexLen[seg];
+            float u = segLen > 1e-6f ? Mathf.Clamp01((target - vertexLen[seg]) / segLen) : 0f;
+
+            samples.Add(new SplineSample
+            {
+                position     = EvaluateBezier(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t),
+                tangent      = EvaluateBezierTangent(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t),
+                widthMul     = EvaluateHermite(widthVals[seg],  widthTan[seg],  widthVals[seg + 1],  widthTan[seg + 1],  u, segLen),
+                heightMul    = EvaluateHermite(heightVals[seg], heightTan[seg], heightVals[seg + 1], heightTan[seg + 1], u, segLen),
+                bankingAngle = EvaluateHermite(bankVals[seg],   bankTan[seg],   bankVals[seg + 1],   bankTan[seg + 1],   u, segLen) * Mathf.Deg2Rad,
+            });
+        }
+
+        return samples;
     }
 
     /// <summary>Cross-section cut count along the top/bottom edges. ~20% more sensitive than
@@ -712,6 +816,17 @@ public class Greyroad : GreyPrimitive
         return manager != null ? manager.GreyroadSideSubdivMultiplier : 1f;
     }
 
+    float GetEffectiveEdgeSmoothing()
+    {
+        return Mathf.Clamp01(_edgeSmoothing) * GetManagerEdgeSmoothing();
+    }
+
+    float GetManagerEdgeSmoothing()
+    {
+        var manager = GetComponentInParent<GreyboxManager>();
+        return manager != null ? manager.GreyroadEdgeSmoothing : 1f;
+    }
+
     // ─── Bezier math ────────────────────────────────────────────
 
     static Vector3 EvaluateBezier(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, float t)
@@ -724,6 +839,74 @@ public class Greyroad : GreyPrimitive
     {
         float u = 1f - t;
         return 3f * u * u * (p1 - p0) + 6f * u * t * (p2 - p1) + 3f * t * t * (p3 - p2);
+    }
+
+    // ─── Scalar property smoothing ──────────────────────────────
+
+    /// <summary>
+    /// Cubic Hermite interpolation between two scalar values across an interval of length
+    /// <paramref name="dx"/>, with endpoint tangents given as slopes per unit distance.
+    /// <paramref name="u"/> is the fraction (0..1) along the interval. Passes exactly through v0
+    /// at u=0 and v1 at u=1, so control-point values are always preserved.
+    /// </summary>
+    static float EvaluateHermite(float v0, float m0, float v1, float m1, float u, float dx)
+    {
+        float u2 = u * u;
+        float u3 = u2 * u;
+        float h00 =  2f * u3 - 3f * u2 + 1f;
+        float h10 =       u3 - 2f * u2 + u;
+        float h01 = -2f * u3 + 3f * u2;
+        float h11 =       u3 -      u2;
+        // m0/m1 are slopes per unit distance, so the tangent terms scale by the interval length.
+        return h00 * v0 + h10 * dx * m0 + h01 * v1 + h11 * dx * m1;
+    }
+
+    /// <summary>
+    /// Monotone (overshoot-free) cubic tangents for a value track sampled at positions
+    /// <paramref name="x"/> (cumulative arc length of each control point), scaled by
+    /// <paramref name="smoothing"/>. Tangents are slopes per unit distance, so transitions ease
+    /// evenly by distance. At smoothing 0 every tangent is zero and Hermite interpolation collapses
+    /// to smoothstep (the stiff look that eases to a flat stop at each handle). At 1 the
+    /// Fritsch–Carlson tangents give the most relaxed flow through the handles that still never
+    /// overshoots between them. Scaling toward 0 stays inside the monotone region, so every value
+    /// in between is also overshoot-free.
+    /// </summary>
+    static void ComputeMonotoneTangents(float[] v, float[] x, float[] m, float smoothing)
+    {
+        int n = v.Length;
+        if (n == 0) return;
+        if (n == 1) { m[0] = 0f; return; }
+
+        // Secant slopes per unit distance between consecutive control points.
+        var d = new float[n - 1];
+        for (int i = 0; i < n - 1; i++)
+        {
+            float dx = x[i + 1] - x[i];
+            d[i] = dx > 1e-6f ? (v[i + 1] - v[i]) / dx : 0f;
+        }
+
+        m[0]     = d[0];
+        m[n - 1] = d[n - 2];
+        for (int i = 1; i < n - 1; i++)
+            m[i] = (d[i - 1] * d[i] <= 0f) ? 0f : 0.5f * (d[i - 1] + d[i]);  // flat at local extrema
+
+        // Fritsch–Carlson clamp: keep each interval monotone so the value never bulges past a handle.
+        for (int i = 0; i < n - 1; i++)
+        {
+            if (Mathf.Abs(d[i]) < 1e-6f) { m[i] = 0f; m[i + 1] = 0f; continue; }
+            float alpha = m[i]     / d[i];
+            float beta  = m[i + 1] / d[i];
+            float s = alpha * alpha + beta * beta;
+            if (s > 9f)
+            {
+                float tau = 3f / Mathf.Sqrt(s);
+                m[i]     = tau * alpha * d[i];
+                m[i + 1] = tau * beta  * d[i];
+            }
+        }
+
+        float k = Mathf.Clamp01(smoothing);
+        for (int i = 0; i < n; i++) m[i] *= k;
     }
 
     // ─── Spline queries ─────────────────────────────────────────
@@ -750,6 +933,47 @@ public class Greyroad : GreyPrimitive
         p1 = a.position + aDir * a.handleLength;
         p2 = b.position - bDir * b.handleLength;
         p3 = b.position;
+    }
+
+    // ─── Editor warning gizmo ───────────────────────────────────
+
+    // Flags corners too tight for the road's width. A constant-width ribbon physically can't turn
+    // sharper than its own half-width without the inner wall folding through itself — even spacing
+    // can't fix that, it's geometry. We mark those spots in red so the turn can be widened or the
+    // road narrowed. Only drawn while selected, so there's no cost otherwise.
+    void OnDrawGizmosSelected()
+    {
+        if (_vertices == null || _vertices.Count < 2) return;
+        int segCount = _vertices.Count - 1;
+        Gizmos.color = new Color(1f, 0.18f, 0.1f, 1f);
+        float worldScale = Mathf.Abs(transform.lossyScale.x);
+        float markerSize = Mathf.Max(0.25f, _baseWidth * 0.12f) * (worldScale > 0.0001f ? worldScale : 1f);
+
+        for (int seg = 0; seg < segCount; seg++)
+        {
+            GetSegmentControlPoints(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+            const int N = 32;
+            for (int k = 0; k <= N; k++)
+            {
+                float t = k / (float)N;
+                float u = 1f - t;
+                Vector3 d1 = 3f * u * u * (p1 - p0) + 6f * u * t * (p2 - p1) + 3f * t * t * (p3 - p2);
+                Vector3 d2 = 6f * u * (p2 - 2f * p1 + p0) + 6f * t * (p3 - 2f * p2 + p1);
+                float speed = d1.magnitude;
+                if (speed < 1e-4f) continue;
+                float curvature = Vector3.Cross(d1, d2).magnitude / (speed * speed * speed);
+                if (curvature < 1e-6f) continue;
+
+                float radius = 1f / curvature;
+                float wMul = Mathf.Lerp(_vertices[seg].widthMultiplier, _vertices[seg + 1].widthMultiplier, t);
+                float halfW = _baseWidth * 0.5f * Mathf.Max(0.001f, wMul);
+                if (radius < halfW)
+                {
+                    Vector3 world = transform.TransformPoint(EvaluateBezier(p0, p1, p2, p3, t));
+                    Gizmos.DrawSphere(world, markerSize);
+                }
+            }
+        }
     }
 
     // ─── Defaults ────────────────────────────────────────────────

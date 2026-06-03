@@ -550,7 +550,7 @@ static partial class QuickTransform
                     return;
                 }
 
-                if (e.button == 1) // RMB: extrude, hiding seam faces
+                if (e.button == 1) // RMB: extrude a linked box — seam welded 1:1 to the source face
                 {
                     if (face >= 0)
                     {
@@ -564,7 +564,7 @@ static partial class QuickTransform
                         shiftHeldOnPress = false;
                         didDuplicate     = false;
 
-                        BeginExtrude(gb, face, e.mousePosition, hideFaces: true);
+                        BeginExtrude(gb, face, e.mousePosition, hideFaces: true, linked: true);
 
                         phase         = Phase.Ready;
                         mousePressPos = e.mousePosition;
@@ -577,7 +577,7 @@ static partial class QuickTransform
                     return;
                 }
 
-                if (e.button == 2) // MMB: extrude, keeping all faces
+                if (e.button == 2) // MMB: extrude an independent box, keeping all faces
                 {
                     if (face >= 0)
                     {
@@ -591,7 +591,7 @@ static partial class QuickTransform
                         shiftHeldOnPress = false;
                         didDuplicate     = false;
 
-                        BeginExtrude(gb, face, e.mousePosition, hideFaces: false);
+                        BeginExtrude(gb, face, e.mousePosition, hideFaces: false, linked: false);
 
                         phase         = Phase.Ready;
                         mousePressPos = e.mousePosition;
@@ -836,6 +836,12 @@ static partial class QuickTransform
                 gb.Corners[ec[1]] = def[ec[1]];
                 gb.RebuildMesh();
                 EditorUtility.SetDirty(gb);
+
+                // Keep any welded seam snapped to the reset corners.
+                GreyboxSeamSolver.BeginUndoScope("Reset Greybox Edge");
+                GreyboxSeamSolver.SyncCorner(gb, ec[0]);
+                GreyboxSeamSolver.SyncCorner(gb, ec[1]);
+
                 activeMode = Mode.None; dragTargets = null;
                 startPositions = null; startRotations = null; startScales = null;
                 e.Use(); return;
@@ -1080,6 +1086,7 @@ static partial class QuickTransform
                     if (greyboxTarget != null)
                     {
                         Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
+                        GreyboxSeamSolver.BeginUndoScope("Greybox Edge Move");
                         Undo.SetCurrentGroupName("Greybox Edge Move");
                     }
                     else
@@ -2272,14 +2279,21 @@ static partial class QuickTransform
         greyboxTarget.Corners[greyboxEdgeCornerB] = greyboxStartCorners[greyboxEdgeCornerB] + localDelta;
         greyboxTarget.RebuildMesh();
         EditorUtility.SetDirty(greyboxTarget);
+
+        // Edit a shared seam corner and its welded partner follows, snapped 1:1.
+        GreyboxSeamSolver.SyncCorner(greyboxTarget, greyboxEdgeCornerA);
+        GreyboxSeamSolver.SyncCorner(greyboxTarget, greyboxEdgeCornerB);
     }
 
     /// <summary>
     /// Set up extrude state: compute face geometry, spawn the new greybox sized to the face,
     /// and record the starting mouse projection distance along the face normal.
     /// Called from HandleIdle before entering Phase.Ready.
+    /// When <paramref name="linked"/>, the new box's seam face is welded 1:1 to the source face
+    /// (see <see cref="Greybox.SetSeamLink"/>) via a reference — it is still a plain sibling, so it
+    /// manipulates like any standalone box; <see cref="GreyboxSeamSolver"/> keeps the seam coincident.
     /// </summary>
-    static void BeginExtrude(Greybox sourceGb, int face, Vector2 mousePos, bool hideFaces = true)
+    static void BeginExtrude(Greybox sourceGb, int face, Vector2 mousePos, bool hideFaces = true, bool linked = false)
     {
         // World corners of the source face
         Vector3[] wc = sourceGb.GetWorldCorners();
@@ -2320,14 +2334,19 @@ static partial class QuickTransform
         // Each source corner is transformed to the new greybox's local space; its X/Z sign
         // determines which box corner it maps to (bit0=+X, bit2=+Z), preserving deformed shapes.
         // Bottom (Y=0) and top (Y=near-zero) start flush; ApplyExtrude grows the top corners.
-        Vector3[] newCorners = Greybox.DefaultCorners();
-        foreach (var sc in new[] { c0, c1, c2, c3 })
+        Vector3[] newCorners        = Greybox.DefaultCorners();
+        Vector3[] srcFaceCorners    = { c0, c1, c2, c3 };
+        int[]     linkChildCorners  = new int[4];   // child seam corners
+        int[]     linkParentCorners = new int[4];   // paired source-face corners
+        for (int k = 0; k < 4; k++)
         {
-            Vector3 lc     = go.transform.InverseTransformPoint(sc);
+            Vector3 lc     = go.transform.InverseTransformPoint(srcFaceCorners[k]);
             int     botIdx = (lc.x >= 0f ? 1 : 0) | (lc.z >= 0f ? 4 : 0);
             int     topIdx = botIdx | 2;
             newCorners[botIdx] = new Vector3(lc.x, 0f,     lc.z);
             newCorners[topIdx] = new Vector3(lc.x, 0.001f, lc.z);
+            linkChildCorners[k]  = botIdx;
+            linkParentCorners[k] = ci[k];
         }
 
         // Apply corners + inherited Greybox properties in one SerializedObject pass
@@ -2354,6 +2373,16 @@ static partial class QuickTransform
         if (hideFaces) extrudeNewGb.ActiveFaces[3] = false; // hide bottom face — seam against source
         extrudeNewGb.RebuildMesh();
         EditorUtility.SetDirty(extrudeNewGb);
+
+        // Weld the seam by reference (no parenting): child knows its parent + pairing, parent keeps
+        // a reverse-index entry. sourceGb was already registered for undo above, so the reverse-index
+        // add is covered too.
+        if (linked)
+        {
+            extrudeNewGb.SetSeamLink(sourceGb, linkChildCorners, linkParentCorners);
+            sourceGb.AddSeamChild(extrudeNewGb);
+            EditorUtility.SetDirty(extrudeNewGb);
+        }
 
         // Seed the starting projection distance so drag delta starts at zero
         Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);

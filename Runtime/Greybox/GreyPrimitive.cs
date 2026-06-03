@@ -20,6 +20,21 @@ public abstract class GreyPrimitive : MonoBehaviour
         set => _subdivisionMultiplier = value;
     }
 
+    // ─── Boolean ─────────────────────────────────────────────────
+    // Optional CSG subtraction. When set, this primitive is the Subject, the reference is the
+    // Operator, and a baked 'Boolean Result' child holds Subject−Operator (see GreyBooleanResult /
+    // GreyBooleanOrchestrator). Lives on the base so any grey type — including a GreyBooleanResult —
+    // can be a Subject and be chained/booleaned further.
+
+    [SerializeField]
+    [Tooltip("Optional Operator to subtract from this object. Drag any Grey object here (or use Pick). " +
+             "When set, this object and the Operator stop rendering and a child 'Boolean Result' mesh " +
+             "is baked as Subject minus Operator, inheriting this object's material, shadow/static " +
+             "settings, and (for a Greybox) per-face visibility. Clear it to restore normal rendering.")]
+    GreyPrimitive _booleanOperator;
+
+    public GreyPrimitive BooleanOperator => _booleanOperator;
+
     // ─── Mesh ───────────────────────────────────────────────────
 
     [SerializeField, HideInInspector]

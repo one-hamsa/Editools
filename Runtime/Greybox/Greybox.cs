@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
@@ -43,6 +44,76 @@ public class Greybox : GreyPrimitive
     [Tooltip("UV tiling scale. 1 = one texture repeat per meter of world-space face extent. " +
              "Higher values tile the texture more tightly.")]
     float _uvTileScale = 1f;
+
+    public float UvTileScale => _uvTileScale;
+
+    // ─── Seam Link ──────────────────────────────────────────────
+    //
+    // A "linked" greybox is produced by QuickTransform's RMB extrude. Its seam face is welded 1:1
+    // to the face on _linkedParent it grew from: the four shared corners are kept coincident in
+    // WORLD space whenever either box is edited. The bond is a plain reference, independent of the
+    // transform hierarchy — so each box moves/rotates/scales exactly like a standalone object —
+    // and is editor-only authoring data with no runtime effect. It is severed only by Unlink.
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("The greybox this box's seam face is welded to (its extrude source). Null = not linked.")]
+    Greybox _linkedParent;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Corner indices on THIS box forming the shared seam face, paired 1:1 with _linkParentCorners.")]
+    int[] _linkChildCorners;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Corner indices on _linkedParent the seam is welded to, paired 1:1 with _linkChildCorners.")]
+    int[] _linkParentCorners;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Reverse index: boxes whose seam is welded to this one. Lets a parent reach its linked " +
+             "children without relying on the hierarchy.")]
+    List<Greybox> _seamChildren = new List<Greybox>();
+
+    public Greybox       LinkedParent      => _linkedParent;
+    public int[]         LinkChildCorners  => _linkChildCorners;
+    public int[]         LinkParentCorners => _linkParentCorners;
+    public List<Greybox> SeamChildren      => _seamChildren;
+
+    /// <summary>True when this box's seam is welded to a parent (valid reference + pairing).</summary>
+    public bool IsLinkAlive =>
+        _linkedParent != null
+        && _linkChildCorners  != null && _linkChildCorners.Length  == 4
+        && _linkParentCorners != null && _linkParentCorners.Length == 4;
+
+    /// <summary>True when this box takes part in any seam — as a child, or as a welded parent.</summary>
+    public bool HasSeam => IsLinkAlive || (_seamChildren != null && _seamChildren.Count > 0);
+
+    /// <summary>Bind this box's seam face to a parent face (child side). Pairing arrays must be length 4.</summary>
+    public void SetSeamLink(Greybox parent, int[] childCorners, int[] parentCorners)
+    {
+        _linkedParent      = parent;
+        _linkChildCorners  = childCorners;
+        _linkParentCorners = parentCorners;
+    }
+
+    /// <summary>Record a child whose seam is welded to this box (parent side of the reverse index).</summary>
+    public void AddSeamChild(Greybox child)
+    {
+        if (_seamChildren == null) _seamChildren = new List<Greybox>();
+        if (!_seamChildren.Contains(child)) _seamChildren.Add(child);
+    }
+
+    /// <summary>Sever this box's seam link (child side) and drop it from its parent's reverse index.</summary>
+    public void Unlink()
+    {
+        if (_linkedParent != null && _linkedParent._seamChildren != null)
+            _linkedParent._seamChildren.Remove(this);
+        _linkedParent      = null;
+        _linkChildCorners  = null;
+        _linkParentCorners = null;
+    }
 
     // Per face: [fixedComp, fixedVal, sComp, tComp]
     static readonly int[,] s_faceParams = new int[6, 4]

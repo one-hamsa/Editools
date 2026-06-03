@@ -43,6 +43,15 @@ public class GreyboxManager : MonoBehaviour
              "Stacks with each road's local Side Subdiv Multiplier. 1 = no extra change.")]
     float _greyroadSideSubdivMultiplier = 1f;
 
+    [SerializeField]
+    [Range(0f, 1f)]
+    [Tooltip("Global edge smoothing for Greyroads — relaxes how banking, width and height " +
+             "transition between handles. 0 = stiff (each transition eases to a flat stop at " +
+             "every handle), 1 = fully relaxed flow through handles. Never overshoots, and the " +
+             "value is always exact at each handle. Stacks (multiplies) with each road's local " +
+             "Edge Smoothing.")]
+    float _greyroadEdgeSmoothing = 1f;
+
     public float VertexDensity => _subdivisionEnabled ? Mathf.Max(0f, _vertexDensity) : 0f;
 
     public float GreypipeLengthSubdivMultiplier => Mathf.Max(0.01f, _greypipeLengthSubdivMultiplier);
@@ -51,6 +60,8 @@ public class GreyboxManager : MonoBehaviour
     public float GreyroadLengthSubdivMultiplier => Mathf.Max(0.01f, _greyroadLengthSubdivMultiplier);
     public float GreyroadWidthSubdivMultiplier  => Mathf.Max(0.01f, _greyroadWidthSubdivMultiplier);
     public float GreyroadSideSubdivMultiplier   => Mathf.Max(0.01f, _greyroadSideSubdivMultiplier);
+
+    public float GreyroadEdgeSmoothing => Mathf.Clamp01(_greyroadEdgeSmoothing);
 
 #if UNITY_EDITOR
     public void PushRebuildToChildren()
