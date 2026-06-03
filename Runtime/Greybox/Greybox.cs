@@ -47,6 +47,8 @@ public class Greybox : GreyPrimitive
 
     public float UvTileScale => _uvTileScale;
 
+    public override bool UsesColliderMesh => true; // bakes a low-poly collider twin
+
     // ─── Seam Link ──────────────────────────────────────────────
     //
     // A "linked" greybox is produced by QuickTransform's RMB extrude. Its seam face is welded 1:1

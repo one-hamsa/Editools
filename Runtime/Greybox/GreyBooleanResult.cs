@@ -39,6 +39,8 @@ public class GreyBooleanResult : GreyPrimitive
     public GreyPrimitive Subject  => _subject;
     public GreyPrimitive Operator => _operator;
 
+    public override bool UsesColliderMesh => true; // bakes a low-poly collider twin
+
     public void Configure(GreyPrimitive subject, GreyPrimitive op)
     {
         _subject  = subject;
@@ -66,6 +68,12 @@ public class GreyBooleanResult : GreyPrimitive
     // Source corners in THIS result's local space (set per bake). Null when the input isn't a Greybox.
     [NonSerialized] Vector3[] _subjLocal;
     [NonSerialized] Vector3[] _opLocal;
+
+    // Cached subtraction from the render pass, reused by the immediately-following collider pass so the
+    // (expensive) CSG only runs once per RebuildMesh. _subjLocal/_opLocal stay valid across both passes.
+    [NonSerialized] CsgSolid _bakedSolid;
+    [NonSerialized] bool[]   _bakedActiveFaces;
+    [NonSerialized] float    _bakedUvScale;
 #endif
 
     protected override void GenerateMesh(Mesh mesh)
@@ -73,41 +81,59 @@ public class GreyBooleanResult : GreyPrimitive
 #if UNITY_EDITOR
         if (_subject == null) return; // not configured yet (transient on AddComponent)
 
-        var subjectPolys = new List<CsgPolygon>();
-        bool[] activeFaces = null;
-        float uvScale = 1f;
+        CsgSolid baked;
+        bool[] activeFaces;
+        float uvScale;
 
-        if (_subject is Greybox gb)
+        if (SubdivisionSuppressed && _bakedSolid != null)
         {
-            _subjLocal = ToLocal(gb.transform, gb.Corners);
-            AddBoxPolygons(subjectPolys, _subjLocal, faceTagBase: 0);
-            activeFaces = gb.ActiveFaces;
-            uvScale = gb.UvTileScale;
+            // Collider pass: reuse the render pass's subtraction, just mesh it minimally (density 0).
+            baked = _bakedSolid;
+            activeFaces = _bakedActiveFaces;
+            uvScale = _bakedUvScale;
         }
         else
         {
-            _subjLocal = null;
-            AddMeshPolygons(subjectPolys, _subject, k_SubjectBodyTag);
-        }
-        var subject = new CsgSolid(subjectPolys);
+            var subjectPolys = new List<CsgPolygon>();
+            activeFaces = null;
+            uvScale = 1f;
 
-        CsgSolid baked = subject;
-        if (_operator != null && _operator != _subject)
-        {
-            var opPolys = new List<CsgPolygon>();
-            if (_operator is Greybox opBox)
+            if (_subject is Greybox gb)
             {
-                _opLocal = ToLocal(opBox.transform, opBox.Corners);
-                AddBoxPolygons(opPolys, _opLocal, faceTagBase: k_OperatorFaceBase);
+                _subjLocal = ToLocal(gb.transform, gb.Corners);
+                AddBoxPolygons(subjectPolys, _subjLocal, faceTagBase: 0);
+                activeFaces = gb.ActiveFaces;
+                uvScale = gb.UvTileScale;
             }
             else
             {
-                _opLocal = null;
-                AddMeshPolygons(opPolys, _operator, k_OperatorBodyTag);
+                _subjLocal = null;
+                AddMeshPolygons(subjectPolys, _subject, k_SubjectBodyTag);
+            }
+            var subject = new CsgSolid(subjectPolys);
+
+            baked = subject;
+            if (_operator != null && _operator != _subject)
+            {
+                var opPolys = new List<CsgPolygon>();
+                if (_operator is Greybox opBox)
+                {
+                    _opLocal = ToLocal(opBox.transform, opBox.Corners);
+                    AddBoxPolygons(opPolys, _opLocal, faceTagBase: k_OperatorFaceBase);
+                }
+                else
+                {
+                    _opLocal = null;
+                    AddMeshPolygons(opPolys, _operator, k_OperatorBodyTag);
+                }
+
+                if (opPolys.Count > 0)
+                    baked = CsgSolid.Subtract(subject, new CsgSolid(opPolys));
             }
 
-            if (opPolys.Count > 0)
-                baked = CsgSolid.Subtract(subject, new CsgSolid(opPolys));
+            _bakedSolid = baked;
+            _bakedActiveFaces = activeFaces;
+            _bakedUvScale = uvScale;
         }
 
         BuildMesh(mesh, baked, activeFaces, uvScale);

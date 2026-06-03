@@ -45,10 +45,17 @@ public class GreyboxEditor : GreyPrimitiveEditor
             return;
         }
 
-        // Not a linked child yet — offer a drop target. Backed by a throwaway value (null), so it
-        // reads "None" and acts as a one-shot: drop a box, it welds, the field clears next repaint.
-        var picked = (Greybox)EditorGUILayout.ObjectField(s_linkLabel, null, typeof(Greybox), true);
-        if (picked != null && picked != gb)
-            GreyboxSeamSolver.LinkBoxes(gb, picked);
+        // Not a linked child yet — offer a drop target (one-shot: drop a box, it welds, the field
+        // clears next repaint) plus a Pick button to click the target in the scene, like Boolean.
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            var picked = (Greybox)EditorGUILayout.ObjectField(s_linkLabel, null, typeof(Greybox), true);
+            if (picked != null && picked != gb)
+                GreyboxSeamSolver.LinkBoxes(gb, picked);
+
+            bool picking = GreyboxSeamPicker.IsPicking && GreyboxSeamPicker.PickingSubject == gb;
+            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f)))
+                GreyboxSeamPicker.Begin(gb);
+        }
     }
 }

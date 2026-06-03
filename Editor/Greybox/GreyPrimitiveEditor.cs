@@ -25,7 +25,7 @@ public class GreyPrimitiveEditor : Editor
         GreyBooleanLiveWatcher.Release();
     }
 
-    void OnUndoRedo() => RebuildAndSyncTargets();
+    void OnUndoRedo() => RebuildTargetsWithDependents();
 
     public override void OnInspectorGUI()
     {
@@ -53,8 +53,14 @@ public class GreyPrimitiveEditor : Editor
         if (changed) RebuildAndSyncTargets();
 
         EditorGUILayout.Space();
-        if (GUILayout.Button("Rebuild Mesh"))
-            RebuildAndSyncTargets();
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button("Rebuild Mesh"))
+                RebuildAndSyncTargets();
+            if (prim.UsesColliderMesh && GUILayout.Button("Set Collider"))
+                foreach (var t in targets)
+                    if (t is GreyPrimitive p) p.ApplyColliderMesh();
+        }
     }
 
     // The Boolean field is exposed only on Greybox and Boolean Results (so it can be chained),
@@ -81,5 +87,32 @@ public class GreyPrimitiveEditor : Editor
     {
         foreach (var t in targets)
             if (t is GreyPrimitive p) { p.RebuildMesh(); GreyBooleanOrchestrator.Sync(p); }
+    }
+
+    // Undo/redo restored serialized fields and seam/boolean links, but the in-memory meshes are still
+    // built from the pre-undo state. Rebuild each selected primitive together with everything derived
+    // from it, so dependent geometry doesn't go stale when its source is undone.
+    void RebuildTargetsWithDependents()
+    {
+        foreach (var t in targets)
+            if (t is GreyPrimitive p) RebuildWithDependents(p);
+    }
+
+    // Rebuild root, every grey primitive beneath it, and — for each — the boolean results and
+    // seam-welded boxes that reference it. A Boolean Result is the parent of its subject/operator, so
+    // GetComponentsInChildren also reaches the inputs nested under a result.
+    static void RebuildWithDependents(GreyPrimitive root)
+    {
+        if (root == null) return;
+
+        foreach (var prim in root.GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
+        {
+            if (prim == null) continue;
+            prim.RebuildMesh();
+            GreyBooleanOrchestrator.Sync(prim);       // reconcile prim's own boolean (a changed/cleared operator)
+            GreyBooleanOrchestrator.ReBakeFrom(prim); // re-bake any result that references prim, up the chain
+            if (prim is Greybox gb)
+                GreyboxSeamSolver.RebuildSeamPartners(gb);
+        }
     }
 }

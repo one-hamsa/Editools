@@ -162,6 +162,45 @@ static class GreyboxSeamSolver
     }
 
     /// <summary>
+    /// Rebuild the meshes of every greybox seam-welded to <paramref name="origin"/> — its link parent
+    /// and seam children, recursively. Used on undo/redo: the partners' corners are already restored by
+    /// the undo, but their in-memory meshes are stale. Edits no corners (so it never re-triggers the
+    /// solver) — a pure mesh refresh of the welded neighbours; <paramref name="origin"/> itself is left
+    /// to the caller.
+    /// </summary>
+    public static void RebuildSeamPartners(Greybox origin)
+    {
+        if (origin == null || !origin.HasSeam) return;
+
+        var visited = new HashSet<Greybox> { origin };
+        var stack = new Stack<Greybox>();
+        stack.Push(origin);
+        while (stack.Count > 0)
+        {
+            Greybox box = stack.Pop();
+
+            // Upward: the box this one is welded to.
+            if (box.IsLinkAlive && visited.Add(box.LinkedParent))
+            {
+                box.LinkedParent.RebuildMesh();
+                EditorUtility.SetDirty(box.LinkedParent);
+                stack.Push(box.LinkedParent);
+            }
+
+            // Downward: boxes welded to this one (stale reverse-index entries filtered out).
+            List<Greybox> children = box.SeamChildren;
+            if (children == null) continue;
+            foreach (Greybox child in children)
+                if (child != null && child.IsLinkAlive && child.LinkedParent == box && visited.Add(child))
+                {
+                    child.RebuildMesh();
+                    EditorUtility.SetDirty(child);
+                    stack.Push(child);
+                }
+        }
+    }
+
+    /// <summary>
     /// Snap every box seam welded to a just-moved corner of <paramref name="box"/>, keeping linked
     /// greyboxes coincident. Bidirectional — drives the paired corner on the link parent and on any
     /// boxes welded to this box — and recurses, since one corner can feed several seams.

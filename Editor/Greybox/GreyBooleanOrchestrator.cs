@@ -78,8 +78,8 @@ static class GreyBooleanOrchestrator
 
         result.Configure(subject, op);
         CopySettings(subject, result);
-        SetRendererEnabled(subject, false);
-        SetRendererEnabled(op, false);
+        SetInputEnabled(subject, false);
+        SetInputEnabled(op, false);
         NameOperator(op, result.transform);
 
         result.RebuildMesh();
@@ -106,6 +106,7 @@ static class GreyBooleanOrchestrator
         rt.SetSiblingIndex(st.GetSiblingIndex());
 
         var result = Undo.AddComponent<GreyBooleanResult>(go);
+        Undo.AddComponent<MeshCollider>(go); // booleans are created with a collider (concave, non-convex)
 
         Undo.SetTransformParent(st,          rt, "Boolean: nest subject");
         Undo.SetTransformParent(op.transform, rt, "Boolean: nest operator");
@@ -130,7 +131,7 @@ static class GreyBooleanOrchestrator
     {
         if (input == null) return;
         Undo.SetTransformParent(input.transform, host, "Boolean: release input");
-        SetRendererEnabled(input, true);
+        SetInputEnabled(input, true);
     }
 
     // ─── Mesh-only re-bake up the chain (live) ────────────────────────────────
@@ -183,15 +184,25 @@ static class GreyBooleanOrchestrator
         go.layer    = subject.gameObject.layer;
     }
 
-    static void SetRendererEnabled(GreyPrimitive prim, bool enabled)
+    // Show/hide an input: toggles both its renderer AND its mesh collider, since the result owns
+    // rendering and collision while the boolean is active.
+    static void SetInputEnabled(GreyPrimitive prim, bool enabled)
     {
-        if (prim == null) return; // ref cleared or destroyed — nothing to restore
+        if (prim == null) return; // ref cleared or destroyed — nothing to toggle
 
         var mr = prim.GetComponent<MeshRenderer>();
-        if (mr == null) return; // legitimately rendererless Grey type
+        if (mr != null)
+        {
+            Undo.RecordObject(mr, "Toggle Greybox renderer");
+            mr.enabled = enabled;
+        }
 
-        Undo.RecordObject(mr, "Toggle Greybox renderer");
-        mr.enabled = enabled;
+        var mc = prim.GetComponent<MeshCollider>();
+        if (mc != null)
+        {
+            Undo.RecordObject(mc, "Toggle Greybox collider");
+            mc.enabled = enabled;
+        }
     }
 }
 #endif

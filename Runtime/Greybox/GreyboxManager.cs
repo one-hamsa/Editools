@@ -4,8 +4,9 @@ using UnityEngine;
 /// Place anywhere above grey primitives (Greybox, Greypipe, Greyroad) in the hierarchy to
 /// control their adaptive subdivision density. All primitives under this object poll these
 /// values and subdivide to match. Changes to this component push <see cref="GreyPrimitive.RebuildMesh"/>
-/// to every descendant primitive via <see cref="PushRebuildToChildren"/>, called from the
-/// custom inspector's change-check and undo handler.
+/// to every descendant primitive via <see cref="PushRebuildToChildren"/>, called from the custom
+/// inspector's change-check, and from its undo handler only when an undo/redo actually changed one of
+/// this manager's values (detected via <see cref="ComputeDensitySignature"/>).
 /// </summary>
 public class GreyboxManager : MonoBehaviour
 {
@@ -68,6 +69,28 @@ public class GreyboxManager : MonoBehaviour
     {
         foreach (var prim in GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
             prim.RebuildMesh();
+    }
+
+    /// <summary>
+    /// Hash of the serialized values that drive descendant subdivision. The manager's editor caches
+    /// this and, on undo/redo, only re-pushes a rebuild to children when it changed — so an undo
+    /// unrelated to the manager costs one hash instead of rebuilding every descendant.
+    /// </summary>
+    public int ComputeDensitySignature()
+    {
+        unchecked
+        {
+            int h = 17;
+            h = h * 31 + _subdivisionEnabled.GetHashCode();
+            h = h * 31 + _vertexDensity.GetHashCode();
+            h = h * 31 + _greypipeLengthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _greypipeGirthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _greyroadLengthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _greyroadWidthSubdivMultiplier.GetHashCode();
+            h = h * 31 + _greyroadSideSubdivMultiplier.GetHashCode();
+            h = h * 31 + _greyroadEdgeSmoothing.GetHashCode();
+            return h;
+        }
     }
 #endif
 }

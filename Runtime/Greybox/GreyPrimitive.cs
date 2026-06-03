@@ -43,6 +43,22 @@ public abstract class GreyPrimitive : MonoBehaviour
     int _meshOwnerId;
     protected Mesh SharedMesh => _mesh;
 
+    // Unsubdivided twin of the render mesh, for collision. Same shape, far fewer triangles — owned and
+    // serialized exactly like _mesh. Baked by re-running GenerateMesh with subdivision suppressed.
+    [SerializeField, HideInInspector]
+    Mesh _colliderMesh;
+    [SerializeField, HideInInspector]
+    int _colliderMeshOwnerId;
+    public Mesh ColliderMesh => _colliderMesh;
+
+    /// <summary>True for types that bake a separate unsubdivided collider mesh (Greybox, boolean
+    /// result). False (the default) means the MeshCollider just uses the render mesh — Greypipe, Greyroad.</summary>
+    public virtual bool UsesColliderMesh => false;
+
+    // When true, ComputeEffectiveDensity returns 0 so GenerateMesh produces the minimal (collision) form.
+    [System.NonSerialized] bool _suppressSubdivision;
+    protected bool SubdivisionSuppressed => _suppressSubdivision;
+
 #if UNITY_EDITOR
     [System.NonSerialized] bool _meshIsLive;
     public bool MeshIsLive => _meshIsLive;
@@ -66,21 +82,55 @@ public abstract class GreyPrimitive : MonoBehaviour
         _meshIsLive = true;
 #endif
         OnBeforeRebuild();
+
         EnsureMesh();
         GenerateMesh(_mesh);
         _mesh.RecalculateBounds();
+
+        // Types that opt in (Greybox, GreyBooleanResult) bake an unsubdivided collider twin from the
+        // same inputs and feed it to the MeshCollider. Others (Greypipe, Greyroad) just point the
+        // collider at the render mesh — no separate bake.
+        Mesh colliderMesh = _mesh;
+        if (UsesColliderMesh)
+        {
+            EnsureColliderMesh();
+            _suppressSubdivision = true;
+            GenerateMesh(_colliderMesh);
+            _suppressSubdivision = false;
+            _colliderMesh.RecalculateBounds();
+            colliderMesh = _colliderMesh;
+        }
 
         var mf = GetComponent<MeshFilter>();
         if (mf != null) mf.sharedMesh = _mesh;
 
         var mc = GetComponent<MeshCollider>();
-        if (mc != null) mc.sharedMesh = _mesh;
+        if (mc != null) mc.sharedMesh = colliderMesh;
     }
+
+#if UNITY_EDITOR
+    /// <summary>Injects the (freshly baked) collider mesh into a MeshCollider on this object — the
+    /// "Set Collider" button, for when a collider is added manually after the mesh was built.</summary>
+    public void ApplyColliderMesh()
+    {
+        if (_colliderMesh == null || _colliderMeshOwnerId != GetInstanceID())
+            RebuildMesh();
+
+        var mc = GetComponent<MeshCollider>();
+        if (mc == null)
+        {
+            Debug.LogError($"[Greybox] '{name}' has no MeshCollider to set — add one first.");
+            return;
+        }
+        mc.sharedMesh = _colliderMesh;
+    }
+#endif
 
     // ─── Subdivision ─────────────────────────────────────────────
 
     protected float ComputeEffectiveDensity()
     {
+        if (_suppressSubdivision) return 0f;
         float multiplier = Mathf.Max(0f, _subdivisionMultiplier);
         if (multiplier == 0f) return 0f;
         var manager = GetComponentInParent<GreyboxManager>();
@@ -102,5 +152,12 @@ public abstract class GreyPrimitive : MonoBehaviour
         if (_mesh != null && _meshOwnerId == GetInstanceID()) return;
         _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
         _meshOwnerId = GetInstanceID();
+    }
+
+    void EnsureColliderMesh()
+    {
+        if (_colliderMesh != null && _colliderMeshOwnerId == GetInstanceID()) return;
+        _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
+        _colliderMeshOwnerId = GetInstanceID();
     }
 }
