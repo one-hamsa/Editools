@@ -25,12 +25,17 @@ static class TriggerDebug
 	const int k_MaxVolumes = 128;
 
 	static readonly int s_idBoxMatrices = Shader.PropertyToID("_TrigBoxMatrices");
+	static readonly int s_idBoxColors   = Shader.PropertyToID("_TrigBoxColors");
 	static readonly int s_idBoxCount    = Shader.PropertyToID("_TrigBoxCount");
 	static readonly int s_idSpheres     = Shader.PropertyToID("_TrigSpheres");
 	static readonly int s_idSphereCount = Shader.PropertyToID("_TrigSphereCount");
 
+	// Tint for collider volumes. Provider-contributed boxes carry their own color.
+	static readonly Color k_ColliderColor = new Color(0.10f, 0.85f, 0.20f);
+
 	static Material s_material;
 	static readonly Matrix4x4[] s_boxBuffer = new Matrix4x4[k_MaxVolumes];
+	static readonly Vector4[] s_boxColorBuffer = new Vector4[k_MaxVolumes];
 	static readonly Vector4[] s_sphereBuffer = new Vector4[k_MaxVolumes];
 
 	/// <summary>Raised whenever the mode turns on/off, including force-exit by another mode. UI toggles listen to stay in sync.</summary>
@@ -66,6 +71,7 @@ static class TriggerDebug
 		SceneMaterialOverride.Enter(s_material, k_ModeName, OnForceExit);
 		Selection.selectionChanged += UploadVolumes;
 		SceneView.duringSceneGui += OnSceneGui;
+		TriggerDebugVolumes.Changed += UploadVolumes;
 		UploadVolumes();
 
 		SessionState.SetBool(k_SessionKey, true);
@@ -98,6 +104,7 @@ static class TriggerDebug
 	{
 		Selection.selectionChanged -= UploadVolumes;
 		SceneView.duringSceneGui -= OnSceneGui;
+		TriggerDebugVolumes.Changed -= UploadVolumes;
 	}
 
 	static void Cleanup()
@@ -130,14 +137,29 @@ static class TriggerDebug
 
 			var boxes = go.GetComponentsInChildren<BoxCollider>(true);
 			for (int i = 0; i < boxes.Length && boxCount < k_MaxVolumes; i++)
-				s_boxBuffer[boxCount++] = BuildBoxMatrix(boxes[i]);
+			{
+				s_boxBuffer[boxCount] = BuildBoxMatrix(boxes[i]);
+				s_boxColorBuffer[boxCount] = k_ColliderColor;
+				boxCount++;
+			}
 
 			var spheres = go.GetComponentsInChildren<SphereCollider>(true);
 			for (int i = 0; i < spheres.Length && sphereCount < k_MaxVolumes; i++)
 				s_sphereBuffer[sphereCount++] = BuildSphere(spheres[i]);
 		}
 
+		// Extra box volumes contributed by game-specific systems (e.g. baker bounds).
+		// Pushed after colliders; later boxes win on overlap, so nested inner boxes read correctly.
+		TriggerDebugVolumes.Collect((matrix, tint) =>
+		{
+			if (boxCount >= k_MaxVolumes) return;
+			s_boxBuffer[boxCount] = matrix;
+			s_boxColorBuffer[boxCount] = tint;
+			boxCount++;
+		});
+
 		Shader.SetGlobalMatrixArray(s_idBoxMatrices, s_boxBuffer);
+		Shader.SetGlobalVectorArray(s_idBoxColors, s_boxColorBuffer);
 		Shader.SetGlobalInt(s_idBoxCount, boxCount);
 		Shader.SetGlobalVectorArray(s_idSpheres, s_sphereBuffer);
 		Shader.SetGlobalInt(s_idSphereCount, sphereCount);
@@ -184,8 +206,9 @@ class EditoolsTriggerDebugButton : EditorToolbarToggle
 	public EditoolsTriggerDebugButton()
 	{
 		icon = EditorGUIUtility.IconContent("d_BoxCollider Icon").image as Texture2D;
-		tooltip = "Trigger Debug — paints the scene gray and tints green anything inside the " +
-			"selected box/sphere colliders (selection + children). Selection can change live.";
+		tooltip = "Trigger Debug — paints the scene gray and tints anything inside the " +
+			"selected box/sphere colliders (selection + children), plus any registered debug " +
+			"volumes (e.g. baker bounds). Selection can change live.";
 
 		SetValueWithoutNotify(TriggerDebug.IsActive);
 		this.RegisterValueChangedCallback(OnToggled);

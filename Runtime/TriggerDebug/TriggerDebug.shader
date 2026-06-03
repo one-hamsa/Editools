@@ -30,6 +30,8 @@ Shader "Hidden/Editools/TriggerDebug"
 			// Box volumes: each matrix maps a world position into unit-cube space,
 			// where the box interior is |xyz| <= 0.5 on every axis.
 			float4x4 _TrigBoxMatrices[TRIG_MAX];
+			// Per-box tint (rgb). Parallel to _TrigBoxMatrices.
+			float4   _TrigBoxColors[TRIG_MAX];
 			int      _TrigBoxCount;
 
 			// Sphere volumes: xyz = world center, w = world radius.
@@ -66,24 +68,36 @@ Shader "Hidden/Editools/TriggerDebug"
 				return output;
 			}
 
-			bool InsideAnyVolume(float3 worldPos)
+			// Returns true if worldPos is inside any volume; tint = that volume's color.
+			// Boxes are tested in upload order and the last match wins, so volumes pushed
+			// later (e.g. an inner box nested in an outer one) override earlier ones.
+			bool InsideAnyVolume(float3 worldPos, out float3 tint)
 			{
+				bool hit = false;
+				tint = float3(0.10, 0.85, 0.20);
+
 				for (int b = 0; b < _TrigBoxCount; b++)
 				{
 					float4 q = mul(_TrigBoxMatrices[b], float4(worldPos, 1.0));
 					float3 a = abs(q.xyz);
 					if (max(max(a.x, a.y), a.z) <= 0.5)
-						return true;
+					{
+						tint = _TrigBoxColors[b].rgb;
+						hit = true;
+					}
 				}
 
 				for (int s = 0; s < _TrigSphereCount; s++)
 				{
 					float4 sph = _TrigSpheres[s];
 					if (distance(worldPos, sph.xyz) <= sph.w)
-						return true;
+					{
+						tint = float3(0.10, 0.85, 0.20);
+						hit = true;
+					}
 				}
 
-				return false;
+				return hit;
 			}
 
 			float4 frag(Varyings input) : SV_Target
@@ -91,10 +105,10 @@ Shader "Hidden/Editools/TriggerDebug"
 				UNITY_SETUP_INSTANCE_ID(input);
 				UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(input);
 
-				float3 gray  = float3(0.22, 0.22, 0.22);
-				float3 green = float3(0.10, 0.85, 0.20);
+				float3 gray = float3(0.22, 0.22, 0.22);
 
-				float3 baseColor = InsideAnyVolume(input.positionWS) ? green : gray;
+				float3 tint;
+				float3 baseColor = InsideAnyVolume(input.positionWS, tint) ? tint : gray;
 
 				// Simple directional shading so surface form stays readable.
 				float3 n = normalize(input.normalWS);
