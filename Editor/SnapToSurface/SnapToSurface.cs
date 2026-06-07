@@ -26,8 +26,34 @@ public class SnapToSurface : EditorWindow
     }
     private static readonly List<SnapMeshEntry> s_snapMeshes = new();
 
+    // Master on/off for the tool, matching the Editools gating convention
+    // (see EditoolsSettingsPopup). Backed by EditorPrefs so it persists per machine.
+    internal static bool Enabled {
+        get => EditorPrefs.GetBool("SnapToSurface_Enabled", true);
+        set => EditorPrefs.SetBool("SnapToSurface_Enabled", value);
+    }
+
+    // Per-mask filters deciding which surface types are eligible snap targets.
+    // Exposed as checkboxes in the Snap To Surface settings submenu.
+    internal static bool SnapSkinnedMeshes {
+        get => EditorPrefs.GetBool("SnapToSurface_SnapSkinned", true);
+        set => EditorPrefs.SetBool("SnapToSurface_SnapSkinned", value);
+    }
+    internal static bool SnapStaticMeshes {
+        get => EditorPrefs.GetBool("SnapToSurface_SnapStatic", true);
+        set => EditorPrefs.SetBool("SnapToSurface_SnapStatic", value);
+    }
+    // ZWrite-off surfaces (glow/additive/transparent) are skipped unless this is on.
+    internal static bool SnapTransparentMeshes {
+        get => EditorPrefs.GetBool("SnapToSurface_SnapTransparent", false);
+        set => EditorPrefs.SetBool("SnapToSurface_SnapTransparent", value);
+    }
+
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
+        if (!EditoolsOverlay.IsActive || !Enabled)
+            return;
+
         if (Selection.activeGameObject == null)
             return;
 
@@ -92,53 +118,79 @@ public class SnapToSurface : EditorWindow
         // scene that FindObjectsByType doesn't see — without this branch the cache
         // would contain the (hidden) main-scene meshes instead of the prefab contents.
         var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
-        MeshFilter[] meshFilters = prefabStage != null
-            ? prefabStage.prefabContentsRoot.GetComponentsInChildren<MeshFilter>(true)
-            : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
-        foreach (var mf in meshFilters) {
-            GameObject obj = mf.gameObject;
-            if (ignoredObjects.Contains(obj))
-                continue;
+        Transform stageRoot = prefabStage != null ? prefabStage.prefabContentsRoot.transform : null;
 
-            MeshRenderer mr = mf.GetComponent<MeshRenderer>();
-            if (mr == null || !mr.enabled)
-                continue;
-
-            // Skip renderers whose materials don't write depth. ZWrite Off is the
-            // universal signal for "I'm a glow/additive/transparent surface" — those
-            // shouldn't act as snap targets even when their RenderType tag lies
-            // (e.g. Toon 2.0 Glow Sphere Lighten claims Opaque/Geometry but uses
-            // BlendOp Max + ZWrite Off).
-            if (!AnyMaterialWritesDepth(mr))
-                continue;
-
-            Mesh mesh = mf.sharedMesh;
-            if (mesh == null)
-                continue;
-
-            var verts = ListPool<Vector3>.Get();
-            var tris  = ListPool<int>.Get();
-            var norms = ListPool<Vector3>.Get();
-
-            mesh.GetVertices(verts);
-            mesh.GetNormals(norms);
-
-            // Aggregate all submeshes' triangles to preserve the original
-            // mesh.triangles-flattened behaviour.
-            for (int sm = 0; sm < mesh.subMeshCount; sm++) {
-                var smTris = ListPool<int>.Get();
-                mesh.GetTriangles(smTris, sm);
-                tris.AddRange(smTris);
-                ListPool<int>.Release(smTris);
+        if (SnapStaticMeshes) {
+            MeshFilter[] meshFilters = stageRoot != null
+                ? stageRoot.GetComponentsInChildren<MeshFilter>(true)
+                : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
+            foreach (var mf in meshFilters) {
+                MeshRenderer mr = mf.GetComponent<MeshRenderer>();
+                if (mr == null || !mr.enabled)
+                    continue;
+                AddSnapMesh(mf.gameObject, mf.transform, mr, mf.sharedMesh);
             }
-
-            s_snapMeshes.Add(new SnapMeshEntry {
-                transform = mf.transform,
-                vertices  = verts,
-                triangles = tris,
-                normals   = norms,
-            });
         }
+
+        if (SnapSkinnedMeshes) {
+            SkinnedMeshRenderer[] skinned = stageRoot != null
+                ? stageRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true)
+                : GameObject.FindObjectsByType<SkinnedMeshRenderer>(FindObjectsSortMode.None);
+            foreach (var smr in skinned) {
+                if (!smr.enabled || smr.sharedMesh == null)
+                    continue;
+
+                // Bake the current posed mesh so the raycast hits the deformed surface
+                // the artist actually sees. Baked verts are in the renderer's local
+                // space, so AddSnapMesh's TransformPoint maps them to world correctly.
+                Mesh baked = new Mesh();
+                smr.BakeMesh(baked);
+                AddSnapMesh(smr.gameObject, smr.transform, smr, baked);
+                // AddSnapMesh copies the data into pooled lists, so the temporary
+                // baked mesh is no longer needed.
+                Object.DestroyImmediate(baked);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Extract a renderer's mesh into pooled vertex/triangle/normal lists and add it
+    /// to the snap cache. Skips ignored objects, null meshes, and — unless transparent
+    /// surfaces are enabled — meshes whose materials don't write depth.
+    /// </summary>
+    private static void AddSnapMesh(GameObject obj, Transform tf, Renderer renderer, Mesh mesh) {
+        if (mesh == null || ignoredObjects.Contains(obj))
+            return;
+
+        // ZWrite Off is the universal signal for "I'm a glow/additive/transparent
+        // surface" — those are skipped unless the Transparent Meshes mask is on, even
+        // when their RenderType tag lies (e.g. Toon 2.0 Glow Sphere Lighten claims
+        // Opaque/Geometry but uses BlendOp Max + ZWrite Off).
+        if (!SnapTransparentMeshes && !AnyMaterialWritesDepth(renderer))
+            return;
+
+        var verts = ListPool<Vector3>.Get();
+        var tris  = ListPool<int>.Get();
+        var norms = ListPool<Vector3>.Get();
+
+        mesh.GetVertices(verts);
+        mesh.GetNormals(norms);
+
+        // Aggregate all submeshes' triangles to preserve the original
+        // mesh.triangles-flattened behaviour.
+        for (int sm = 0; sm < mesh.subMeshCount; sm++) {
+            var smTris = ListPool<int>.Get();
+            mesh.GetTriangles(smTris, sm);
+            tris.AddRange(smTris);
+            ListPool<int>.Release(smTris);
+        }
+
+        s_snapMeshes.Add(new SnapMeshEntry {
+            transform = tf,
+            vertices  = verts,
+            triangles = tris,
+            normals   = norms,
+        });
     }
 
     /// <summary>
@@ -148,8 +200,8 @@ public class SnapToSurface : EditorWindow
     /// always exposed as a material property). Falls back to allowing the snap if
     /// the state can't be read — better to over-snap than to silently skip everything.
     /// </summary>
-    private static bool AnyMaterialWritesDepth(MeshRenderer mr) {
-        var mats = mr.sharedMaterials;
+    private static bool AnyMaterialWritesDepth(Renderer renderer) {
+        var mats = renderer.sharedMaterials;
         if (mats == null || mats.Length == 0)
             return true;
 

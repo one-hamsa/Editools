@@ -1152,7 +1152,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 10 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 11 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1230,6 +1230,12 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Drives size + texture from a MainTex field and pushes it through LocalMaterial.\n\n" +
 		"Click ▸ to edit Sticker defaults (material, layer, static, subdivisions, raycast slab, relax, offset).");
 
+	static readonly GUIContent k_SnapToSurface = new GUIContent(
+		"Snap To Surface",
+		"Alt+A in the Scene View drops the selected object onto the surface under the " +
+		"cursor and aligns it to that surface's normal. Left-click confirms, right-click cancels.\n\n" +
+		"Click ▸ to choose which surface types are snap targets (skinned, static, transparent).");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1267,6 +1273,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawSubmenuOnlyRow(k_Sticker,
 			rect => UnityEditor.PopupWindow.Show(rect, new StickerSettingsPopup()));
+
+		DrawToggleRow(k_SnapToSurface, SnapToSurface.Enabled,
+			v => SnapToSurface.Enabled = v,
+			() => UnityEditor.PopupWindow.Show(
+				GUILayoutUtility.GetLastRect(), new SnapToSurfaceSettingsPopup()));
 	}
 
 	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
@@ -1391,6 +1402,45 @@ class QuickTransformPopup : PopupWindowContent
 		bool newTooltips = EditorGUILayout.Toggle(k_ShowTooltipsLabel, tooltips);
 		if (newTooltips != tooltips)
 			QuickTransform.ShowTooltips = newTooltips;
+	}
+}
+
+/// <summary>
+/// Settings popup for Snap To Surface. Three checkboxes selecting which surface
+/// types are eligible snap targets, backed by EditorPrefs on SnapToSurface.
+/// </summary>
+class SnapToSurfaceSettingsPopup : PopupWindowContent
+{
+	static readonly GUIContent k_SkinnedLabel = new GUIContent(
+		"Skinned Meshes",
+		"Snap to SkinnedMeshRenderer surfaces (characters, mechs). The current posed " +
+		"mesh is baked on snap entry so the raycast hits what you see in the viewport.");
+	static readonly GUIContent k_StaticLabel = new GUIContent(
+		"Static Meshes",
+		"Snap to MeshFilter / MeshRenderer surfaces (props, environment, greybox).");
+	static readonly GUIContent k_TransparentLabel = new GUIContent(
+		"Transparent Meshes",
+		"Also snap to surfaces whose material doesn't write depth (ZWrite Off) — " +
+		"glow / additive / transparent shaders. Off by default, so these are skipped.");
+
+	public override Vector2 GetWindowSize() => new Vector2(220, 3 * 22 + 4);
+
+	public override void OnGUI(Rect rect)
+	{
+		bool skinned = SnapToSurface.SnapSkinnedMeshes;
+		bool newSkinned = EditorGUILayout.Toggle(k_SkinnedLabel, skinned);
+		if (newSkinned != skinned)
+			SnapToSurface.SnapSkinnedMeshes = newSkinned;
+
+		bool stat = SnapToSurface.SnapStaticMeshes;
+		bool newStat = EditorGUILayout.Toggle(k_StaticLabel, stat);
+		if (newStat != stat)
+			SnapToSurface.SnapStaticMeshes = newStat;
+
+		bool transparent = SnapToSurface.SnapTransparentMeshes;
+		bool newTransparent = EditorGUILayout.Toggle(k_TransparentLabel, transparent);
+		if (newTransparent != transparent)
+			SnapToSurface.SnapTransparentMeshes = newTransparent;
 	}
 }
 
