@@ -54,6 +54,13 @@ public class SnapToSurface : EditorWindow
         if (!EditoolsOverlay.IsActive || !Enabled)
             return;
 
+        // Alt+A is a sub-combo of the Ctrl+Alt+A toggle-active binding. On a three-key
+        // chord the modifier state can momentarily read as just Alt, firing this
+        // shortcut by accident — so ignore the press whenever Ctrl/Cmd is also held.
+        const EventModifiers ctrlOrCmd = EventModifiers.Control | EventModifiers.Command;
+        if (Event.current != null && (Event.current.modifiers & ctrlOrCmd) != 0)
+            return;
+
         if (Selection.activeGameObject == null)
             return;
 

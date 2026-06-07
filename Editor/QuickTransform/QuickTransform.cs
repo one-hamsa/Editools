@@ -268,9 +268,6 @@ static partial class QuickTransform
             GUIUtility.hotControl = 0;
             ResetState();
         }
-
-        foreach (var gp in GameObject.FindObjectsByType<GreyPrimitive>(FindObjectsSortMode.None))
-            gp.RebuildMesh();
     }
 
     // ─── Main Loop ──────────────────────────────────────────────

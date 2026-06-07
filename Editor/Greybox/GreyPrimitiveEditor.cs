@@ -106,13 +106,19 @@ public class GreyPrimitiveEditor : Editor
         if (root == null) return;
 
         foreach (var prim in root.GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
-        {
-            if (prim == null) continue;
-            prim.RebuildMesh();
-            GreyBooleanOrchestrator.Sync(prim);       // reconcile prim's own boolean (a changed/cleared operator)
-            GreyBooleanOrchestrator.ReBakeFrom(prim); // re-bake any result that references prim, up the chain
-            if (prim is Greybox gb)
-                GreyboxSeamSolver.RebuildSeamPartners(gb);
-        }
+            RebuildPrimitiveAndDependents(prim);
+    }
+
+    // Rebuild a single primitive together with everything derived from it — its own boolean,
+    // any result that references it, and any seam-welded boxes. Shared between this editor's
+    // selection-scoped undo path and the global GreyboxUndoRebuilder so both regenerate identically.
+    internal static void RebuildPrimitiveAndDependents(GreyPrimitive prim)
+    {
+        if (prim == null) return;
+        prim.RebuildMesh();
+        GreyBooleanOrchestrator.Sync(prim);       // reconcile prim's own boolean (a changed/cleared operator)
+        GreyBooleanOrchestrator.ReBakeFrom(prim); // re-bake any result that references prim, up the chain
+        if (prim is Greybox gb)
+            GreyboxSeamSolver.RebuildSeamPartners(gb);
     }
 }
