@@ -48,6 +48,12 @@ public class SnapToSurface : EditorWindow
         get => EditorPrefs.GetBool("SnapToSurface_SnapTransparent", false);
         set => EditorPrefs.SetBool("SnapToSurface_SnapTransparent", value);
     }
+    // When on, the object's Z+ (forward) axis is aligned to the surface normal instead
+    // of the default Y+ (up) axis. Useful for objects authored facing down their Z axis.
+    internal static bool AlignZToSurface {
+        get => EditorPrefs.GetBool("SnapToSurface_AlignZ", false);
+        set => EditorPrefs.SetBool("SnapToSurface_AlignZ", value);
+    }
 
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
@@ -133,7 +139,10 @@ public class SnapToSurface : EditorWindow
                 : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
             foreach (var mf in meshFilters) {
                 MeshRenderer mr = mf.GetComponent<MeshRenderer>();
-                if (mr == null || !mr.enabled)
+                // mr.enabled is the component toggle only; an inactive GameObject (or one
+                // under an inactive parent) keeps enabled == true, so activeInHierarchy is
+                // what actually excludes hidden objects from being snap targets.
+                if (mr == null || !mr.enabled || !mr.gameObject.activeInHierarchy)
                     continue;
                 AddSnapMesh(mf.gameObject, mf.transform, mr, mf.sharedMesh);
             }
@@ -144,7 +153,7 @@ public class SnapToSurface : EditorWindow
                 ? stageRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true)
                 : GameObject.FindObjectsByType<SkinnedMeshRenderer>(FindObjectsSortMode.None);
             foreach (var smr in skinned) {
-                if (!smr.enabled || smr.sharedMesh == null)
+                if (!smr.enabled || !smr.gameObject.activeInHierarchy || smr.sharedMesh == null)
                     continue;
 
                 // Bake the current posed mesh so the raycast hits the deformed surface
@@ -332,24 +341,28 @@ public class SnapToSurface : EditorWindow
             // Update position
             selectedObject.transform.position = closestHitPoint;
 
-            // Update rotation - align Y+ with normal
-            // Use a more stable calculation for the forward direction
-            Vector3 up = closestHitNormal;
-            Vector3 forward;
+            // Align one axis to the surface normal; the other in-plane axis takes a
+            // stable tangent so the object doesn't spin as the cursor moves.
+            Vector3 normal = closestHitNormal;
+            Vector3 tangent;
 
-            // Try to maintain a consistent forward direction
-            if (Vector3.Dot(up, Vector3.up) > 0.99f) {
+            // Try to maintain a consistent tangent direction
+            if (Vector3.Dot(normal, Vector3.up) > 0.99f) {
                 // Surface is nearly horizontal, use world forward
-                forward = Vector3.forward;
-            } else if (Vector3.Dot(up, Vector3.up) < -0.99f) {
+                tangent = Vector3.forward;
+            } else if (Vector3.Dot(normal, Vector3.up) < -0.99f) {
                 // Surface is nearly horizontal but upside down
-                forward = Vector3.back;
+                tangent = Vector3.back;
             } else {
-                // Project world up onto the surface plane to get forward
-                forward = Vector3.ProjectOnPlane(Vector3.up, up).normalized;
+                // Project world up onto the surface plane to get the tangent
+                tangent = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
             }
 
-            selectedObject.transform.rotation = Quaternion.LookRotation(forward, up);
+            // AlignZToSurface points Z+ (forward) at the normal; otherwise the default
+            // points Y+ (up) at the normal. LookRotation's args are (forward, up).
+            selectedObject.transform.rotation = AlignZToSurface
+                ? Quaternion.LookRotation(normal, tangent)
+                : Quaternion.LookRotation(tangent, normal);
 
             EditorUtility.SetDirty(selectedObject);
         }

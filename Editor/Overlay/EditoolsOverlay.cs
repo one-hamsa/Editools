@@ -1422,8 +1422,12 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		"Transparent Meshes",
 		"Also snap to surfaces whose material doesn't write depth (ZWrite Off) — " +
 		"glow / additive / transparent shaders. Off by default, so these are skipped.");
+	static readonly GUIContent k_AlignZLabel = new GUIContent(
+		"Align Z To Surface",
+		"Align the object's Z+ (forward) axis to the surface normal instead of the " +
+		"default Y+ (up) axis. Useful for objects authored facing down their Z axis.");
 
-	public override Vector2 GetWindowSize() => new Vector2(220, 3 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(220, 4 * 22 + 4);
 
 	public override void OnGUI(Rect rect)
 	{
@@ -1441,6 +1445,11 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		bool newTransparent = EditorGUILayout.Toggle(k_TransparentLabel, transparent);
 		if (newTransparent != transparent)
 			SnapToSurface.SnapTransparentMeshes = newTransparent;
+
+		bool alignZ = SnapToSurface.AlignZToSurface;
+		bool newAlignZ = EditorGUILayout.Toggle(k_AlignZLabel, alignZ);
+		if (newAlignZ != alignZ)
+			SnapToSurface.AlignZToSurface = newAlignZ;
 	}
 }
 
