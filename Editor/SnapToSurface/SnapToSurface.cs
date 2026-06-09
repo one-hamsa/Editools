@@ -23,6 +23,12 @@ public class SnapToSurface : EditorWindow
         public List<Vector3> vertices;
         public List<int>     triangles;
         public List<Vector3> normals;
+        // Cached on build — snap targets don't move during a session, so the transform
+        // matrices are computed once instead of per-vertex per-frame, and worldBounds
+        // (the renderer's world-space AABB) drives the broad-phase ray cull.
+        public Matrix4x4     localToWorld;
+        public Matrix4x4     worldToLocal;
+        public Bounds        worldBounds;
     }
     private static readonly List<SnapMeshEntry> s_snapMeshes = new();
 
@@ -39,9 +45,12 @@ public class SnapToSurface : EditorWindow
         get => EditorPrefs.GetBool("SnapToSurface_SnapSkinned", true);
         set => EditorPrefs.SetBool("SnapToSurface_SnapSkinned", value);
     }
-    internal static bool SnapStaticMeshes {
-        get => EditorPrefs.GetBool("SnapToSurface_SnapStatic", true);
-        set => EditorPrefs.SetBool("SnapToSurface_SnapStatic", value);
+    // Static-flag filter, orthogonal to renderer type: only objects flagged Static
+    // (GameObject.isStatic) are snap targets by default. When on, non-static objects
+    // are also eligible.
+    internal static bool SnapNonStatic {
+        get => EditorPrefs.GetBool("SnapToSurface_SnapNonStatic", false);
+        set => EditorPrefs.SetBool("SnapToSurface_SnapNonStatic", value);
     }
     // ZWrite-off surfaces (glow/additive/transparent) are skipped unless this is on.
     internal static bool SnapTransparentMeshes {
@@ -53,6 +62,12 @@ public class SnapToSurface : EditorWindow
     internal static bool AlignZToSurface {
         get => EditorPrefs.GetBool("SnapToSurface_AlignZ", false);
         set => EditorPrefs.SetBool("SnapToSurface_AlignZ", value);
+    }
+    // Distance to push the snapped object off the surface along its normal. 0 sits flush
+    // on the surface; positive lifts it away from the surface, negative sinks it in.
+    internal static float SurfaceOffset {
+        get => EditorPrefs.GetFloat("SnapToSurface_Offset", 0f);
+        set => EditorPrefs.SetFloat("SnapToSurface_Offset", value);
     }
 
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
@@ -133,19 +148,17 @@ public class SnapToSurface : EditorWindow
         var prefabStage = PrefabStageUtility.GetCurrentPrefabStage();
         Transform stageRoot = prefabStage != null ? prefabStage.prefabContentsRoot.transform : null;
 
-        if (SnapStaticMeshes) {
-            MeshFilter[] meshFilters = stageRoot != null
-                ? stageRoot.GetComponentsInChildren<MeshFilter>(true)
-                : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
-            foreach (var mf in meshFilters) {
-                MeshRenderer mr = mf.GetComponent<MeshRenderer>();
-                // mr.enabled is the component toggle only; an inactive GameObject (or one
-                // under an inactive parent) keeps enabled == true, so activeInHierarchy is
-                // what actually excludes hidden objects from being snap targets.
-                if (mr == null || !mr.enabled || !mr.gameObject.activeInHierarchy)
-                    continue;
-                AddSnapMesh(mf.gameObject, mf.transform, mr, mf.sharedMesh);
-            }
+        MeshFilter[] meshFilters = stageRoot != null
+            ? stageRoot.GetComponentsInChildren<MeshFilter>(true)
+            : GameObject.FindObjectsByType<MeshFilter>(FindObjectsSortMode.None);
+        foreach (var mf in meshFilters) {
+            MeshRenderer mr = mf.GetComponent<MeshRenderer>();
+            // mr.enabled is the component toggle only; an inactive GameObject (or one
+            // under an inactive parent) keeps enabled == true, so activeInHierarchy is
+            // what actually excludes hidden objects from being snap targets.
+            if (mr == null || !mr.enabled || !mr.gameObject.activeInHierarchy)
+                continue;
+            AddSnapMesh(mf.gameObject, mf.transform, mr, mf.sharedMesh);
         }
 
         if (SnapSkinnedMeshes) {
@@ -178,6 +191,11 @@ public class SnapToSurface : EditorWindow
         if (mesh == null || ignoredObjects.Contains(obj))
             return;
 
+        // Static-flag filter, orthogonal to renderer type: non-static objects are only
+        // eligible snap targets when the Non Static mask is on.
+        if (!SnapNonStatic && !obj.isStatic)
+            return;
+
         // ZWrite Off is the universal signal for "I'm a glow/additive/transparent
         // surface" — those are skipped unless the Transparent Meshes mask is on, even
         // when their RenderType tag lies (e.g. Toon 2.0 Glow Sphere Lighten claims
@@ -206,6 +224,9 @@ public class SnapToSurface : EditorWindow
             vertices  = verts,
             triangles = tris,
             normals   = norms,
+            localToWorld = tf.localToWorldMatrix,
+            worldToLocal = tf.worldToLocalMatrix,
+            worldBounds  = renderer.bounds,
         });
     }
 
@@ -338,8 +359,8 @@ public class SnapToSurface : EditorWindow
         }
 
         if (foundHit) {
-            // Update position
-            selectedObject.transform.position = closestHitPoint;
+            // Update position, pushed off the surface along its normal by SurfaceOffset.
+            selectedObject.transform.position = closestHitPoint + closestHitNormal * SurfaceOffset;
 
             // Align one axis to the surface normal; the other in-plane axis takes a
             // stable tangent so the object doesn't spin as the cursor moves.
@@ -399,39 +420,59 @@ public class SnapToSurface : EditorWindow
         hitNormal = Vector3.up;
         hitDistance = float.MaxValue;
 
-        Transform transform = entry.transform;
+        // Broad phase: skip the whole mesh if the ray never crosses its world-space
+        // bounding box. The cursor ray only touches a handful of objects' boxes, so this
+        // turns an all-triangles-in-scene test into just the meshes under the cursor.
+        if (!entry.worldBounds.IntersectRay(ray))
+            return false;
+
         var vertices  = entry.vertices;
         var triangles = entry.triangles;
-        var normals   = entry.normals;
+
+        // Intersect in the mesh's local space: transform the ray once with the cached
+        // inverse matrix instead of transforming every vertex to world space each frame.
+        // Ray's constructor normalizes the direction, so closestT and the hit point below
+        // are taken from localRay's own origin/direction to stay self-consistent.
+        Vector3 localOrigin = entry.worldToLocal.MultiplyPoint3x4(ray.origin);
+        Vector3 localDir     = entry.worldToLocal.MultiplyVector(ray.direction);
+        Ray localRay = new Ray(localOrigin, localDir);
+
+        // A negative-determinant (mirrored) transform reverses triangle winding in local
+        // space, which would invert RayIntersectsTriangle's backface cull. Swap two verts
+        // for those meshes so front/back faces are judged exactly as in world space.
+        bool flipWinding = entry.localToWorld.determinant < 0f;
 
         float closestT = float.MaxValue;
         bool hitFound = false;
-        Vector3 closestLocalHitPoint = Vector3.zero;
         int closestTriIndex = 0;
 
         int triCount = triangles.Count;
         for (int i = 0; i < triCount; i += 3) {
-            Vector3 v0 = transform.TransformPoint(vertices[triangles[i]]);
-            Vector3 v1 = transform.TransformPoint(vertices[triangles[i + 1]]);
-            Vector3 v2 = transform.TransformPoint(vertices[triangles[i + 2]]);
+            Vector3 v0 = vertices[triangles[i]];
+            Vector3 v1 = vertices[triangles[i + (flipWinding ? 2 : 1)]];
+            Vector3 v2 = vertices[triangles[i + (flipWinding ? 1 : 2)]];
 
-            if (RayIntersectsTriangle(ray, v0, v1, v2, out float t)) {
+            if (RayIntersectsTriangle(localRay, v0, v1, v2, out float t)) {
                 if (t < closestT) {
                     closestT = t;
                     hitFound = true;
                     closestTriIndex = i;
-                    closestLocalHitPoint = ray.origin + ray.direction * t;
                 }
             }
         }
 
         if (hitFound) {
-            hitPoint = closestLocalHitPoint;
-            hitDistance = closestT;
+            // Only the winning triangle is mapped to world space — three points, not
+            // the whole mesh.
+            Vector3 v0 = entry.localToWorld.MultiplyPoint3x4(vertices[triangles[closestTriIndex]]);
+            Vector3 v1 = entry.localToWorld.MultiplyPoint3x4(vertices[triangles[closestTriIndex + 1]]);
+            Vector3 v2 = entry.localToWorld.MultiplyPoint3x4(vertices[triangles[closestTriIndex + 2]]);
 
-            Vector3 v0 = transform.TransformPoint(vertices[triangles[closestTriIndex]]);
-            Vector3 v1 = transform.TransformPoint(vertices[triangles[closestTriIndex + 1]]);
-            Vector3 v2 = transform.TransformPoint(vertices[triangles[closestTriIndex + 2]]);
+            hitPoint = entry.localToWorld.MultiplyPoint3x4(localRay.origin + localRay.direction * closestT);
+            // World-space distance so the caller can compare hits across meshes on the
+            // same scale — local t is in scaled-ray units and isn't comparable between
+            // objects with different transforms.
+            hitDistance = Vector3.Distance(ray.origin, hitPoint);
 
             // Use the hit triangle's true geometric normal rather than interpolating
             // stored vertex normals. Vertex normals reflect shading intent (smooth/flat)

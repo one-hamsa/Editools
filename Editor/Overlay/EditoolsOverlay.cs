@@ -1415,9 +1415,10 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		"Skinned Meshes",
 		"Snap to SkinnedMeshRenderer surfaces (characters, mechs). The current posed " +
 		"mesh is baked on snap entry so the raycast hits what you see in the viewport.");
-	static readonly GUIContent k_StaticLabel = new GUIContent(
-		"Static Meshes",
-		"Snap to MeshFilter / MeshRenderer surfaces (props, environment, greybox).");
+	static readonly GUIContent k_NonStaticLabel = new GUIContent(
+		"Non Static",
+		"By default only objects flagged Static (GameObject.isStatic) are snap targets. " +
+		"Turn this on to also snap to non-static objects. Orthogonal to the mesh-type masks.");
 	static readonly GUIContent k_TransparentLabel = new GUIContent(
 		"Transparent Meshes",
 		"Also snap to surfaces whose material doesn't write depth (ZWrite Off) — " +
@@ -1426,8 +1427,12 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		"Align Z To Surface",
 		"Align the object's Z+ (forward) axis to the surface normal instead of the " +
 		"default Y+ (up) axis. Useful for objects authored facing down their Z axis.");
+	static readonly GUIContent k_OffsetLabel = new GUIContent(
+		"Surface Offset",
+		"Distance to push the snapped object off the surface along its normal. " +
+		"0 sits flush; positive lifts it away from the surface, negative sinks it in.");
 
-	public override Vector2 GetWindowSize() => new Vector2(220, 4 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(220, 5 * 22 + 4);
 
 	public override void OnGUI(Rect rect)
 	{
@@ -1436,10 +1441,10 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		if (newSkinned != skinned)
 			SnapToSurface.SnapSkinnedMeshes = newSkinned;
 
-		bool stat = SnapToSurface.SnapStaticMeshes;
-		bool newStat = EditorGUILayout.Toggle(k_StaticLabel, stat);
-		if (newStat != stat)
-			SnapToSurface.SnapStaticMeshes = newStat;
+		bool nonStatic = SnapToSurface.SnapNonStatic;
+		bool newNonStatic = EditorGUILayout.Toggle(k_NonStaticLabel, nonStatic);
+		if (newNonStatic != nonStatic)
+			SnapToSurface.SnapNonStatic = newNonStatic;
 
 		bool transparent = SnapToSurface.SnapTransparentMeshes;
 		bool newTransparent = EditorGUILayout.Toggle(k_TransparentLabel, transparent);
@@ -1450,6 +1455,11 @@ class SnapToSurfaceSettingsPopup : PopupWindowContent
 		bool newAlignZ = EditorGUILayout.Toggle(k_AlignZLabel, alignZ);
 		if (newAlignZ != alignZ)
 			SnapToSurface.AlignZToSurface = newAlignZ;
+
+		float offset = SnapToSurface.SurfaceOffset;
+		float newOffset = EditorGUILayout.FloatField(k_OffsetLabel, offset);
+		if (newOffset != offset)
+			SnapToSurface.SurfaceOffset = newOffset;
 	}
 }
 
