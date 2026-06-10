@@ -437,11 +437,10 @@ public class SnapToSurface : EditorWindow
         Vector3 localDir     = entry.worldToLocal.MultiplyVector(ray.direction);
         Ray localRay = new Ray(localOrigin, localDir);
 
-        // A negative-determinant (mirrored) transform reverses triangle winding in local
-        // space, which would invert RayIntersectsTriangle's backface cull. Swap two verts
-        // for those meshes so front/back faces are judged exactly as in world space.
-        bool flipWinding = entry.localToWorld.determinant < 0f;
-
+        // Backface culling happens in authored local space, which always matches what's
+        // rendered: Unity reverses cull mode for negative-determinant (mirrored)
+        // renderers, so the visible side of a triangle is its authored front face
+        // regardless of the transform.
         float closestT = float.MaxValue;
         bool hitFound = false;
         int closestTriIndex = 0;
@@ -449,8 +448,8 @@ public class SnapToSurface : EditorWindow
         int triCount = triangles.Count;
         for (int i = 0; i < triCount; i += 3) {
             Vector3 v0 = vertices[triangles[i]];
-            Vector3 v1 = vertices[triangles[i + (flipWinding ? 2 : 1)]];
-            Vector3 v2 = vertices[triangles[i + (flipWinding ? 1 : 2)]];
+            Vector3 v1 = vertices[triangles[i + 1]];
+            Vector3 v2 = vertices[triangles[i + 2]];
 
             if (RayIntersectsTriangle(localRay, v0, v1, v2, out float t)) {
                 if (t < closestT) {
@@ -480,6 +479,11 @@ public class SnapToSurface : EditorWindow
             // match the actual surface orientation. For snapping we always want the real
             // angle of the triangle we hit.
             hitNormal = Vector3.Cross(v1 - v0, v2 - v0).normalized;
+
+            // Mirrored transforms reverse world-space winding, so the raw cross product
+            // points into the surface the artist sees — flip it back outward.
+            if (entry.localToWorld.determinant < 0f)
+                hitNormal = -hitNormal;
         }
 
         return hitFound;
