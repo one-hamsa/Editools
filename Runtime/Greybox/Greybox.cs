@@ -16,7 +16,7 @@ using UnityEngine;
 /// supplies a vertex density (verts/meter). The mesh is subdivided per local
 /// axis to approach that density, using the world-space bounding-box extents.
 /// Edit-time: rebuilt whenever scale or manager density changes.
-/// Runtime: built once on OnEnable, never again.
+/// Runtime: the serialized bake loads as-is — nothing rebuilds.
 /// </summary>
 public class Greybox : GreyPrimitive
 {

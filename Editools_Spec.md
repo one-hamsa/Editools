@@ -350,14 +350,19 @@ Live FPS overlay in the top-left corner of each Scene View.
 
 Deformable box primitive for level blockout. Created via `GameObject > 3D Object > Greybox`.
 
-**Runtime component (`Greybox.cs`, `[ExecuteAlways]`):**
+**Runtime component (`Greybox.cs`):**
 - Stores `Vector3[8] _corners` in local space — the 8 deformable corners of the box
 - Corner encoding: `bit0=+X, bit1=+Y, bit2=+Z` (matches QuickTransform's box convention)
 - **Pivot at center-bottom**: default Y range `[0, 1]`, XZ range `[-0.5, 0.5]`
 - Auto-requires `MeshFilter`, `MeshRenderer`, `MeshCollider`
 - `RebuildMesh()` — 6 quads × 2 triangles = 12 tris; per-face vertices for flat normals; UVs 0–1 per face; updates both `MeshFilter.sharedMesh` and `MeshCollider.sharedMesh`
 - `GetWorldCorners()` — returns 8 corners transformed to world space (used by QuickTransform)
-- `_mesh` has `HideFlags.HideAndDontSave` — procedural, not serialized; rebuilt on `OnEnable()` after domain reload
+- **Mesh persistence** (`GreyPrimitive.PrepareBakeTargets` / `PersistBakedMeshes`, all push-based at bake time — nothing rebuilds on load or domain reload):
+  - Plain scene object → meshes serialized scene-embedded; `_meshOwnerId` (instance id) makes a duplicated object split off its own mesh on its next rebake
+  - Prefab-contained (prefab stage, prefab instance in a scene, or the asset itself) → meshes baked into `<prefab name> GreyMeshes/<object name>.asset` beside the owning prefab (collider twin as sub-asset); `_meshOwnerGuid` (prefab GUID) marks ownership
+  - The asset is shared by the prefab and all its scene instances: an in-place rebake mutates the asset with zero serialized changes (no prefab overrides), and updates everyone; a rebake from a scene instance that *does* change references (first bake, conversion, split) applies them onto the prefab itself via `ApplyPropertyOverride`
+  - Duplicates split off automatically: a duplicated object inside the same prefab root is detected by reference-sharing scan, a duplicated prefab file by GUID mismatch; an unpacked instance falls back to scene-embedded meshes (never writes into the prefab's asset)
+  - Dirty mesh assets are written to disk only on scene/prefab save (`GreyPrimitiveSaveHook`, hooks both `sceneSaved` and `PrefabStage.prefabSaved`) — inspector drags never hit the disk per tick
 
 **Editor (`GreyboxSettings.cs`):**
 - `GreyboxSettings.DefaultMaterial` — per-project `EditorPrefs` material (GUID key: `Editools_Greybox_DefaultMatGUID`)
