@@ -11,10 +11,9 @@ using UnityEditor.SceneManagement;
 /// any other Unity callback.
 ///
 /// Mesh persistence: a primitive on a plain scene object keeps its meshes scene-embedded (serialized
-/// into the scene file). A primitive that belongs to a prefab bakes into a mesh .asset file beside
-/// the owning prefab instead — a scene-embedded mesh can't be carried by a prefab file, and the
-/// shared asset means the prefab and every scene instance reference the same bake, so rebaking from
-/// anywhere updates all of them.
+/// into the scene file). A primitive that belongs to a prefab embeds its meshes inside the prefab
+/// file itself, as sub-assets — no external mesh files. The prefab and every scene instance
+/// reference the same embedded bake, so rebaking from anywhere updates all of them.
 /// </summary>
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public abstract class GreyPrimitive : MonoBehaviour
@@ -53,7 +52,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     int _meshOwnerId;
     protected Mesh SharedMesh => _mesh;
 
-    // GUID of the prefab asset whose mesh .asset file owns the baked meshes; empty when the meshes
+    // GUID of the prefab asset the baked meshes are embedded in as sub-assets; empty when the meshes
     // are scene-embedded (plain scene object). When set, the owner-id fields are meaningless — the
     // asset itself is the identity, valid on the prefab and on every instance of it.
     [SerializeField, HideInInspector]
@@ -79,9 +78,10 @@ public abstract class GreyPrimitive : MonoBehaviour
     [System.NonSerialized] bool _meshIsLive;
     public bool MeshIsLive => _meshIsLive;
 
-    /// <summary>Called by the save hook after a scene/prefab save. Writes the prefab-owned mesh
-    /// asset to disk if dirty — the scene/prefab save itself doesn't touch that separate .asset
-    /// file. Scene-embedded meshes are persisted by the scene save, so they need nothing here.</summary>
+    /// <summary>Called by the save hook after a scene/prefab save. Writes the prefab the meshes
+    /// are embedded in if they're dirty — a scene save doesn't touch the prefab file (a prefab
+    /// stage save does, making this a no-op there). Scene-embedded meshes are persisted by the
+    /// scene save, so they need nothing here.</summary>
     public void NotifyMeshSaved()
     {
         if (!string.IsNullOrEmpty(_meshOwnerGuid) && _mesh != null)
@@ -203,22 +203,23 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     // Bake state computed by PrepareBakeTargets, consumed by PersistBakedMeshes after generation.
     [System.NonSerialized] string _bakeContainerPath;
-    [System.NonSerialized] bool _bakeCreateAsset;
+    [System.NonSerialized] bool _bakeEmbedMeshes;
 
     /// <summary>
     /// Decides, before generation, which Mesh objects this bake writes into.
     /// Plain scene object: scene-embedded meshes, recreated when the instance id doesn't match (a
     /// duplicated object splits off its own mesh) or when the current mesh is a prefab-owned asset
     /// (an unpacked/detached object must never write into the prefab's bake).
-    /// Prefab-contained: writes in place into the existing mesh asset when this component owns it —
-    /// no serialized change at all, so the prefab and every instance update together. Otherwise
-    /// (first bake, mesh trapped in a scene file, duplicated object or duplicated prefab) fresh
-    /// meshes are created here and PersistBakedMeshes saves them to a new asset file.
+    /// Prefab-contained: writes in place into the mesh embedded in this prefab when this component
+    /// owns it — no serialized change at all, so the prefab and every instance update together.
+    /// Otherwise (first bake, mesh trapped in a scene file or an external asset, duplicated object
+    /// or duplicated prefab) fresh meshes are created here and PersistBakedMeshes embeds them into
+    /// the prefab file as sub-assets.
     /// </summary>
     void PrepareBakeTargets()
     {
         _bakeContainerPath = GetContainingPrefabPath();
-        _bakeCreateAsset = false;
+        _bakeEmbedMeshes = false;
 
         if (_bakeContainerPath == null)
         {
@@ -242,12 +243,23 @@ public abstract class GreyPrimitive : MonoBehaviour
         }
 
         string containerGuid = AssetDatabase.AssetPathToGUID(_bakeContainerPath);
+        bool meshShared = MeshSharedWithinContainer();
         bool writeInPlace = _mesh != null
-                            && AssetDatabase.Contains(_mesh)
+                            && AssetDatabase.GetAssetPath(_mesh) == _bakeContainerPath
                             && _meshOwnerGuid == containerGuid
-                            && !MeshSharedWithinContainer();
+                            && !meshShared;
         if (!writeInPlace)
         {
+            // A superseded bake embedded in this prefab is dead weight once replaced — remove it so
+            // re-bakes don't accumulate sub-assets. A mesh shared with another primitive under the
+            // same root (duplicated object) belongs to the original and stays.
+            if (!meshShared)
+            {
+                if (_mesh != null && AssetDatabase.GetAssetPath(_mesh) == _bakeContainerPath)
+                    AssetDatabase.RemoveObjectFromAsset(_mesh);
+                if (_colliderMesh != null && AssetDatabase.GetAssetPath(_colliderMesh) == _bakeContainerPath)
+                    AssetDatabase.RemoveObjectFromAsset(_colliderMesh);
+            }
             _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
             _meshOwnerId = 0;
             if (UsesColliderMesh)
@@ -256,12 +268,12 @@ public abstract class GreyPrimitive : MonoBehaviour
                 _colliderMeshOwnerId = 0;
             }
             _meshOwnerGuid = containerGuid;
-            _bakeCreateAsset = true;
+            _bakeEmbedMeshes = true;
         }
         else if (UsesColliderMesh && (_colliderMesh == null || !AssetDatabase.Contains(_colliderMesh)))
         {
-            // The asset file exists but has no collider twin yet — bake one; PersistBakedMeshes
-            // adds it to the same file.
+            // The render mesh is embedded but has no collider twin yet — bake one; PersistBakedMeshes
+            // embeds it into the same prefab.
             _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
         }
     }
@@ -307,34 +319,28 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     /// <summary>
     /// Saves freshly baked meshes after generation. Scene-embedded meshes need nothing — the scene
-    /// file carries them. Prefab-owned meshes live in "&lt;prefab name&gt; GreyMeshes/&lt;object
-    /// name&gt;.asset" beside the prefab (collider twin as a sub-asset): created here on a fresh
-    /// bake, or just marked dirty on an in-place bake — the save hook writes dirty mesh assets to
-    /// disk on scene/prefab save, so inspector drags never hit the disk per tick.
+    /// file carries them. Prefab-owned meshes are embedded into the prefab file itself as sub-assets
+    /// (render mesh + collider twin): added here on a fresh bake, or just marked dirty on an
+    /// in-place bake. The actual disk write happens on save — a prefab stage save serializes the
+    /// embedded meshes with the file, a scene save triggers the save hook — so inspector drags
+    /// never hit the disk per tick.
     /// </summary>
     void PersistBakedMeshes()
     {
         if (_bakeContainerPath == null) return;
 
-        if (_bakeCreateAsset)
+        if (_bakeEmbedMeshes)
         {
-            string dir = System.IO.Path.GetDirectoryName(_bakeContainerPath).Replace('\\', '/');
-            string folderName = $"{System.IO.Path.GetFileNameWithoutExtension(_bakeContainerPath)} GreyMeshes";
-            string folder = $"{dir}/{folderName}";
-            if (!AssetDatabase.IsValidFolder(folder))
-                AssetDatabase.CreateFolder(dir, folderName);
-
-            string fileName = string.Join("_", name.Split(System.IO.Path.GetInvalidFileNameChars()));
-            string path = AssetDatabase.GenerateUniqueAssetPath($"{folder}/{fileName}.asset");
-            AssetDatabase.CreateAsset(_mesh, path);
+            AssetDatabase.AddObjectToAsset(_mesh, _bakeContainerPath);
+            EditorUtility.SetDirty(_mesh);
             if (UsesColliderMesh && _colliderMesh != null)
             {
-                AssetDatabase.AddObjectToAsset(_colliderMesh, _mesh);
-                AssetDatabase.ImportAsset(path);
+                AssetDatabase.AddObjectToAsset(_colliderMesh, _bakeContainerPath);
+                EditorUtility.SetDirty(_colliderMesh);
             }
 
             EditorUtility.SetDirty(this);
-            ApplyMeshRefsToPrefab();
+            WritePrefabAndApplyRefs();
         }
         else
         {
@@ -343,14 +349,26 @@ public abstract class GreyPrimitive : MonoBehaviour
             {
                 if (!AssetDatabase.Contains(_colliderMesh))
                 {
-                    AssetDatabase.AddObjectToAsset(_colliderMesh, _mesh);
-                    AssetDatabase.ImportAsset(AssetDatabase.GetAssetPath(_mesh));
+                    AssetDatabase.AddObjectToAsset(_colliderMesh, _bakeContainerPath);
                     EditorUtility.SetDirty(this);
-                    ApplyMeshRefsToPrefab();
+                    WritePrefabAndApplyRefs();
                 }
                 EditorUtility.SetDirty(_colliderMesh);
             }
         }
+    }
+
+    /// <summary>
+    /// Persists newly embedded meshes after a bake outside a prefab stage: writes the prefab file
+    /// (so the sub-assets exist on disk) and pushes the mesh references into the prefab. Inside a
+    /// prefab stage this is a no-op — writing the file under the open stage would conflict with it;
+    /// the stage save serializes both the sub-assets and the references.
+    /// </summary>
+    void WritePrefabAndApplyRefs()
+    {
+        if (PrefabStageUtility.GetPrefabStage(gameObject) == null)
+            AssetDatabase.SaveAssetIfDirty(_mesh);
+        ApplyMeshRefsToPrefab();
     }
 
     /// <summary>

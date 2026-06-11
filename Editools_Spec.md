@@ -359,10 +359,10 @@ Deformable box primitive for level blockout. Created via `GameObject > 3D Object
 - `GetWorldCorners()` — returns 8 corners transformed to world space (used by QuickTransform)
 - **Mesh persistence** (`GreyPrimitive.PrepareBakeTargets` / `PersistBakedMeshes`, all push-based at bake time — nothing rebuilds on load or domain reload):
   - Plain scene object → meshes serialized scene-embedded; `_meshOwnerId` (instance id) makes a duplicated object split off its own mesh on its next rebake
-  - Prefab-contained (prefab stage, prefab instance in a scene, or the asset itself) → meshes baked into `<prefab name> GreyMeshes/<object name>.asset` beside the owning prefab (collider twin as sub-asset); `_meshOwnerGuid` (prefab GUID) marks ownership
-  - The asset is shared by the prefab and all its scene instances: an in-place rebake mutates the asset with zero serialized changes (no prefab overrides), and updates everyone; a rebake from a scene instance that *does* change references (first bake, conversion, split) applies them onto the prefab itself via `ApplyPropertyOverride`
-  - Duplicates split off automatically: a duplicated object inside the same prefab root is detected by reference-sharing scan, a duplicated prefab file by GUID mismatch; an unpacked instance falls back to scene-embedded meshes (never writes into the prefab's asset)
-  - Dirty mesh assets are written to disk only on scene/prefab save (`GreyPrimitiveSaveHook`, hooks both `sceneSaved` and `PrefabStage.prefabSaved`) — inspector drags never hit the disk per tick
+  - Prefab-contained (prefab stage, prefab instance in a scene, or the asset itself) → meshes embedded inside the prefab file itself as sub-assets (render mesh + collider twin) — no external mesh files; `_meshOwnerGuid` (prefab GUID) marks ownership
+  - The embedded meshes are shared by the prefab and all its scene instances: an in-place rebake mutates them with zero serialized changes (no prefab overrides), and updates everyone; a rebake from a scene instance that *does* change references (first bake, conversion, split) applies them onto the prefab itself via `ApplyPropertyOverride`
+  - Duplicates split off automatically: a duplicated object inside the same prefab root is detected by reference-sharing scan, a duplicated prefab file by GUID mismatch; an unpacked instance falls back to scene-embedded meshes (never writes into the prefab's bake); a superseded mesh embedded in the same prefab is removed on split so sub-assets don't accumulate
+  - Dirty embedded meshes are written to disk only on scene/prefab save (`GreyPrimitiveSaveHook`, hooks both `sceneSaved` and `PrefabStage.prefabSaved`; a prefab stage save carries them with the file) — inspector drags never hit the disk per tick
 
 **Editor (`GreyboxSettings.cs`):**
 - `GreyboxSettings.DefaultMaterial` — per-project `EditorPrefs` material (GUID key: `Editools_Greybox_DefaultMatGUID`)
