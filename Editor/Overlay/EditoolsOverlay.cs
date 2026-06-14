@@ -203,6 +203,7 @@ public class EditoolsOverlay : ToolbarOverlay
 		EditoolsMaterialCheckButton.k_Id,
 		EditoolsSelectByMaterialButton.k_Id,
 		EditoolsTriggerDebugButton.k_Id,
+		EditoolsGammaCorrectorButton.k_Id,
 		EditoolsSettingsButton.k_Id
 	) { }
 
