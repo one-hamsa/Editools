@@ -158,7 +158,11 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
 {
     static GUIStyle s_sectionHeader;
 
-    public override Vector2 GetWindowSize() => new Vector2(280, 460);
+    static readonly GUIContent k_TooltipsLabel = new GUIContent(
+        "Scene View Tooltips",
+        "Show the simplified action hints in the Scene View while Grey Primitive Edit Mode is on.");
+
+    public override Vector2 GetWindowSize() => new Vector2(280, 500);
 
     public override void OnGUI(Rect rect)
     {
@@ -178,6 +182,11 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         EditorGUILayout.Space(8);
         EditorGUILayout.LabelField("Greyroad", s_sectionHeader);
         GreyroadSettingsGUI.DrawGUI();
+
+        EditorGUILayout.Space(8);
+        EditorGUILayout.LabelField("Edit Mode", s_sectionHeader);
+        bool tt = EditorGUILayout.Toggle(k_TooltipsLabel, GPEdit.ShowTooltips);
+        if (tt != GPEdit.ShowTooltips) GPEdit.ShowTooltips = tt;
     }
 }
 #endif
