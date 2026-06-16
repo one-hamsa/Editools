@@ -66,7 +66,13 @@ public class MassRename : EditorWindow
 
         // Asset mode: use Selection.assetGUIDs for reliable cross-folder selection.
         // Hierarchy mode: use Selection.gameObjects.
-        bool isAssetMode = hasAssetGUIDs && !hasGameObjects;
+        // Selecting prefab assets in the Project view populates BOTH assetGUIDs AND
+        // gameObjects (a prefab's root is a GameObject), so a plain "no gameObjects"
+        // test routes prefabs into hierarchy mode — which only sets the in-memory
+        // name and never renames the file. Persistent GameObjects are project assets,
+        // so treat them as asset mode; only non-persistent (scene) objects are hierarchy.
+        bool isAssetMode = hasAssetGUIDs &&
+            (!hasGameObjects || Selection.gameObjects.All(go => EditorUtility.IsPersistent(go)));
 
         int count = isAssetMode ? Selection.assetGUIDs.Length
             : (Selection.gameObjects != null ? Selection.gameObjects.Length : 0);
