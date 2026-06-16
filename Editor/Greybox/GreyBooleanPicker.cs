@@ -3,9 +3,9 @@ using UnityEditor;
 using UnityEngine;
 
 /// <summary>
-/// One-shot scene-view picker for the Boolean "Pick" button. After Pick is pressed, the next
-/// left-click in the scene on a Grey object assigns it as the Subject's Operator, then exits.
-/// This complements the drag-and-drop reference field — it does not replace it.
+/// One-shot picker for the Boolean "Pick" button. After Pick is pressed, the next click on a Grey
+/// object — in the scene view OR in the Hierarchy — assigns it as the Subject's Operator, then
+/// exits. This complements the drag-and-drop reference field — it does not replace it.
 /// </summary>
 static class GreyBooleanPicker
 {
@@ -19,14 +19,34 @@ static class GreyBooleanPicker
         s_subject = subject;
         SceneView.duringSceneGui -= OnSceneGui;
         SceneView.duringSceneGui += OnSceneGui;
+        Selection.selectionChanged -= OnSelectionChanged;
+        Selection.selectionChanged += OnSelectionChanged;
         SceneView.RepaintAll();
     }
 
     static void Cancel()
     {
         SceneView.duringSceneGui -= OnSceneGui;
+        Selection.selectionChanged -= OnSelectionChanged;
         s_subject = null;
         SceneView.RepaintAll();
+    }
+
+    // Hierarchy path: the scene picker holds the default control so scene clicks can't change the
+    // selection, which means any selection change while picking came from the Hierarchy. Treat a
+    // change to another Grey object as the pick. Non-Grey selections (and the Subject) are ignored,
+    // so the artist can keep clicking until they land on a valid Operator.
+    static void OnSelectionChanged()
+    {
+        if (s_subject == null) { Cancel(); return; }
+
+        var subject = s_subject;
+        var go = Selection.activeGameObject;
+        var picked = go != null ? go.GetComponentInParent<GreyPrimitive>() : null;
+        if (picked == null || picked == subject) return;
+
+        AssignOperator(subject, picked);
+        Cancel();
     }
 
     static void OnSceneGui(SceneView sv)

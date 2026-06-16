@@ -68,6 +68,7 @@ static class GreyBooleanOrchestrator
     {
         var op = subject.BooleanOperator;
 
+        bool created = result == null;
         if (result == null)
             result = CreateResultWrapper(subject, op);
         else if (result.Operator != null && result.Operator != op)
@@ -84,6 +85,10 @@ static class GreyBooleanOrchestrator
 
         result.RebuildMesh();
         EditorUtility.SetDirty(result);
+
+        // The newly created result is the "final object" — select it so the artist lands on it.
+        if (created)
+            Selection.activeObject = result.gameObject;
 
         // If this result is itself an input to a further boolean, propagate the change up the chain.
         ReBakeChain(OwningResult(result), depth + 1);

@@ -13,15 +13,24 @@ with screenshot capture, and a set of scene editing accelerators.
 
 ### Runtime
 - `Runtime/MaterialOverride/SceneMaterialOverride.cs` — centralized scene material swapping
+- `Runtime/Greybox/GreyPrimitive.cs` — abstract base for the Grey Primitive family (corner storage, procedural mesh baking/persistence)
 - `Runtime/Greybox/Greybox.cs` — deformable box primitive; stores 8 local-space corners, rebuilds procedural mesh on change
+- `Runtime/Greypipe/Greypipe.cs` — spline-based tube/pipe grey primitive
+- `Runtime/Greyroad/Greyroad.cs` — spline-based road grey primitive (with banking)
 - `Runtime/Editools.asmdef` — runtime assembly, all platforms
 
 ### Editor
 - `Editor/Overlay/EditoolsOverlay.cs` — toolbar overlay, screenshot capture, button strip
 - `Editor/Greybox/GreyboxSettings.cs` — per-project default material pref + GameObject/3D Object/Greybox menu item + settings popup
 - `Editor/HierarchyHeatmap/HierarchyHeatmap.cs` — recent-selection heatmap in Hierarchy
-- `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag transform tool
+- `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag whole-object transform tool
 - `Editor/QuickTransform/QuickTransformConfig.cs` — per-project config SO for QuickTransform
+- `Editor/GPEditMode/GPEdit.cs` — Grey Primitive Edit Mode: toggle (Alt+~) + per-frame dispatch by primitive type
+- `Editor/GPEditMode/GPEditGreybox.cs` — Greybox sub-element editing (faces, edges, extrude)
+- `Editor/GPEditMode/GPEditSpline.cs` — Greypipe/Greyroad spline editing (vertices, handles, banking, extend)
+- `Editor/GPEditMode/GPEditShared.cs` — shared hover math/colors (independent of QuickTransform)
+- `Editor/GPEditMode/GPEditTooltip.cs` — Scene View tooltip for the selected primitive type
+- `Editor/GPEditMode/GPWindowOverlay.cs` — floating Scene View panel + `duringSceneGui` hook lifecycle
 - `Editor/SnapToSurface/SnapToSurface.cs` — Alt+A snap-to-surface mode
 - `Editor/SceneCameraUndo/SceneCameraUndo.cs` — Shift+Z/Y scene camera undo/redo
 - `Editor/CopyPasteTransform/CopyPasteTransformComponent.cs` — Alt+Ctrl+C/V/X transform clipboard
@@ -121,6 +130,12 @@ durations, and enable/disable toggles. All stored in `EditorPrefs`.
 Hold W/E/R + drag anywhere in Scene View to move/rotate/scale without gizmo handles.
 Standard tool switching (tap W/E/R) still works normally — the hold-and-drag only
 activates after a configurable delay (`ModeKeyDelaySec = 0.1s`).
+
+**Scope:** QuickTransform operates only on whole-object transforms — it has no Grey Primitive
+special-casing. Per-element editing of Grey Primitives (Greybox faces/edges, Greypipe/Greyroad
+spline vertices and handles) lives in the separate Grey Primitive Edit Mode (§13); the two
+coexist in the Scene View. On a Greybox/Greypipe/Greyroad, QuickTransform behaves exactly as it
+does on any other object.
 
 **Bounding Box:**
 - Single selection: OBB aligned to object's local axes (encompasses all child MeshRenderers
@@ -375,18 +390,42 @@ Deformable box primitive for level blockout. Created via `GameObject > 3D Object
   - Fallback (no surface hit): places at view-pivot depth along the stored ray, identity rotation
   - Full undo via `Undo.RegisterCreatedObjectUndo`
 
-**QuickTransform integration (`W` + edge hover on Greybox):**
-- In `DetectMoveHover`: checks for single selected Greybox; if mouse is within `EdgeHoverPx` of an actual mesh edge (actual corners, not OBB), sets `HoverKind.Edge`
-- In `InitMove`: when `HoverKind.Edge` + Greybox → sets up `greyboxTarget`, snapshots corners, computes drag plane (normal = edge direction, point = edge midpoint)
-- In `ApplyMove`: raycasts onto drag plane, converts world delta to local space, modifies both edge corners, calls `RebuildMesh()`, marks dirty
-- `DrawGreyboxWireframe()` — draws 12 actual mesh edges (not OBB) during all hover/drag phases; highlighted edge shown in Move-mode yellow when hovered
-- Undo registered on the `Greybox` component (not Transform); Shift+duplicate skipped for edge drags
-- Face-move and Rotate/Scale modes work normally on Greybox (OBB-based, no special case)
+**Editing — Grey Primitive Edit Mode (not QuickTransform):**
+- Per-element Greybox editing — face toggle, edge deform, face extrude — lives in Grey Primitive
+  Edit Mode (§13). QuickTransform has no Greybox-specific path: it treats a Greybox like any other
+  object (whole-object move/rotate/scale on its renderer-derived OBB).
+- Edit Mode uses `GetWorldCorners()` for edge/face hover math. Corners are local-space, so a
+  world-space drag delta is converted via `InverseTransformVector` before being written back.
+- After heavy corner deformation the OBB QuickTransform uses for rotate/scale may not perfectly
+  hug the geometry — acceptable for blockout.
 
-**Design constraints:**
-- Corners are in local space; QuickTransform always converts world delta via `InverseTransformVector` before applying
-- The drag plane is perpendicular to the edge direction — movement is 2D-free on that plane (no single-axis lock)
-- After deformation, OBB face detection (used by Rotate/Scale) may not perfectly match geometry for heavily skewed shapes — acceptable for greyboxing use
+### 13. Grey Primitive Edit Mode (Editor, `Editor/GPEditMode/`)
+
+A continuous, always-on editing layer for the **selected** Grey Primitive (Greybox / Greypipe /
+Greyroad). When enabled it draws the type-specific gizmos and routes mouse input straight to the
+primitive's sub-structure — no mode-key hold required. This is the home for all per-element Grey
+Primitive editing; **QuickTransform handles only whole-object transforms**, and the two coexist:
+Edit Mode consumes an event only when the cursor is over one of its sub-elements, otherwise the
+event falls through to QuickTransform.
+
+**Toggle:** `Alt+~` while the Scene View is focused and a single Grey Primitive is selected
+(`ShortcutManager`, rebindable in Edit ▸ Shortcuts). State is `SessionState`-backed — it persists
+across selection changes for the editor session and resets on restart.
+
+**Control grammar (shared across all three types):**
+`LMB` = manipulate · `Shift` = alternative action · `MMB` = remove/reset · `RMB` = add/create · `Ctrl` = isolate
+
+**Files:**
+- `GPEdit.cs` — toggle state, hotkey, and the `duringSceneGui` dispatch by primitive type
+- `GPEditGreybox.cs` — Greybox sub-element editing: face toggle, edge deform, face normal/skew, extrude
+- `GPEditSpline.cs` — Greypipe/Greyroad spline editing via a shared `GPSpline` adapter: vertex move, bezier handles, banking, extend-from-end, insert/delete vertex
+- `GPEditShared.cs` — shared hover math, colors, and lookup tables; deliberately independent of QuickTransform
+- `GPEditTooltip.cs` — Scene View tooltip listing the actions for the selected primitive type
+- `GPWindowOverlay.cs` — floating Scene View panel; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe), so there is no `[InitializeOnLoad]` side effect
+
+**Migration note:** This system replaced QuickTransform's former Special (Q-held) mode and its
+Greybox edge/extrude special-casing. The Greypipe girth and Greyroad width quick-adjust drags
+that lived in the old Special mode were dropped and not carried over.
 
 ---
 

@@ -14,6 +14,11 @@ public class SnapToSurface : EditorWindow
     private static HashSet<GameObject> ignoredObjects = new HashSet<GameObject>();
     private static GameObject lastHitSurfaceObject;
 
+    /// <summary>True while an object is being placed (Snap To Surface, or the snap that follows a
+    /// Ctrl+G create). Grey Primitive Edit Mode reads this to stop intercepting the scene LMB, so the
+    /// confirm-click lands on the placement instead of grabbing a face/edge under the cursor.</summary>
+    internal static bool IsSnapping => isSnapping;
+
     // Per-session scene snapshot built on snap entry so MouseMove doesn't have to
     // FindObjectsOfType<MeshFilter>() and re-fetch mesh.vertices/triangles every frame
     // (mesh.vertices returns a fresh array each call — that was the GC hotspot).

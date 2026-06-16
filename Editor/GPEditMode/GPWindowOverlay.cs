@@ -87,7 +87,7 @@ class GPWindowOverlay : Overlay
 
         if (gp is Greybox || gp is GreyBooleanResult)
         {
-            EditorGUILayout.LabelField("Functions", s_header);
+            EditorGUILayout.LabelField("Boolean", s_header);
             DrawBooleanFunctions(gp);
         }
     }
@@ -172,17 +172,19 @@ class GPWindowOverlay : Overlay
                 GreyBooleanPicker.Begin(gp);
         }
 
+        // Select A / B reach into a Boolean Result's nested inputs so its constituents are easy to grab
+        // through the result. They make sense only on the result itself — a Greybox that carries an
+        // operator is a Subject whose inputs now live under the result, so both are disabled there.
+        var result = gp as GreyBooleanResult;
         using (new EditorGUILayout.HorizontalScope())
         {
-            if (GUILayout.Button(new GUIContent("Select A", "Select the Subject (this object).")))
-                Selection.activeObject = gp.gameObject;
+            using (new EditorGUI.DisabledScope(result == null || result.Subject == null))
+                if (GUILayout.Button(new GUIContent("Select A", "Select this Boolean Result's Subject (the object being carved).")))
+                    Selection.activeObject = result.Subject.gameObject;
 
-            using (new EditorGUI.DisabledScope(gp.BooleanOperator == null))
-            {
-                if (GUILayout.Button(new GUIContent("Select B", "Select the Operator (the object being subtracted).")))
-                    if (gp.BooleanOperator != null)
-                        Selection.activeObject = gp.BooleanOperator.gameObject;
-            }
+            using (new EditorGUI.DisabledScope(result == null || result.Operator == null))
+                if (GUILayout.Button(new GUIContent("Select B", "Select this Boolean Result's Operator (the object being subtracted).")))
+                    Selection.activeObject = result.Operator.gameObject;
         }
     }
 

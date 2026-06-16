@@ -114,6 +114,10 @@ static partial class GPEdit
 
         if (!Enabled || gp == null) return;
 
+        // While an object is being placed (post-create snap or Snap To Surface), stand down — otherwise
+        // a face/edge under the cursor would swallow the LMB that confirms the placement.
+        if (SnapToSurface.IsSnapping) return;
+
         switch (gp)
         {
             case Greybox gb:   OnGreyboxSceneGUI(sv, e, gb);   break;

@@ -40,7 +40,7 @@ static partial class QuickTransform
 {
     // ─── Enums ──────────────────────────────────────────────────
 
-    enum Mode { None, Move, Rotate, Scale, Special }
+    enum Mode { None, Move, Rotate, Scale }
     enum Phase { Idle, Ready, Dragging }
     enum HoverKind { None, AllSideFaces, Face, Edge }
 
@@ -131,7 +131,7 @@ static partial class QuickTransform
     static Phase phase;
 
     // Key tracking
-    static bool wHeld, eHeld, rHeld, qHeld;
+    static bool wHeld, eHeld, rHeld;
     static bool rmbHeld;
     static double modeKeyDownTime;   // EditorApplication.timeSinceStartup when mode key first pressed
     static Mode suppressKeyUpFor;
@@ -186,30 +186,6 @@ static partial class QuickTransform
     static float   scaleStartMouseDist;
     static bool    scaleUniform;                // RMB = uniform scale
     static float   scaleUniformStartScreenDist; // starting screen-space distance from anchor to mouse
-
-    // ─── Greybox Edge Deform State ──────────────────────────────
-    //
-    // Active only when dragging an edge on a Greybox in Move mode.
-    // greyboxTarget != null signals that ApplyMove should deform instead of translate.
-
-    static Greybox   greyboxTarget;
-    static Vector3[] greyboxStartCorners;    // corner snapshot at drag start
-    static int       greyboxEdgeCornerA;     // index of first corner of the edge
-    static int       greyboxEdgeCornerB;     // index of second corner of the edge
-    static Vector3   greyboxEdgeHitStart;    // world-space raycast hit when drag began
-    static Vector3   greyboxEdgePlaneNormal; // normal of drag plane (canonical local axis of the edge)
-    static Vector3   greyboxEdgePlanePoint;  // point on drag plane (= edge midpoint at drag start)
-    static int       greyboxEdgeAxisIdx;     // 0=X,1=Y,2=Z — canonical local axis of the locked edge
-
-    // ─── Greybox Extrude State ──────────────────────────────────
-    //
-    // Active when R+MMB drags a new greybox out of an existing greybox face.
-    // extrudeNewGb != null gates extrude behaviour in ApplyDrag and HandleReady/Dragging.
-
-    static Greybox extrudeNewGb;          // the greybox being grown
-    static Vector3 extrudeFaceCenter;     // world-space center of the source face (= pivot of new greybox)
-    static Vector3 extrudeFaceNormal;     // world-space outward normal of the source face
-    static float   extrudeStartMouseDist; // mouse projection distance at drag start
 
     // ─── Undo ─────────────────────────────────────────────────
 
@@ -278,7 +254,7 @@ static partial class QuickTransform
 
         if (e.type == EventType.MouseLeaveWindow)
         {
-            wHeld = eHeld = rHeld = qHeld = false;
+            wHeld = eHeld = rHeld = false;
             rmbHeld = false;
             if (phase == Phase.Dragging)
             {
@@ -303,7 +279,7 @@ static partial class QuickTransform
         // Early-out if disabled via toolbar toggle or overlay hidden
         if (!EditoolsOverlay.IsActive || !Enabled)
         {
-            wHeld = eHeld = rHeld = qHeld = false;
+            wHeld = eHeld = rHeld = false;
             if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
             Tools.hidden = false;
             return;
@@ -313,8 +289,7 @@ static partial class QuickTransform
         {
             bool suppress = (suppressKeyUpFor == Mode.Move    && e.keyCode == KeyCode.W)
                          || (suppressKeyUpFor == Mode.Rotate  && e.keyCode == KeyCode.E)
-                         || (suppressKeyUpFor == Mode.Scale   && e.keyCode == KeyCode.R)
-                         || (suppressKeyUpFor == Mode.Special && e.keyCode == KeyCode.Q);
+                         || (suppressKeyUpFor == Mode.Scale   && e.keyCode == KeyCode.R);
             // Clear our flag, but do NOT consume the KeyUp — Unity needs it to update its
             // own internal keystate (otherwise scene-view RMB nav thinks the key is still
             // held and the camera flies in that direction next time RMB is pressed).
@@ -355,72 +330,11 @@ static partial class QuickTransform
             && (EditorApplication.timeSinceStartup - modeKeyDownTime) >= ModeKeyDelaySec;
         if (showPreview)
         {
-            ComputeBoundsForMode(selected, heldMode);
+            ComputeBounds(selected);
             DetectHover(sv, e.mousePosition, heldMode);
             if (e.type == EventType.Repaint)
             {
-                Greypipe previewPipe = selected.Length == 1 ? selected[0].GetComponent<Greypipe>() : null;
-                Greyroad previewRoad = selected.Length == 1 ? selected[0].GetComponent<Greyroad>() : null;
-                bool hoveringPipeVertex = previewPipe != null
-                    && (greypipeHoveredVertex >= 0 || greypipeHoveredBezierVertex >= 0);
-                bool hoveringRoadVertex = previewRoad != null
-                    && (greyroadHoveredVertex >= 0
-                        || greyroadHoveredBezierVertex >= 0
-                        || greyroadHoveredBankingVertex >= 0);
-
-                // In Rotate mode, Greypipe rotates as a whole object — skip spline overlay so the
-                // standard OBB+gizmo flow takes over (matching every other selectable object).
-                bool greypipeHasVertexOverlay = previewPipe != null && heldMode != Mode.Rotate;
-                bool greyroadHasVertexOverlay = previewRoad != null && heldMode != Mode.Rotate;
-
-                if (greypipeHasVertexOverlay)
-                {
-                    // Greypipe: spline + handles. Suppress bounding box when hovering a vertex —
-                    // the vertex gizmos take over.
-                    if (!hoveringPipeVertex && heldMode != Mode.Special)
-                        DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
-                    DrawGreypipeSpline(previewPipe, -1);
-                    DrawGreypipeVertexHandles(previewPipe, greypipeHoveredVertex);
-                }
-                else if (greyroadHasVertexOverlay)
-                {
-                    if (heldMode == Mode.Special)
-                    {
-                        DrawGreyroadBoundsOutline(previewRoad);
-                        DrawGreyroadSpline(previewRoad, -1);
-                        DrawGreyroadVertexHandles(previewRoad, greyroadHoveredVertex);
-                        DrawGreyroadFaceDots(previewRoad, greyroadHoveredFace);
-                    }
-                    else
-                    {
-                        if (!hoveringRoadVertex)
-                            DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
-                        DrawGreyroadSpline(previewRoad, -1);
-                        DrawGreyroadVertexHandles(previewRoad, greyroadHoveredVertex);
-                    }
-                }
-                else if (heldMode == Mode.Move && selected.Length == 1)
-                {
-                    var previewGb = selected[0].GetComponent<Greybox>();
-                    if (previewGb != null)
-                    {
-                        HoverKind boxKind  = hoveredKind == HoverKind.Edge ? HoverKind.None : hoveredKind;
-                        int       boxIndex = hoveredKind == HoverKind.Edge ? 0 : hoveredIndex;
-                        DrawBoundsBox(boxKind, boxIndex, heldMode, previewGb);
-                        previewGb.GetWorldCorners(s_greyboxCorners);
-                        DrawGreyboxEdgesOnly(s_greyboxCorners,
-                            hoveredKind == HoverKind.Edge ? hoveredIndex : -1);
-                    }
-                    else
-                        DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
-                }
-                else if (heldMode == Mode.Special && selected.Length == 1)
-                {
-                    var previewGb = selected[0].GetComponent<Greybox>();
-                    DrawBoundsBox(hoveredKind, hoveredIndex, heldMode, previewGb);
-                }
-                else
-                    DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
+                DrawBoundsBox(hoveredKind, hoveredIndex, heldMode);
 
                 if (hoveredKind == HoverKind.AllSideFaces)
                 {
@@ -465,13 +379,12 @@ static partial class QuickTransform
 
         if (e.type == EventType.KeyDown && !e.alt && !e.control && !rmbHeld)
         {
-            bool anyPrev = wHeld || eHeld || rHeld || qHeld;
+            bool anyPrev = wHeld || eHeld || rHeld;
             if (e.keyCode == KeyCode.W) wHeld = true;
             if (e.keyCode == KeyCode.E) eHeld = true;
             if (e.keyCode == KeyCode.R) rHeld = true;
-            if (e.keyCode == KeyCode.Q) qHeld = true;
             // Record timestamp when we first enter a mode key hold
-            if (!anyPrev && (wHeld || eHeld || rHeld || qHeld))
+            if (!anyPrev && (wHeld || eHeld || rHeld))
                 modeKeyDownTime = EditorApplication.timeSinceStartup;
         }
         if (e.type == EventType.KeyUp)
@@ -479,7 +392,6 @@ static partial class QuickTransform
             if (e.keyCode == KeyCode.W) wHeld = false;
             if (e.keyCode == KeyCode.E) eHeld = false;
             if (e.keyCode == KeyCode.R) rHeld = false;
-            if (e.keyCode == KeyCode.Q) qHeld = false;
         }
     }
 
@@ -488,15 +400,6 @@ static partial class QuickTransform
         if (wHeld) return Mode.Move;
         if (eHeld) return Mode.Rotate;
         if (rHeld) return Mode.Scale;
-        if (qHeld)
-        {
-            var sel = Selection.transforms;
-            if (sel != null && sel.Length == 1 && sel[0] != null
-                && (sel[0].GetComponent<Greybox>() != null
-                 || sel[0].GetComponent<Greypipe>() != null
-                 || sel[0].GetComponent<Greyroad>() != null))
-                return Mode.Special;
-        }
         return Mode.None;
     }
 
@@ -506,302 +409,14 @@ static partial class QuickTransform
     {
         if (heldMode == Mode.None) return;
 
-        // ── Special mode (Q held) ──
-        if (heldMode == Mode.Special && selected.Length == 1)
-        {
-            // Greypipe special mode
-            var pipe = selected[0].GetComponent<Greypipe>();
-            if (pipe != null)
-            {
-                HandleGreypipeSpecialIdle(e, sv, pipe, selected);
-                return;
-            }
-
-            // Greyroad special mode: LMB toggles a face / inserts vertex / extends; RMB deletes vertex; MMB adjusts width
-            var road = selected[0].GetComponent<Greyroad>();
-            if (road != null)
-            {
-                HandleGreyroadSpecialIdle(e, sv, road, selected);
-                return;
-            }
-
-            // Greybox special mode: LMB toggles a face, RMB extrudes
-            var gb = selected[0].GetComponent<Greybox>();
-            if (gb != null && e.type == EventType.MouseDown)
-            {
-                ComputeBoundsForMode(selected, Mode.Special);
-                int face = CheckFaceHandleHover(sv, e.mousePosition);
-                if (face < 0) face = CheckYFaceHover(sv, e.mousePosition);
-                if (face < 0) face = CheckSideFaceHover(sv, e.mousePosition);
-
-                if (e.button == 0) // LMB: toggle face
-                {
-                    if (face >= 0)
-                    {
-                        Undo.RegisterCompleteObjectUndo(gb, "Toggle Greybox Face");
-                        gb.ActiveFaces[face] = !gb.ActiveFaces[face];
-                        gb.RebuildMesh();
-                        EditorUtility.SetDirty(gb);
-                        e.Use();
-                    }
-                    return;
-                }
-
-                if (e.button == 1) // RMB: extrude a linked box — seam welded 1:1 to the source face
-                {
-                    if (face >= 0)
-                    {
-                        activeMode       = Mode.Special;
-                        dragTargets      = selected;
-                        SnapshotTransforms();
-                        selectionPivot   = ComputePivot();
-                        lockedKind       = HoverKind.Face;
-                        lockedIndex      = face;
-                        dragButton       = 1;
-                        shiftHeldOnPress = false;
-                        didDuplicate     = false;
-
-                        BeginExtrude(gb, face, e.mousePosition, hideFaces: true, linked: true);
-
-                        phase         = Phase.Ready;
-                        mousePressPos = e.mousePosition;
-
-                        int extrudeCtrlId = GUIUtility.GetControlID(FocusType.Passive);
-                        HandleUtility.AddDefaultControl(extrudeCtrlId);
-                        GUIUtility.hotControl = extrudeCtrlId;
-                        e.Use();
-                    }
-                    return;
-                }
-
-                if (e.button == 2) // MMB: extrude an independent box, keeping all faces
-                {
-                    if (face >= 0)
-                    {
-                        activeMode       = Mode.Special;
-                        dragTargets      = selected;
-                        SnapshotTransforms();
-                        selectionPivot   = ComputePivot();
-                        lockedKind       = HoverKind.Face;
-                        lockedIndex      = face;
-                        dragButton       = 2;
-                        shiftHeldOnPress = false;
-                        didDuplicate     = false;
-
-                        BeginExtrude(gb, face, e.mousePosition, hideFaces: false, linked: false);
-
-                        phase         = Phase.Ready;
-                        mousePressPos = e.mousePosition;
-
-                        int extrudeCtrlId = GUIUtility.GetControlID(FocusType.Passive);
-                        HandleUtility.AddDefaultControl(extrudeCtrlId);
-                        GUIUtility.hotControl = extrudeCtrlId;
-                        e.Use();
-                    }
-                    return;
-                }
-            }
-            return; // Special mode consumes all other input
-        }
-
         if (e.type != EventType.MouseDown) return;
         if (e.button != 0 && e.button != 1 && e.button != 2) return;
 
-        // Greypipe: vertex / bezier-handle clicks take priority over OBB hover.
-        // Rotate mode (E) does NOT engage vertex mode — Greypipe rotates as a whole object.
-        if (selected.Length == 1)
-        {
-            var pipe = selected[0].GetComponent<Greypipe>();
-            if (pipe != null && heldMode != Mode.Rotate)
-            {
-                int vtx = DetectGreypipeVertexHover(sv, e.mousePosition, pipe);
-
-                // MMB in Move mode resets the hovered Bezier handle to identity. MMB on the
-                // vertex itself is a no-op (the user has to grab a handle endpoint to reset it).
-                if (e.button == 2 && heldMode == Mode.Move)
-                {
-                    if (vtx >= 0) { e.Use(); return; }
-                    DetectGreypipeBezierHover(sv, e.mousePosition, pipe, out int rvtx, out int rside);
-                    if (rvtx >= 0)
-                    {
-                        Undo.IncrementCurrentGroup();
-                        int g = Undo.GetCurrentGroup();
-                        Undo.RegisterCompleteObjectUndo(pipe, "Reset Greypipe Handle");
-                        pipe.ResetVertexHandle(rvtx);
-                        pipe.RebuildMesh();
-                        EditorUtility.SetDirty(pipe);
-                        Undo.SetCurrentGroupName("Reset Greypipe Handle");
-                        Undo.CollapseUndoOperations(g);
-                    }
-                    e.Use();
-                    return;
-                }
-                if (e.button == 2) return;  // MMB in other modes — ignore (consumed)
-
-                if (vtx >= 0)
-                {
-                    // Vertex takes priority over handle endpoints when ambiguous.
-                    activeMode = heldMode;
-                    dragTargets = selected;
-                    SnapshotTransforms();
-                    selectionPivot = ComputePivot();
-
-                    BeginGreypipeVertexTransform(pipe, vtx, activeMode, e.mousePosition);
-                    phase = Phase.Ready;
-                    mousePressPos = e.mousePosition;
-                    dragButton = e.button;
-                    shiftHeldOnPress = e.shift;
-                    didDuplicate = false;
-
-                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
-                    HandleUtility.AddDefaultControl(ctrlId);
-                    GUIUtility.hotControl = ctrlId;
-                    e.Use();
-                    return;
-                }
-
-                // No vertex hit — check for bezier handle endpoint (Move mode only).
-                if (heldMode == Mode.Move && (e.button == 0 || e.button == 1))
-                {
-                    DetectGreypipeBezierHover(sv, e.mousePosition, pipe, out int bvtx, out int bside);
-                    if (bvtx >= 0)
-                    {
-                        activeMode = heldMode;
-                        dragTargets = selected;
-                        SnapshotTransforms();
-                        selectionPivot = ComputePivot();
-
-                        BeginGreypipeBezierHandleDrag(pipe, bvtx, bside, e.mousePosition);
-                        phase = Phase.Ready;
-                        mousePressPos = e.mousePosition;
-                        dragButton = e.button;
-                        shiftHeldOnPress = false;
-                        didDuplicate = false;
-
-                        int ctrlId2 = GUIUtility.GetControlID(FocusType.Passive);
-                        HandleUtility.AddDefaultControl(ctrlId2);
-                        GUIUtility.hotControl = ctrlId2;
-                        e.Use();
-                        return;
-                    }
-                }
-            }
-
-            // Greyroad: vertex / banking / bezier-handle clicks take priority over OBB hover.
-            var roadSel = selected[0].GetComponent<Greyroad>();
-            if (roadSel != null && heldMode != Mode.Rotate)
-            {
-                int vtx = DetectGreyroadVertexHover(sv, e.mousePosition, roadSel);
-
-                // MMB in Move mode: reset Bezier handle (priority) or Banking handle. MMB on
-                // the vertex itself is a no-op (must grab a handle endpoint).
-                if (e.button == 2 && heldMode == Mode.Move)
-                {
-                    if (vtx >= 0) { e.Use(); return; }
-
-                    DetectGreyroadBezierHover(sv, e.mousePosition, roadSel, out int rvtx, out int rside);
-                    if (rvtx >= 0)
-                    {
-                        Undo.IncrementCurrentGroup();
-                        int g = Undo.GetCurrentGroup();
-                        Undo.RegisterCompleteObjectUndo(roadSel, "Reset Greyroad Handle");
-                        roadSel.ResetVertexHandle(rvtx);
-                        roadSel.RebuildMesh();
-                        EditorUtility.SetDirty(roadSel);
-                        Undo.SetCurrentGroupName("Reset Greyroad Handle");
-                        Undo.CollapseUndoOperations(g);
-                        e.Use();
-                        return;
-                    }
-
-                    DetectGreyroadBankingHover(sv, e.mousePosition, roadSel, out int kvtx, out int kside);
-                    if (kvtx >= 0)
-                    {
-                        HandleGreyroadBankingMMBReset(roadSel, kvtx);
-                        e.Use();
-                        return;
-                    }
-                    e.Use();
-                    return;
-                }
-                if (e.button == 2) return;
-
-                if (vtx >= 0)
-                {
-                    activeMode = heldMode;
-                    dragTargets = selected;
-                    SnapshotTransforms();
-                    selectionPivot = ComputePivot();
-
-                    BeginGreyroadVertexTransform(roadSel, vtx, activeMode, e.mousePosition);
-                    phase = Phase.Ready;
-                    mousePressPos = e.mousePosition;
-                    dragButton = e.button;
-                    shiftHeldOnPress = e.shift;
-                    didDuplicate = false;
-
-                    int ctrlId = GUIUtility.GetControlID(FocusType.Passive);
-                    HandleUtility.AddDefaultControl(ctrlId);
-                    GUIUtility.hotControl = ctrlId;
-                    e.Use();
-                    return;
-                }
-
-                if (heldMode == Mode.Move && (e.button == 0 || e.button == 1))
-                {
-                    DetectGreyroadBezierHover(sv, e.mousePosition, roadSel, out int bvtx, out int bside);
-                    if (bvtx >= 0)
-                    {
-                        activeMode = heldMode;
-                        dragTargets = selected;
-                        SnapshotTransforms();
-                        selectionPivot = ComputePivot();
-
-                        BeginGreyroadBezierHandleDrag(roadSel, bvtx, bside, e.mousePosition);
-                        phase = Phase.Ready;
-                        mousePressPos = e.mousePosition;
-                        dragButton = e.button;
-                        shiftHeldOnPress = false;
-                        didDuplicate = false;
-
-                        int ctrlId2 = GUIUtility.GetControlID(FocusType.Passive);
-                        HandleUtility.AddDefaultControl(ctrlId2);
-                        GUIUtility.hotControl = ctrlId2;
-                        e.Use();
-                        return;
-                    }
-
-                    // Banking handle (lower priority, smaller hit radius).
-                    DetectGreyroadBankingHover(sv, e.mousePosition, roadSel, out int kvtx, out int kside);
-                    if (kvtx >= 0)
-                    {
-                        activeMode = heldMode;
-                        dragTargets = selected;
-                        SnapshotTransforms();
-                        selectionPivot = ComputePivot();
-
-                        BeginGreyroadBankingHandleDrag(roadSel, kvtx, kside, e.mousePosition);
-                        phase = Phase.Ready;
-                        mousePressPos = e.mousePosition;
-                        dragButton = e.button;
-                        shiftHeldOnPress = false;
-                        didDuplicate = false;
-
-                        int ctrlId3 = GUIUtility.GetControlID(FocusType.Passive);
-                        HandleUtility.AddDefaultControl(ctrlId3);
-                        GUIUtility.hotControl = ctrlId3;
-                        e.Use();
-                        return;
-                    }
-                }
-            }
-        }
-
-        // MMB outside Greypipe vertex: consume to block scene-nav, but take no action.
+        // MMB: consume to block scene-nav, but take no action.
         if (e.button == 2) { e.Use(); return; }
 
         // RMB is used for face-normal movement (Move) and uniform scaling (Scale).
-        // For other modes (Rotate, Special), consume the RMB MouseDown so Unity's scene-view
+        // For other modes (Rotate), consume the RMB MouseDown so Unity's scene-view
         // camera fly-through doesn't engage while a QT key is held.
         if (e.button == 1 && heldMode != Mode.Move && heldMode != Mode.Scale)
         {
@@ -815,35 +430,10 @@ static partial class QuickTransform
         selectionPivot = ComputePivot();
 
         // Lock hover result
-        ComputeBoundsForMode(dragTargets, activeMode);
+        ComputeBounds(dragTargets);
         DetectHover(sv, e.mousePosition, activeMode);
         lockedKind  = hoveredKind;
         lockedIndex = hoveredIndex;
-
-        // W + RMB on a Greybox edge: reset that edge to default, no drag
-        if (e.button == 1 && heldMode == Mode.Move && lockedKind == HoverKind.Edge && dragTargets.Length == 1)
-        {
-            var gb = dragTargets[0].GetComponent<Greybox>();
-            if (gb != null)
-            {
-                Undo.RegisterCompleteObjectUndo(gb, "Reset Greybox Edge");
-                int[] ec  = EdgeCornerIndices[lockedIndex];
-                var   def = Greybox.DefaultCorners();
-                gb.Corners[ec[0]] = def[ec[0]];
-                gb.Corners[ec[1]] = def[ec[1]];
-                gb.RebuildMesh();
-                EditorUtility.SetDirty(gb);
-
-                // Keep any welded seam snapped to the reset corners.
-                GreyboxSeamSolver.BeginUndoScope("Reset Greybox Edge");
-                GreyboxSeamSolver.SyncCorner(gb, ec[0]);
-                GreyboxSeamSolver.SyncCorner(gb, ec[1]);
-
-                activeMode = Mode.None; dragTargets = null;
-                startPositions = null; startRotations = null; startScales = null;
-                e.Use(); return;
-            }
-        }
 
         // RMB drag requires a face to lock onto — except Scale which allows outside-box
         if (e.button == 1 && lockedKind != HoverKind.Face)
@@ -897,33 +487,6 @@ static partial class QuickTransform
 
     static void InitMove(SceneView sv, Vector2 mousePos)
     {
-        // Greybox edge deform: set up drag plane perpendicular to the edge axis
-        if (lockedKind == HoverKind.Edge && dragTargets.Length == 1)
-        {
-            var gb = dragTargets[0].GetComponent<Greybox>();
-            if (gb != null)
-            {
-                greyboxTarget       = gb;
-                greyboxStartCorners = (Vector3[])gb.Corners.Clone();
-                int[] ec            = EdgeCornerIndices[lockedIndex];
-                greyboxEdgeCornerA  = ec[0];
-                greyboxEdgeCornerB  = ec[1];
-
-                gb.GetWorldCorners(s_greyboxCorners);
-                greyboxEdgePlanePoint  = (s_greyboxCorners[greyboxEdgeCornerA] + s_greyboxCorners[greyboxEdgeCornerB]) * 0.5f;
-                // Plane normal = canonical local axis of the edge (lockedIndex/4), not the
-                // actual edge direction. For a default cube these are identical, but they diverge
-                // after deformation — using the local axis keeps the drag plane stable.
-                greyboxEdgeAxisIdx     = lockedIndex / 4;
-                greyboxEdgePlaneNormal = greyboxEdgeAxisIdx == 0 ? gb.transform.right
-                                      : greyboxEdgeAxisIdx == 1 ? gb.transform.up
-                                      : gb.transform.forward;
-
-                RaycastPlane(mousePos, greyboxEdgePlanePoint, greyboxEdgePlaneNormal, out greyboxEdgeHitStart);
-                return;
-            }
-        }
-
         if (lockedKind == HoverKind.Face)
         {
             movePlaneNormal = GetFaceNormal(lockedIndex);
@@ -1044,7 +607,6 @@ static partial class QuickTransform
         if (ModeKeyReleased())
         {
             GUIUtility.hotControl = 0;
-            if (extrudeNewGb != null) EditorApplication.delayCall += Undo.PerformUndo;
             ResetState();
             return;
         }
@@ -1052,7 +614,6 @@ static partial class QuickTransform
         if (e.type == EventType.MouseUp && e.button == dragButton)
         {
             GUIUtility.hotControl = 0;
-            if (extrudeNewGb != null) EditorApplication.delayCall += Undo.PerformUndo;
             ResetState();
             e.Use();
             return;
@@ -1062,38 +623,16 @@ static partial class QuickTransform
         {
             if (Vector2.Distance(e.mousePosition, mousePressPos) >= DragThresholdPx)
             {
-                // Greypipe/Greyroad vertex/handle/special drags register their own undo and capture
-                // undoGroup in their Begin* / HandleSpecialIdle paths. Skip the generic registration
-                // here so we don't open a later group that escapes the eventual CollapseUndoOperations call.
-                bool greypipeOwned = greypipeTarget != null || greyroadTarget != null;
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
 
-                if (extrudeNewGb != null)
-                {
-                    Undo.RegisterCompleteObjectUndo(extrudeNewGb, "Greybox Extrude");
-                    undoGroup = Undo.GetCurrentGroup();
-                }
-                else if (!greypipeOwned)
-                {
-                    Undo.IncrementCurrentGroup();
-                    undoGroup = Undo.GetCurrentGroup();
+                if (shiftHeldOnPress && !didDuplicate)
+                    DuplicateAndSwapTargets();
 
-                    if (shiftHeldOnPress && !didDuplicate && greyboxTarget == null)
-                        DuplicateAndSwapTargets();
-
-                    if (greyboxTarget != null)
-                    {
-                        Undo.RegisterCompleteObjectUndo(greyboxTarget, "Greybox Edge Move");
-                        GreyboxSeamSolver.BeginUndoScope("Greybox Edge Move");
-                        Undo.SetCurrentGroupName("Greybox Edge Move");
-                    }
-                    else
-                    {
-                        // Regular transform path: the snapshot is taken at drag release via
-                        // CaptureDragForUndo so Unity records the entire drag as a single pre→post
-                        // diff. Registering here would only capture the first frame's delta.
-                        Undo.SetCurrentGroupName(GetUndoName());
-                    }
-                }
+                // The snapshot is taken at drag release via CaptureDragForUndo so Unity records
+                // the entire drag as a single pre→post diff. Registering here would only capture
+                // the first frame's delta.
+                Undo.SetCurrentGroupName(GetUndoName());
 
                 phase = Phase.Dragging;
 
@@ -1120,31 +659,10 @@ static partial class QuickTransform
         // Draw the locked bounding box (+ rotation gizmo) while waiting for drag threshold
         if (e.type == EventType.Repaint)
         {
-            ComputeBoundsForMode(dragTargets, activeMode);
-            if (greypipeTarget != null)
-            {
-                DrawGreypipeDragPlane();
-                DrawGreypipeSpline(greypipeTarget, greypipeSelectedVertex);
-                DrawGreypipeVertexHandles(greypipeTarget, greypipeSelectedVertex);
-            }
-            else if (greyroadTarget != null)
-            {
-                DrawGreyroadDragPlane();
-                DrawGreyroadSpline(greyroadTarget, greyroadSelectedVertex);
-                DrawGreyroadVertexHandles(greyroadTarget, greyroadSelectedVertex);
-            }
-            else if (greyboxTarget != null)
-            {
-                DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
-                greyboxTarget.GetWorldCorners(s_greyboxCorners);
-                DrawGreyboxEdgesOnly(s_greyboxCorners, lockedIndex);
-            }
-            else
-            {
-                DrawBoundsBox(lockedKind, lockedIndex, activeMode);
-                if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
-                    DrawRotationGizmo(sv);
-            }
+            ComputeBounds(dragTargets);
+            DrawBoundsBox(lockedKind, lockedIndex, activeMode);
+            if (activeMode == Mode.Rotate && (lockedKind == HoverKind.Face || lockedKind == HoverKind.Edge))
+                DrawRotationGizmo(sv);
         }
 
         if (IsMouseEvent(e)) e.Use();
@@ -1159,18 +677,12 @@ static partial class QuickTransform
 
         if ((e.type == EventType.MouseUp && e.button == dragButton) || ModeKeyReleased())
         {
-            HandleGreypipeGirthRelease();
-            HandleGreyroadWidthRelease();
             CaptureDragForUndo();
             Undo.FlushUndoRecordObjects();
             Undo.CollapseUndoOperations(undoGroup);
             GUIUtility.hotControl = 0;
             suppressKeyUpFor = activeMode;
-            // Capture before ResetState clears it
-            GameObject extruded = extrudeNewGb != null ? extrudeNewGb.gameObject : null;
             ResetState();
-            if (extruded != null)
-                Selection.activeObject = extruded;
             e.Use();
             return;
         }
@@ -1183,9 +695,6 @@ static partial class QuickTransform
 
     static void ApplyDrag(Event e, SceneView sv)
     {
-        if (extrudeNewGb != null) { ApplyExtrude(e.mousePosition); sv.Repaint(); return; }
-        if (greypipeTarget != null) { ApplyGreypipeVertexDrag(e, sv); sv.Repaint(); return; }
-        if (greyroadTarget != null) { ApplyGreyroadVertexDrag(e, sv); sv.Repaint(); return; }
         switch (activeMode)
         {
             case Mode.Move:   ApplyMove(sv, e.mousePosition);   break;
@@ -1197,12 +706,6 @@ static partial class QuickTransform
 
     static void ApplyMove(SceneView sv, Vector2 mousePos)
     {
-        if (greyboxTarget != null)
-        {
-            ApplyGreyboxEdgeMove(mousePos);
-            return;
-        }
-
         if (moveAlongNormal)
         {
             // RMB face drag: movement locked along face normal
@@ -1299,7 +802,7 @@ static partial class QuickTransform
         }
 
         // ── Verify and correct: guarantee anchor face stays pixel-perfect ──
-        ComputeBoundsForMode(dragTargets, activeMode);
+        ComputeBounds(dragTargets);
         int axisIdx = lockedIndex / 2;
         float signF = (lockedIndex % 2 == 0) ? 1f : -1f;
         // The anchor is the face OPPOSITE to the locked face
@@ -1395,58 +898,6 @@ static partial class QuickTransform
 
         for (int i = 0; i < 3; i++)
             boundsExtents[i] = Mathf.Max(boundsExtents[i], MinBoundsExtent);
-    }
-
-    /// <summary>
-    /// OBB aligned to the object's local axes, built by projecting the Greybox's actual
-    /// deformed world corners onto those axes. Tightly encloses whatever shape the user
-    /// has dragged the corners into. Used for all modes so the box always fits the geometry.
-    /// </summary>
-    static void ComputeGreyboxDeformedOBB(Greybox gb)
-    {
-        var t  = gb.transform;
-        boundsAxes = new[] { t.right, t.up, t.forward };
-
-        gb.GetWorldCorners(s_greyboxCorners);
-        Vector3[] wc = s_greyboxCorners;
-        float minR = float.MaxValue, maxR = float.MinValue;
-        float minU = float.MaxValue, maxU = float.MinValue;
-        float minF = float.MaxValue, maxF = float.MinValue;
-
-        foreach (var w in wc)
-        {
-            float r = Vector3.Dot(w, boundsAxes[0]);
-            float u = Vector3.Dot(w, boundsAxes[1]);
-            float f = Vector3.Dot(w, boundsAxes[2]);
-            if (r < minR) minR = r; if (r > maxR) maxR = r;
-            if (u < minU) minU = u; if (u > maxU) maxU = u;
-            if (f < minF) minF = f; if (f > maxF) maxF = f;
-        }
-
-        float cR = (minR + maxR) * 0.5f;
-        float cU = (minU + maxU) * 0.5f;
-        float cF = (minF + maxF) * 0.5f;
-        boundsCenter  = boundsAxes[0] * cR + boundsAxes[1] * cU + boundsAxes[2] * cF;
-        boundsExtents = new[]
-        {
-            Mathf.Max((maxR - minR) * 0.5f, MinBoundsExtent),
-            Mathf.Max((maxU - minU) * 0.5f, MinBoundsExtent),
-            Mathf.Max((maxF - minF) * 0.5f, MinBoundsExtent),
-        };
-    }
-
-    /// <summary>
-    /// Dispatches to ComputeGreyboxDeformedOBB for a single Greybox (all modes),
-    /// otherwise falls back to ComputeBounds.
-    /// </summary>
-    static void ComputeBoundsForMode(Transform[] targets, Mode mode)
-    {
-        if (targets != null && targets.Length == 1)
-        {
-            var gb = targets[0]?.GetComponent<Greybox>();
-            if (gb != null) { ComputeGreyboxDeformedOBB(gb); return; }
-        }
-        ComputeBounds(targets);
     }
 
     /// <summary>
@@ -1592,40 +1043,16 @@ static partial class QuickTransform
 
     static void DetectHover(SceneView sv, Vector2 mousePos, Mode mode)
     {
-        // Greypipe/Greyroad vertex hover detection (shared across all modes)
-        DetectGreypipeHover(sv, mousePos);
-        DetectGreyroadHover(sv, mousePos);
-
         switch (mode)
         {
             case Mode.Move:    DetectMoveHover(sv, mousePos);    break;
             case Mode.Rotate:  DetectRotateHover(sv, mousePos);  break;
             case Mode.Scale:   DetectScaleHover(sv, mousePos);   break;
-            case Mode.Special: DetectSpecialHover(sv, mousePos); break;
         }
-    }
-
-    static void DetectSpecialHover(SceneView sv, Vector2 mousePos)
-    {
-        int handle = CheckFaceHandleHover(sv, mousePos);
-        if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
-
-        int yFace = CheckYFaceHover(sv, mousePos);
-        if (yFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = yFace; return; }
-
-        int sideFace = CheckSideFaceHover(sv, mousePos);
-        if (sideFace >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = sideFace; return; }
-
-        hoveredKind  = HoverKind.AllSideFaces;
-        hoveredIndex = 0;
     }
 
     static void DetectMoveHover(SceneView sv, Vector2 mousePos)
     {
-        // Edges take priority in move mode
-        int gbEdge = GetActiveGreyboxEdge(mousePos);
-        if (gbEdge >= 0) { hoveredKind = HoverKind.Edge; hoveredIndex = gbEdge; return; }
-
         // Face handles
         int handle = CheckFaceHandleHover(sv, mousePos);
         if (handle >= 0) { hoveredKind = HoverKind.Face; hoveredIndex = handle; return; }
@@ -1958,7 +1385,6 @@ static partial class QuickTransform
     static readonly Vector3[] s_faceCorners = new Vector3[4];
     static readonly Vector2[] s_screenQuad = new Vector2[4];
     static readonly Vector2[] s_expandedQuad = new Vector2[4];
-    static readonly Vector3[] s_greyboxCorners = new Vector3[8];
 
     /// <summary>
     /// 8 corners of the bounding box. Returns a shared static buffer — do not retain
@@ -2086,15 +1512,12 @@ static partial class QuickTransform
     /// Records the full pre→post drag as a single undo step. Bounces the transforms
     /// back to their pre-drag snapshot, calls RecordObjects so Unity captures that as
     /// the "before" state, then reapplies the post-drag values — the next undo flush
-    /// diffs the two and stores one clean step. Specialized paths (Greybox edge,
-    /// Greypipe/Greyroad vertex, Extrude) register their own undo and are skipped.
+    /// diffs the two and stores one clean step.
     /// </summary>
     static void CaptureDragForUndo()
     {
         if (dragTargets == null || dragTargets.Length == 0) return;
         if (startPositions == null) return;
-        if (greyboxTarget != null || greypipeTarget != null || greyroadTarget != null) return;
-        if (extrudeNewGb != null) return;
 
         int n = dragTargets.Length;
         var endPos   = new Vector3[n];
@@ -2158,11 +1581,6 @@ static partial class QuickTransform
         dragButton = 0;
         shiftHeldOnPress    = false;
         didDuplicate        = false;
-        greyboxTarget       = null;
-        greyboxStartCorners = null;
-        extrudeNewGb        = null;
-        ResetGreypipeState();
-        ResetGreyroadState();
     }
 
     static bool ModeKeyReleased()
@@ -2172,7 +1590,6 @@ static partial class QuickTransform
             Mode.Move    => !wHeld,
             Mode.Rotate  => !eHeld,
             Mode.Scale   => !rHeld,
-            Mode.Special => !qHeld,
             _            => true
         };
     }
@@ -2184,7 +1601,6 @@ static partial class QuickTransform
             Mode.Move    => "QuickTransform Move",
             Mode.Rotate  => "QuickTransform Rotate",
             Mode.Scale   => "QuickTransform Scale",
-            Mode.Special => "QuickTransform Special",
             _            => "QuickTransform"
         };
     }
@@ -2195,299 +1611,13 @@ static partial class QuickTransform
             || e.type == EventType.MouseUp   || e.type == EventType.MouseMove;
     }
 
-    // ─── Greybox Edge Helpers ───────────────────────────────────
-
-    /// <summary>
-    /// Returns the edge index nearest to mousePos on the active single Greybox, or -1.
-    /// Uses the Greybox's actual world corners (not the OBB) so deformed shapes stay correct.
-    /// Skips backface edges based on camera direction.
-    /// </summary>
-    static int GetActiveGreyboxEdge(Vector2 mousePos)
-    {
-        Transform t = null;
-        if (dragTargets != null && dragTargets.Length == 1)  t = dragTargets[0];
-        else if (Selection.transforms?.Length == 1)          t = Selection.transforms[0];
-        if (t == null) return -1;
-
-        var gb = t.GetComponent<Greybox>();
-        if (gb == null) return -1;
-
-        gb.GetWorldCorners(s_greyboxCorners);
-        return DetectNearestGreyboxEdge(s_greyboxCorners, mousePos);
-    }
-
-    /// <summary>Find the nearest Greybox edge within EdgeHoverPx in screen space.</summary>
-    static int DetectNearestGreyboxEdge(Vector3[] wc, Vector2 mousePos)
-    {
-        float threshold = EdgeHoverPx;
-        int   bestEdge  = -1;
-        float bestDist  = threshold;
-
-        for (int ei = 0; ei < 12; ei++)
-        {
-            int[] ec = EdgeCornerIndices[ei];
-            Vector2 a = HandleUtility.WorldToGUIPoint(wc[ec[0]]);
-            Vector2 b = HandleUtility.WorldToGUIPoint(wc[ec[1]]);
-            float dist = DistPointToSegment2D(mousePos, a, b);
-            if (dist < bestDist) { bestDist = dist; bestEdge = ei; }
-        }
-        return bestEdge;
-    }
-
-    /// <summary>
-    /// Returns true if at least one of the edge's two adjacent faces is front-facing,
-    /// using actual face normals computed from the Greybox's world corners.
-    /// </summary>
-    static bool IsGreyboxEdgeVisible(Vector3[] wc, int edgeIdx, Vector3 camFwd)
-    {
-        foreach (int face in EdgeFaceAdjacency[edgeIdx])
-        {
-            int[] ci = FaceCornerIndices[face];
-            Vector3 n = Vector3.Cross(wc[ci[1]] - wc[ci[0]], wc[ci[2]] - wc[ci[0]]).normalized;
-            if (Vector3.Dot(n, camFwd) < 0f) return true;
-        }
-        return false;
-    }
-
-    /// <summary>
-    /// Move the two Greybox corners of the locked edge by projecting the mouse ray
-    /// onto the plane perpendicular to the edge axis.
-    /// </summary>
-    static void ApplyGreyboxEdgeMove(Vector2 mousePos)
-    {
-        if (greyboxTarget == null || greyboxStartCorners == null) return;
-        if (!RaycastPlane(mousePos, greyboxEdgePlanePoint, greyboxEdgePlaneNormal, out Vector3 hit)) return;
-
-        Vector3 worldDelta = hit - greyboxEdgeHitStart;
-        Vector3 localDelta = greyboxTarget.transform.InverseTransformVector(worldDelta);
-
-        // Shift held: snap movement to the dominant free local axis
-        if (Event.current.shift)
-        {
-            int a = (greyboxEdgeAxisIdx + 1) % 3;
-            int b = (greyboxEdgeAxisIdx + 2) % 3;
-            if (Mathf.Abs(localDelta[a]) >= Mathf.Abs(localDelta[b]))
-                localDelta[b] = 0f;
-            else
-                localDelta[a] = 0f;
-        }
-
-        greyboxTarget.Corners[greyboxEdgeCornerA] = greyboxStartCorners[greyboxEdgeCornerA] + localDelta;
-        greyboxTarget.Corners[greyboxEdgeCornerB] = greyboxStartCorners[greyboxEdgeCornerB] + localDelta;
-        greyboxTarget.RebuildMesh();
-        EditorUtility.SetDirty(greyboxTarget);
-
-        // Edit a shared seam corner and its welded partner follows, snapped 1:1.
-        GreyboxSeamSolver.SyncCorner(greyboxTarget, greyboxEdgeCornerA);
-        GreyboxSeamSolver.SyncCorner(greyboxTarget, greyboxEdgeCornerB);
-    }
-
-    /// <summary>
-    /// Set up extrude state: compute face geometry, spawn the new greybox sized to the face,
-    /// and record the starting mouse projection distance along the face normal.
-    /// Called from HandleIdle before entering Phase.Ready.
-    /// When <paramref name="linked"/>, the new box's seam face is welded 1:1 to the source face
-    /// (see <see cref="Greybox.SetSeamLink"/>) via a reference — it is still a plain sibling, so it
-    /// manipulates like any standalone box; <see cref="GreyboxSeamSolver"/> keeps the seam coincident.
-    /// </summary>
-    static void BeginExtrude(Greybox sourceGb, int face, Vector2 mousePos, bool hideFaces = true, bool linked = false)
-    {
-        // World corners of the source face
-        Vector3[] wc = sourceGb.GetWorldCorners();
-        int[] ci = FaceCornerIndices[face];
-        Vector3 c0 = wc[ci[0]], c1 = wc[ci[1]], c2 = wc[ci[2]], c3 = wc[ci[3]];
-        extrudeFaceCenter = (c0 + c1 + c2 + c3) * 0.25f;
-
-        // Face normal from winding; verify direction against face index convention
-        extrudeFaceNormal = Vector3.Cross(c1 - c0, c3 - c0).normalized;
-        int   axisIdx = face / 2;
-        float signF   = (face % 2 == 0) ? 1f : -1f;
-        Vector3 localNormal = axisIdx == 0 ? new Vector3(signF, 0, 0)
-                            : axisIdx == 1 ? new Vector3(0, signF, 0)
-                            : new Vector3(0, 0, signF);
-        if (Vector3.Dot(extrudeFaceNormal, sourceGb.transform.TransformDirection(localNormal)) < 0f)
-            extrudeFaceNormal = -extrudeFaceNormal;
-
-        // Rotation: Y+ along face normal, Z along the t-axis edge of the source face
-        Vector3 up   = extrudeFaceNormal;
-        Vector3 tDir = Vector3.ProjectOnPlane(c3 - c0, up);
-        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(c1 - c0, up);
-        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(Vector3.forward, up);
-        Quaternion extrudeRot = Quaternion.LookRotation(tDir.normalized, up);
-
-        // Modify source
-        Undo.RegisterCompleteObjectUndo(sourceGb, "Greybox Extrude");
-        if (hideFaces) sourceGb.ActiveFaces[face] = false;
-        sourceGb.RebuildMesh();
-        EditorUtility.SetDirty(sourceGb);
-
-        // Spawn new greybox at face center with scale=1 — corners encode actual dimensions directly
-        Transform parent = sourceGb.transform.parent;
-        var go = GreyboxSettings.PlaceGreybox(extrudeFaceCenter, extrudeRot, parent);
-        go.transform.localScale = Vector3.one;
-        extrudeNewGb = go.GetComponent<Greybox>();
-
-        // Build 8 corners from the source face world corners.
-        // Each source corner is transformed to the new greybox's local space; its X/Z sign
-        // determines which box corner it maps to (bit0=+X, bit2=+Z), preserving deformed shapes.
-        // Bottom (Y=0) and top (Y=near-zero) start flush; ApplyExtrude grows the top corners.
-        Vector3[] newCorners        = Greybox.DefaultCorners();
-        Vector3[] srcFaceCorners    = { c0, c1, c2, c3 };
-        int[]     linkChildCorners  = new int[4];   // child seam corners
-        int[]     linkParentCorners = new int[4];   // paired source-face corners
-        for (int k = 0; k < 4; k++)
-        {
-            Vector3 lc     = go.transform.InverseTransformPoint(srcFaceCorners[k]);
-            int     botIdx = (lc.x >= 0f ? 1 : 0) | (lc.z >= 0f ? 4 : 0);
-            int     topIdx = botIdx | 2;
-            newCorners[botIdx] = new Vector3(lc.x, 0f,     lc.z);
-            newCorners[topIdx] = new Vector3(lc.x, 0.001f, lc.z);
-            linkChildCorners[k]  = botIdx;
-            linkParentCorners[k] = ci[k];
-        }
-
-        // Apply corners + inherited Greybox properties in one SerializedObject pass
-        var srcSO      = new SerializedObject(sourceGb);
-        var dstSO      = new SerializedObject(extrudeNewGb);
-        var cornersArr = dstSO.FindProperty("_corners");
-        for (int i = 0; i < 8; i++)
-            cornersArr.GetArrayElementAtIndex(i).vector3Value = newCorners[i];
-        dstSO.FindProperty("_subdivisionMultiplier").floatValue = srcSO.FindProperty("_subdivisionMultiplier").floatValue;
-        dstSO.FindProperty("_uvTileScale").floatValue           = srcSO.FindProperty("_uvTileScale").floatValue;
-        dstSO.ApplyModifiedPropertiesWithoutUndo();
-
-        // Inherit MeshRenderer and GameObject properties
-        var sourceMr = sourceGb.GetComponent<MeshRenderer>();
-        var newMr    = go.GetComponent<MeshRenderer>();
-        if (sourceMr != null && newMr != null)
-        {
-            newMr.sharedMaterial    = sourceMr.sharedMaterial;
-            newMr.shadowCastingMode = sourceMr.shadowCastingMode;
-        }
-        go.layer    = sourceGb.gameObject.layer;
-        go.isStatic = sourceGb.gameObject.isStatic;
-
-        if (hideFaces) extrudeNewGb.ActiveFaces[3] = false; // hide bottom face — seam against source
-        extrudeNewGb.RebuildMesh();
-        EditorUtility.SetDirty(extrudeNewGb);
-
-        // Weld the seam by reference (no parenting): child knows its parent + pairing, parent keeps
-        // a reverse-index entry. sourceGb was already registered for undo above, so the reverse-index
-        // add is covered too.
-        if (linked)
-        {
-            extrudeNewGb.SetSeamLink(sourceGb, linkChildCorners, linkParentCorners);
-            sourceGb.AddSeamChild(extrudeNewGb);
-            EditorUtility.SetDirty(extrudeNewGb);
-        }
-
-        // Seed the starting projection distance so drag delta starts at zero
-        Ray mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
-        extrudeStartMouseDist = ProjectRayOntoLine(mouseRay, extrudeFaceCenter, extrudeFaceNormal);
-    }
-
-    /// <summary>
-    /// Update the extruded greybox height each drag frame.
-    /// Projects the mouse ray onto the line from the face center along the face normal;
-    /// the distance delta becomes scale.y of the new greybox.
-    /// </summary>
-    static void ApplyExtrude(Vector2 mousePos)
-    {
-        if (extrudeNewGb == null) return;
-        Ray   mouseRay = HandleUtility.GUIPointToWorldRay(mousePos);
-        float dist     = ProjectRayOntoLine(mouseRay, extrudeFaceCenter, extrudeFaceNormal);
-        float height   = Mathf.Max(dist - extrudeStartMouseDist, 0.001f);
-        var corners = extrudeNewGb.Corners;
-        for (int i = 0; i < 8; i++)
-        {
-            if ((i & 2) != 0) // top corner: bit1 set
-                corners[i] = new Vector3(corners[i].x, height, corners[i].z);
-        }
-        extrudeNewGb.RebuildMesh();
-        EditorUtility.SetDirty(extrudeNewGb.gameObject);
-    }
-
-    /// <summary>Draw the 12 actual Greybox edges as a wireframe, with optional edge or face highlight.</summary>
-    static void DrawGreyboxWireframe(Vector3[] wc, HoverKind kind, int index, Mode mode)
-    {
-        Handles.color = new Color(1f, 1f, 1f, 0.25f);
-        for (int ei = 0; ei < 12; ei++)
-        {
-            int[] ec = EdgeCornerIndices[ei];
-            Handles.DrawLine(wc[ec[0]], wc[ec[1]]);
-        }
-
-        if (kind == HoverKind.Edge)
-        {
-            int[] ec = EdgeCornerIndices[index];
-            Handles.color = GetModeColor(mode, 0.9f);
-            Handles.DrawLine(wc[ec[0]], wc[ec[1]], 4f);
-        }
-        else if (kind == HoverKind.Face && index >= 0 && index < 6)
-        {
-            int[] ci = FaceCornerIndices[index];
-            Vector3[] verts  = { wc[ci[0]], wc[ci[1]], wc[ci[2]], wc[ci[3]] };
-            Color     fill   = GetModeColor(mode, 0.2f);
-            Color     outline = fill; outline.a = 0.9f;
-            Handles.DrawSolidRectangleWithOutline(verts, fill, outline);
-        }
-    }
-
-    /// <summary>
-    /// Draws the 12 actual Greybox edges as an overlay over the OBB bounding box.
-    /// highlightEdge >= 0 draws that edge brighter and thicker (edge-deform hover).
-    /// </summary>
-    static void DrawGreyboxEdgesOnly(Vector3[] wc, int highlightEdge)
-    {
-        Handles.color = new Color(1f, 1f, 1f, 0.6f);
-        for (int ei = 0; ei < 12; ei++)
-        {
-            if (ei == highlightEdge) continue;
-            int[] ec = EdgeCornerIndices[ei];
-            Handles.DrawLine(wc[ec[0]], wc[ec[1]]);
-        }
-        if (highlightEdge >= 0)
-        {
-            int[] ec = EdgeCornerIndices[highlightEdge];
-            Handles.color = GetModeColor(Mode.Move, 0.9f);
-            Handles.DrawLine(wc[ec[0]], wc[ec[1]], 4f);
-        }
-    }
-
     // ─── Visual Feedback ────────────────────────────────────────
 
     static void DrawFeedback(SceneView sv)
     {
         if (dragTargets == null) return;
 
-        ComputeBoundsForMode(dragTargets, activeMode);
-
-        // Greypipe vertex transform feedback
-        if (greypipeTarget != null)
-        {
-            DrawGreypipeDragPlane();
-            DrawGreypipeSpline(greypipeTarget, greypipeSelectedVertex);
-            DrawGreypipeVertexHandles(greypipeTarget, greypipeSelectedVertex);
-            return;
-        }
-
-        // Greyroad vertex transform feedback
-        if (greyroadTarget != null)
-        {
-            DrawGreyroadDragPlane();
-            DrawGreyroadSpline(greyroadTarget, greyroadSelectedVertex);
-            DrawGreyroadVertexHandles(greyroadTarget, greyroadSelectedVertex);
-            return;
-        }
-
-        // Greybox edge deform: OBB bounding box + actual edges with the dragged edge highlighted
-        if (greyboxTarget != null)
-        {
-            DrawBoundsBox(HoverKind.None, 0, activeMode, greyboxTarget);
-            greyboxTarget.GetWorldCorners(s_greyboxCorners);
-            DrawGreyboxEdgesOnly(s_greyboxCorners, lockedIndex);
-            return;
-        }
+        ComputeBounds(dragTargets);
         DrawBoundsBox(lockedKind, lockedIndex, activeMode);
 
         // Rotation gizmo: circle + line from pivot to mouse
@@ -2556,7 +1686,7 @@ static partial class QuickTransform
 
     // ─── Box Drawing ────────────────────────────────────────────
 
-    static void DrawBoundsBox(HoverKind kind, int index, Mode mode, Greybox gb = null)
+    static void DrawBoundsBox(HoverKind kind, int index, Mode mode)
     {
         Vector3[] corners = GetBoxCorners();
 
@@ -2572,9 +1702,6 @@ static partial class QuickTransform
             Handles.DrawLine(corners[edge[0]], corners[edge[1]]);
 
         // ── Highlights ──
-        bool faceDeleted = gb != null && mode == Mode.Special
-            && kind == HoverKind.Face && index >= 0 && index < 6
-            && !gb.ActiveFaces[index];
         switch (kind)
         {
             case HoverKind.AllSideFaces:
@@ -2582,7 +1709,7 @@ static partial class QuickTransform
                 break;
 
             case HoverKind.Face:
-                DrawFaceHighlight(corners, index, mode, faceDeleted);
+                DrawFaceHighlight(corners, index, mode);
                 break;
 
             case HoverKind.Edge:
@@ -2591,21 +1718,17 @@ static partial class QuickTransform
         }
 
         // ── Face handles (always on top) ──
-        DrawFaceHandles(kind, index, mode, gb);
+        DrawFaceHandles(kind, index, mode);
     }
 
-    static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode, bool faceDeleted = false)
+    static void DrawFaceHighlight(Vector3[] corners, int face, Mode mode)
     {
         if (face < 0 || face >= 6) return;
         int[] ci = FaceCornerIndices[face];
         Vector3[] verts = { corners[ci[0]], corners[ci[1]], corners[ci[2]], corners[ci[3]] };
 
         Color fill, outline;
-        if (faceDeleted)
-        {
-            fill = new Color(1f, 0.2f, 0.2f, 0.25f);
-        }
-        else if (mode == Mode.Scale)
+        if (mode == Mode.Scale)
         {
             int axisIdx = face / 2;
             fill = axisIdx == 0 ? new Color(1f, 0.3f, 0.3f, 0.25f)
@@ -2632,9 +1755,9 @@ static partial class QuickTransform
     /// <summary>
     /// Draws a small always-on-top dot handle at each bounding-box face center.
     /// Front-facing handles are noticeably brighter; back-facing are very faint.
-    /// Deleted faces (greybox move mode) draw red. Hovered face uses the mode color.
+    /// Hovered face uses the mode color.
     /// </summary>
-    static void DrawFaceHandles(HoverKind kind, int index, Mode mode, Greybox gb = null)
+    static void DrawFaceHandles(HoverKind kind, int index, Mode mode)
     {
         if (Camera.current == null) return;
 
@@ -2648,20 +1771,14 @@ static partial class QuickTransform
             Vector3 center      = GetFaceCenter(face);
             bool    frontFacing = Vector3.Dot(GetFaceNormal(face), camFwd) < 0f;
             bool    hovered     = kind == HoverKind.Face && index == face;
-            bool    deleted     = gb != null && mode == Mode.Special
-                                  && face < gb.ActiveFaces.Length && !gb.ActiveFaces[face];
 
             float sz = HandleUtility.GetHandleSize(center) * 0.045f * (frontFacing ? 1.1f : 0.85f);
 
             Color col;
             if (hovered)
-                col = deleted
-                    ? new Color(1f, 0.2f, 0.2f, frontFacing ? 1f  : 0.5f)
-                    : GetModeColor(mode,          frontFacing ? 1f  : 0.5f);
-            else if (deleted)
-                col = new Color(1f, 0.2f, 0.2f,  frontFacing ? 0.8f : 0.25f);
+                col = GetModeColor(mode, frontFacing ? 1f : 0.5f);
             else
-                col = new Color(1f, 1f,   1f,    frontFacing ? 0.75f : 0.1f);
+                col = new Color(1f, 1f, 1f, frontFacing ? 0.75f : 0.1f);
 
             Handles.color = col;
             Handles.DotHandleCap(0, center, Quaternion.identity, sz, EventType.Repaint);
@@ -2677,7 +1794,6 @@ static partial class QuickTransform
             Mode.Move    => new Color(1f, 0.8f, 0.2f, alpha),   // yellow-orange
             Mode.Rotate  => new Color(0.2f, 0.9f, 0.2f, alpha), // green
             Mode.Scale   => new Color(0.5f, 0.5f, 1f, alpha),   // blue-ish
-            Mode.Special => new Color(0.9f, 0.3f, 1f, alpha),   // purple
             _            => new Color(1f, 1f, 1f, alpha),
         };
     }
@@ -2794,24 +1910,13 @@ static partial class QuickTransform
         EnsureTooltipStyles();
         Handles.BeginGUI();
 
-        var sel = Selection.transforms;
-        bool isGreybox = false, isGreypipe = false, isGreyroad = false;
-        if (sel != null && sel.Length == 1 && sel[0] != null)
-        {
-            isGreybox  = sel[0].GetComponent<Greybox>()  != null;
-            isGreypipe = sel[0].GetComponent<Greypipe>() != null;
-            isGreyroad = sel[0].GetComponent<Greyroad>() != null;
-        }
-        bool hasSpecial = isGreybox || isGreypipe || isGreyroad;
-
         var lines = new System.Collections.Generic.List<(string text, GUIStyle style, float indent)>();
 
-        // Single merged QWER list — the currently held mode is expanded inline,
-        // grouped by hovered object type (Plane / Edge / Vertex / Handle / Outside / Any).
-        AddModeBlock(lines, "Q", "Special", Mode.Special, heldMode, hasSpecial, isGreybox, isGreypipe, isGreyroad);
-        AddModeBlock(lines, "W", "Move",    Mode.Move,    heldMode, true,       isGreybox, isGreypipe, isGreyroad);
-        AddModeBlock(lines, "E", "Rotate",  Mode.Rotate,  heldMode, true,       isGreybox, isGreypipe, isGreyroad);
-        AddModeBlock(lines, "R", "Scale",   Mode.Scale,   heldMode, true,       isGreybox, isGreypipe, isGreyroad);
+        // Single merged WER list — the currently held mode is expanded inline,
+        // grouped by hovered region (Plane / Edge / Outside / Any).
+        AddModeBlock(lines, "W", "Move",   Mode.Move,   heldMode);
+        AddModeBlock(lines, "E", "Rotate", Mode.Rotate, heldMode);
+        AddModeBlock(lines, "R", "Scale",  Mode.Scale,  heldMode);
 
         float x       = 10f;
         float bottomY = sv.position.height - 46f;
@@ -2835,21 +1940,17 @@ static partial class QuickTransform
 
     static void AddModeBlock(
         System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
-        string key, string label, Mode mode, Mode heldMode, bool available,
-        bool isGreybox, bool isGreypipe, bool isGreyroad)
+        string key, string label, Mode mode, Mode heldMode)
     {
-        if (!available) return;
-
         bool active = mode == heldMode;
         lines.Add(($"{key} — {label}", active ? s_tooltipActiveStyle : s_tooltipStyle, 0f));
         if (!active) return;
 
         switch (mode)
         {
-            case Mode.Move:    AddMoveActions(lines, isGreybox, isGreypipe, isGreyroad); break;
+            case Mode.Move:    AddMoveActions(lines); break;
             case Mode.Rotate:  AddRotateActions(lines); break;
-            case Mode.Scale:   AddScaleActions(lines, isGreypipe, isGreyroad); break;
-            case Mode.Special: AddSpecialActions(lines, isGreybox, isGreypipe, isGreyroad); break;
+            case Mode.Scale:   AddScaleActions(lines); break;
         }
     }
 
@@ -2860,43 +1961,11 @@ static partial class QuickTransform
         => lines.Add((text, s_tooltipActionStyle, kActIndent));
 
     static void AddMoveActions(
-        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
-        bool isGreybox, bool isGreypipe, bool isGreyroad)
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines)
     {
         AddSub(lines, "Plane");
         AddAct(lines, "LMB — slide on face plane");
         AddAct(lines, "RMB — push/pull along face normal");
-
-        if (isGreybox)
-        {
-            AddSub(lines, "Edge (Greybox)");
-            AddAct(lines, "LMB — deform edge (Shift snaps to local axis)");
-            AddAct(lines, "RMB — reset edge to default");
-        }
-
-        if (isGreypipe)
-        {
-            AddSub(lines, "Vertex (Greypipe)");
-            AddAct(lines, "LMB — drag in main-axis plane");
-            AddAct(lines, "RMB — drag perpendicular to main-axis plane");
-            AddAct(lines, "MMB — reset handle direction to Main Axis");
-            AddSub(lines, "Handle (Greypipe)");
-            AddAct(lines, "LMB / RMB — drag bezier handle endpoint");
-        }
-
-        if (isGreyroad)
-        {
-            AddSub(lines, "Vertex (Greyroad)");
-            AddAct(lines, "LMB — drag on horizontal (XZ) plane");
-            AddAct(lines, "RMB — drag vertically (elevation)");
-            AddAct(lines, "MMB — reset spline handle alignment");
-            AddSub(lines, "Bezier Handle (Greyroad)");
-            AddAct(lines, "LMB — drag on horizontal plane");
-            AddAct(lines, "RMB — drag vertically");
-            AddSub(lines, "Banking Handle (Greyroad)");
-            AddAct(lines, "LMB — bank around spline tangent");
-            AddAct(lines, "MMB — reset banking to 0°");
-        }
 
         AddSub(lines, "Outside");
         AddAct(lines, "LMB — drag on world XZ plane");
@@ -2920,57 +1989,15 @@ static partial class QuickTransform
     }
 
     static void AddScaleActions(
-        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
-        bool isGreypipe, bool isGreyroad)
+        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines)
     {
         AddSub(lines, "Plane");
         AddAct(lines, "LMB — single-axis scale (anchor = opposite face)");
         AddAct(lines, "RMB — uniform scale (anchor = opposite face)");
 
-        if (isGreypipe || isGreyroad)
-        {
-            AddSub(lines, "Vertex");
-            AddAct(lines, "LMB — scale spline handle length");
-        }
-
         AddSub(lines, "Outside");
         AddAct(lines, "RMB — uniform scale (anchor = selection pivot)");
         AddSub(lines, "Any");
         AddAct(lines, "Shift + drag — duplicate then transform");
-    }
-
-    static void AddSpecialActions(
-        System.Collections.Generic.List<(string text, GUIStyle style, float indent)> lines,
-        bool isGreybox, bool isGreypipe, bool isGreyroad)
-    {
-        if (isGreybox)
-        {
-            AddSub(lines, "Plane");
-            AddAct(lines, "LMB — toggle face on/off");
-            AddAct(lines, "RMB — extrude face (hide seam faces)");
-            AddAct(lines, "MMB — extrude face (keep all faces)");
-        }
-        else if (isGreypipe)
-        {
-            AddSub(lines, "Vertex (end)");
-            AddAct(lines, "LMB — extend pipe");
-            AddSub(lines, "Vertex (any)");
-            AddAct(lines, "RMB — delete vertex");
-            AddAct(lines, "MMB drag — adjust girth (quick-click resets to 1)");
-            AddSub(lines, "Spline");
-            AddAct(lines, "LMB — insert vertex");
-        }
-        else if (isGreyroad)
-        {
-            AddSub(lines, "Plane");
-            AddAct(lines, "LMB — toggle face on/off");
-            AddSub(lines, "Vertex (end)");
-            AddAct(lines, "LMB — extend road");
-            AddSub(lines, "Vertex (any)");
-            AddAct(lines, "RMB — delete vertex");
-            AddAct(lines, "MMB drag — adjust width (quick-click resets to 1)");
-            AddSub(lines, "Spline");
-            AddAct(lines, "LMB — insert vertex");
-        }
     }
 }
