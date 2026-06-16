@@ -27,6 +27,21 @@ class EditoolsGammaCorrectorButton : EditorToolbarButton
 
 	const string k_SourcePref = "Editools_GammaCorrector_Source";
 	const string k_ModePref = "Editools_GammaCorrector_ToLinear";
+	const string k_EnabledPref = "Editools_GammaCorrector_Enabled";
+
+	// Fires when the toolbar visibility toggle flips, so live button instances re-apply it.
+	public static event Action EnabledChanged;
+
+	public static bool Enabled
+	{
+		get => EditorPrefs.GetBool(k_EnabledPref, true);
+		set
+		{
+			if (value == Enabled) return;
+			EditorPrefs.SetBool(k_EnabledPref, value);
+			EnabledChanged?.Invoke();
+		}
+	}
 
 	// _toLinear: true → Gamma→Linear (apply Color.linear); false → Linear→Gamma (apply Color.gamma).
 	bool _toLinear = true;
@@ -61,7 +76,14 @@ class EditoolsGammaCorrectorButton : EditorToolbarButton
 
 		clicked += OpenPicker;
 		this.AddManipulator(new ContextualMenuManipulator(BuildMenu));
+
+		ApplyEnabledState();
+		EnabledChanged += ApplyEnabledState;
+		RegisterCallback<DetachFromPanelEvent>(_ => EnabledChanged -= ApplyEnabledState);
 	}
+
+	void ApplyEnabledState() =>
+		style.display = Enabled ? DisplayStyle.Flex : DisplayStyle.None;
 
 	Color Convert(Color src) => _toLinear ? src.linear : src.gamma;
 

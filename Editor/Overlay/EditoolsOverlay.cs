@@ -1153,7 +1153,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 11 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 13 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1237,6 +1237,18 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"cursor and aligns it to that surface's normal. Left-click confirms, right-click cancels.\n\n" +
 		"Click ▸ to choose which surface types are snap targets (skinned, static, transparent).");
 
+	static readonly GUIContent k_GammaCorrector = new GUIContent(
+		"Gamma Corrector",
+		"Shows the Gamma Corrector swatch button in the Scene View toolbar. " +
+		"Left-click picks a color and live-converts between gamma and linear; " +
+		"right-click copies/pastes or switches conversion direction.");
+
+	static readonly GUIContent k_SdfGenerator = new GUIContent(
+		"SDF Generator",
+		"Bakes a source texture into a signed distance field. Pick a source, tune channel, " +
+		"spread, smoothing and output packing, preview, then save the SDF as a PNG.\n\n" +
+		"Click ▸ to open the generator window.");
+
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
@@ -1279,6 +1291,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 			v => SnapToSurface.Enabled = v,
 			() => UnityEditor.PopupWindow.Show(
 				GUILayoutUtility.GetLastRect(), new SnapToSurfaceSettingsPopup()));
+
+		DrawToggleRow(k_GammaCorrector, EditoolsGammaCorrectorButton.Enabled,
+			v => EditoolsGammaCorrectorButton.Enabled = v, null);
+
+		DrawSubmenuOnlyRow(k_SdfGenerator, _ => SdfGeneratorWindow.ShowWindow());
 	}
 
 	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
