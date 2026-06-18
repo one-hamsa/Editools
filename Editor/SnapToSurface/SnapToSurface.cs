@@ -74,17 +74,30 @@ public class SnapToSurface : EditorWindow
         get => EditorPrefs.GetFloat("SnapToSurface_Offset", 0f);
         set => EditorPrefs.SetFloat("SnapToSurface_Offset", value);
     }
+    // When on, the aligned axis points the opposite way along the surface normal
+    // (flipped 180° about the surface tangent) — e.g. the object faces into the
+    // surface instead of out of it. The off-surface offset still follows the true
+    // outward normal. Backed by EditorPrefs so it persists per machine.
+    internal static bool FlipAxis {
+        get => EditorPrefs.GetBool("SnapToSurface_FlipAxis", false);
+        set => EditorPrefs.SetBool("SnapToSurface_FlipAxis", value);
+    }
+
+    // Raised whenever snap mode starts or ends so the Snap To Surface scene-view
+    // overlay can show/hide itself without polling (see "Subscribe, Don't Look Up").
+    internal static event System.Action SnapModeChanged;
 
     [Shortcut("Editools/Snap To Surface", KeyCode.A, ShortcutModifiers.Alt)]
     private static void ActivateSnapMode() {
         if (!EditoolsOverlay.IsActive || !Enabled)
             return;
 
-        // Alt+A is a sub-combo of the Ctrl+Alt+A toggle-active binding. On a three-key
-        // chord the modifier state can momentarily read as just Alt, firing this
-        // shortcut by accident — so ignore the press whenever Ctrl/Cmd is also held.
-        const EventModifiers ctrlOrCmd = EventModifiers.Control | EventModifiers.Command;
-        if (Event.current != null && (Event.current.modifiers & ctrlOrCmd) != 0)
+        // Alt+A is a sub-combo of other chords — Ctrl+Alt+A (toggle-active) and
+        // Alt+Shift+A (activate/deactivate selection). On those the modifier state can
+        // momentarily read as just Alt, firing this shortcut by accident — so ignore
+        // the press whenever Ctrl/Cmd or Shift is also held.
+        const EventModifiers blockingMods = EventModifiers.Control | EventModifiers.Command | EventModifiers.Shift;
+        if (Event.current != null && (Event.current.modifiers & blockingMods) != 0)
             return;
 
         if (Selection.activeGameObject == null)
@@ -109,6 +122,7 @@ public class SnapToSurface : EditorWindow
 
             isSnapping = true;
             SceneView.duringSceneGui += OnSceneGUI;
+            SnapModeChanged?.Invoke();
             SceneView.RepaintAll();
         }
     }
@@ -135,6 +149,7 @@ public class SnapToSurface : EditorWindow
 
         isSnapping = true;
         SceneView.duringSceneGui += OnSceneGUI;
+        SnapModeChanged?.Invoke();
         SceneView.RepaintAll();
     }
 
@@ -194,6 +209,11 @@ public class SnapToSurface : EditorWindow
     /// </summary>
     private static void AddSnapMesh(GameObject obj, Transform tf, Renderer renderer, Mesh mesh) {
         if (mesh == null || ignoredObjects.Contains(obj))
+            return;
+
+        // Shadows Only renderers draw no visible surface (they exist purely to cast
+        // shadows), so there's nothing to snap to — always exclude them.
+        if (renderer.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly)
             return;
 
         // Static-flag filter, orthogonal to renderer type: non-static objects are only
@@ -314,6 +334,14 @@ public class SnapToSurface : EditorWindow
         if (e == null)
             return;
 
+        // Shift cancels placement. It's the modifier for scene chords the user reaches
+        // for mid-snap (Alt+Shift+A activate/deactivate), so holding it drops out of
+        // snap rather than fighting them. Left un-consumed so the chord still fires.
+        if (e.shift) {
+            ExitSnapMode(false);
+            return;
+        }
+
         // Only handle mouse events
         if (e.type == EventType.MouseDown) {
             if (e.button == 0) // Left click - confirm
@@ -364,34 +392,65 @@ public class SnapToSurface : EditorWindow
         }
 
         if (foundHit) {
-            // Update position, pushed off the surface along its normal by SurfaceOffset.
-            selectedObject.transform.position = closestHitPoint + closestHitNormal * SurfaceOffset;
-
-            // Align one axis to the surface normal; the other in-plane axis takes a
-            // stable tangent so the object doesn't spin as the cursor moves.
-            Vector3 normal = closestHitNormal;
-            Vector3 tangent;
-
-            // Try to maintain a consistent tangent direction
-            if (Vector3.Dot(normal, Vector3.up) > 0.99f) {
-                // Surface is nearly horizontal, use world forward
-                tangent = Vector3.forward;
-            } else if (Vector3.Dot(normal, Vector3.up) < -0.99f) {
-                // Surface is nearly horizontal but upside down
-                tangent = Vector3.back;
-            } else {
-                // Project world up onto the surface plane to get the tangent
-                tangent = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
-            }
-
-            // AlignZToSurface points Z+ (forward) at the normal; otherwise the default
-            // points Y+ (up) at the normal. LookRotation's args are (forward, up).
-            selectedObject.transform.rotation = AlignZToSurface
-                ? Quaternion.LookRotation(normal, tangent)
-                : Quaternion.LookRotation(tangent, normal);
-
-            EditorUtility.SetDirty(selectedObject);
+            s_hasLastHit    = true;
+            s_lastHitPoint  = closestHitPoint;
+            s_lastHitNormal = closestHitNormal;
+            ApplyPlacement();
         }
+    }
+
+    // Last surface hit from the most recent cursor move, cached so the overlay can
+    // re-apply the placement when Align Z / Surface Offset / Flip Axis change without
+    // waiting for the next mouse move.
+    private static bool    s_hasLastHit;
+    private static Vector3 s_lastHitPoint;
+    private static Vector3 s_lastHitNormal;
+
+    /// <summary>
+    /// Position and orient the snapped object on the last hit surface using the current
+    /// Align Z / Surface Offset / Flip Axis settings. Position is pushed off the surface
+    /// along the true outward normal; Flip Axis only inverts which way the aligned axis
+    /// points, never the offset direction.
+    /// </summary>
+    private static void ApplyPlacement() {
+        if (!isSnapping || selectedObject == null || !s_hasLastHit)
+            return;
+
+        Vector3 normal = s_lastHitNormal;
+
+        // Position, pushed off the surface along its outward normal by SurfaceOffset.
+        selectedObject.transform.position = s_lastHitPoint + normal * SurfaceOffset;
+
+        // Align one axis to the surface normal; the other in-plane axis takes a stable
+        // tangent so the object doesn't spin as the cursor moves.
+        Vector3 tangent;
+        if (Vector3.Dot(normal, Vector3.up) > 0.99f)
+            tangent = Vector3.forward;          // nearly horizontal, facing up
+        else if (Vector3.Dot(normal, Vector3.up) < -0.99f)
+            tangent = Vector3.back;             // nearly horizontal, facing down
+        else
+            tangent = Vector3.ProjectOnPlane(Vector3.up, normal).normalized;
+
+        // Flip Axis points the aligned axis into the surface instead of out of it.
+        Vector3 alignNormal = FlipAxis ? -normal : normal;
+
+        // AlignZToSurface points Z+ (forward) at the aligned normal; otherwise the
+        // default points Y+ (up) at it. LookRotation's args are (forward, up).
+        selectedObject.transform.rotation = AlignZToSurface
+            ? Quaternion.LookRotation(alignNormal, tangent)
+            : Quaternion.LookRotation(tangent, alignNormal);
+
+        EditorUtility.SetDirty(selectedObject);
+    }
+
+    /// <summary>
+    /// Re-apply the current placement and repaint. Called by the scene-view overlay
+    /// after the user changes a setting mid-snap so the object updates immediately
+    /// without needing a mouse move.
+    /// </summary>
+    internal static void ReapplyPlacement() {
+        ApplyPlacement();
+        SceneView.RepaintAll();
     }
 
     private static void ExitSnapMode(bool confirm) {
@@ -417,6 +476,8 @@ public class SnapToSurface : EditorWindow
         ReleaseSnapMeshCache();
         selectedObject = null;
         lastHitSurfaceObject = null;
+        s_hasLastHit = false;
+        SnapModeChanged?.Invoke();
         SceneView.RepaintAll();
     }
 
