@@ -67,6 +67,20 @@ public abstract class GreyPrimitive : MonoBehaviour
     /// overrides it with its UV tile scale so the existing field keeps tiling the projection.</summary>
     protected virtual float PlanarUvMultiplier => 1f;
 
+    // ─── Flip Faces ──────────────────────────────────────────────
+
+    [SerializeField]
+    [Tooltip("Flip the mesh inside-out — reverses every triangle's winding and its normals so the " +
+             "faces render from the other side. Useful for turning a box into a room. Applied to the " +
+             "render mesh on each rebuild.")]
+    bool _flipFaces;
+
+    public bool FlipFaces
+    {
+        get => _flipFaces;
+        set => _flipFaces = value;
+    }
+
     // ─── Boolean ─────────────────────────────────────────────────
     // Optional CSG subtraction. When set, this primitive is the Subject, the reference is the
     // Operator, and a baked 'Boolean Result' child holds Subject−Operator (see GreyBooleanResult /
@@ -173,13 +187,25 @@ public abstract class GreyPrimitive : MonoBehaviour
         OnBeforeRebuild();
 
 #if UNITY_EDITOR
-        PrepareBakeTargets();
+        // During an interactive tool drag, regenerate the live mesh only — all AssetDatabase / prefab
+        // persistence is deferred to drag end (see BeginDeferredPersist) so dragging a face doesn't
+        // trigger a synchronous prefab reimport on every tick.
+        if (s_deferPersist)
+        {
+            EnsureLiveMeshTargets();
+            s_deferredPersist.Add(this);
+        }
+        else
+        {
+            PrepareBakeTargets();
+        }
 #else
         EnsureMesh();
 #endif
         GenerateMesh(_mesh);
         _mesh.RecalculateBounds();
         ApplyPlanarUv(_mesh);
+        ApplyFaceFlip(_mesh);
 
         // Types that opt in (Greybox, GreyBooleanResult) bake an unsubdivided collider twin from the
         // same inputs and feed it to the MeshCollider. Others (Greypipe, Greyroad) just point the
@@ -204,7 +230,7 @@ public abstract class GreyPrimitive : MonoBehaviour
         if (mc != null) mc.sharedMesh = colliderMesh;
 
 #if UNITY_EDITOR
-        PersistBakedMeshes();
+        if (!s_deferPersist) PersistBakedMeshes();
 #endif
     }
 
@@ -296,6 +322,31 @@ public abstract class GreyPrimitive : MonoBehaviour
         mesh.uv = uvs;
     }
 
+    // ─── Flip Faces ──────────────────────────────────────────────
+
+    /// <summary>
+    /// When <see cref="_flipFaces"/> is set, turns the mesh inside-out: reverses each triangle's
+    /// winding (per submesh) and negates every normal, so the surface renders from the opposite side.
+    /// No-op when off.
+    /// </summary>
+    void ApplyFaceFlip(Mesh mesh)
+    {
+        if (!_flipFaces) return;
+
+        for (int sm = 0; sm < mesh.subMeshCount; sm++)
+        {
+            var tris = mesh.GetTriangles(sm);
+            for (int i = 0; i < tris.Length; i += 3)
+                (tris[i + 1], tris[i + 2]) = (tris[i + 2], tris[i + 1]);
+            mesh.SetTriangles(tris, sm);
+        }
+
+        var normals = mesh.normals;
+        for (int i = 0; i < normals.Length; i++)
+            normals[i] = -normals[i];
+        mesh.normals = normals;
+    }
+
     // ─── Abstract ────────────────────────────────────────────────
 
     protected abstract void GenerateMesh(Mesh mesh);
@@ -324,6 +375,48 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
 #if UNITY_EDITOR
+    // ─── Interactive-drag persistence deferral (editor) ──────────
+    // While an editor tool is mid-drag, RebuildMesh regenerates the live mesh but skips every
+    // AssetDatabase / prefab write — otherwise each tick of the drag fires a synchronous prefab
+    // reimport ("Importing…" bar) that interrupts the drag. Touched primitives queue here and bake
+    // + persist once when the tool ends the scope.
+    static bool s_deferPersist;
+    static readonly System.Collections.Generic.HashSet<GreyPrimitive> s_deferredPersist =
+        new System.Collections.Generic.HashSet<GreyPrimitive>();
+
+    /// <summary>Opens a deferral scope: until <see cref="EndDeferredPersist"/>, RebuildMesh updates
+    /// only the live mesh and skips persistence. Call from an editor tool when an interactive
+    /// geometry drag begins.</summary>
+    public static void BeginDeferredPersist() => s_deferPersist = true;
+
+    /// <summary>Closes the deferral scope and bakes + persists every primitive touched during it,
+    /// once each. Call when the drag finishes.</summary>
+    public static void EndDeferredPersist()
+    {
+        s_deferPersist = false;
+        foreach (var gp in s_deferredPersist)
+            if (gp != null) gp.RebuildMesh();
+        s_deferredPersist.Clear();
+    }
+
+    /// <summary>Ensures live mesh objects exist to write geometry into, with no AssetDatabase work —
+    /// the existing meshes are reused as-is and only their contents are regenerated. Used while a
+    /// drag is deferred; the real bake target selection runs in <see cref="PrepareBakeTargets"/> on
+    /// the persisting rebuild at drag end.</summary>
+    void EnsureLiveMeshTargets()
+    {
+        if (_mesh == null)
+        {
+            _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
+            _meshOwnerId = GetInstanceID();
+        }
+        if (UsesColliderMesh && _colliderMesh == null)
+        {
+            _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
+            _colliderMeshOwnerId = GetInstanceID();
+        }
+    }
+
     // ─── Mesh persistence (editor) ───────────────────────────────
 
     // Bake state computed by PrepareBakeTargets, consumed by PersistBakedMeshes after generation.

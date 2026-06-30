@@ -198,6 +198,7 @@ static partial class GPEdit
         Undo.RegisterCompleteObjectUndo(gb, name);
         GreyboxSeamSolver.BeginUndoScope(name);
         Undo.SetCurrentGroupName(name);
+        GreyPrimitive.BeginDeferredPersist();
     }
 
     // ─── Drag ───────────────────────────────────────────────────
@@ -294,6 +295,7 @@ static partial class GPEdit
 
     static void FinishGreyboxDrag()
     {
+        GreyPrimitive.EndDeferredPersist();
         GameObject extruded = s_gbExtrudeNew != null ? s_gbExtrudeNew.gameObject : null;
         Undo.CollapseUndoOperations(s_gbUndoGroup);
         GUIUtility.hotControl = 0;
@@ -315,6 +317,7 @@ static partial class GPEdit
     {
         Undo.IncrementCurrentGroup();
         s_gbUndoGroup = Undo.GetCurrentGroup();
+        GreyPrimitive.BeginDeferredPersist();
 
         Vector3[] wc = sourceGb.GetWorldCorners();
         int[] ci = GPEditShared.FaceCornerIndices[face];
