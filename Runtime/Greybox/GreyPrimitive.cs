@@ -5,6 +5,24 @@ using UnityEditor.SceneManagement;
 #endif
 
 /// <summary>
+/// Planar UV projection mode for a grey primitive. <see cref="None"/> keeps each type's own UVs
+/// (per-face for Greybox, grid for the others). Any other value replaces the baked UVs with a flat
+/// projection onto the plane whose normal is the named axis, normalized to fill 0–1 across the
+/// object's bounding box on that plane. "Local" projects in the object's local space; "Global" in
+/// world space (computed at bake time, so it doesn't follow later moves until the next rebake).
+/// </summary>
+public enum PlanarUvProjection
+{
+    None = 0,
+    XLocal,
+    YLocal,
+    ZLocal,
+    XGlobal,
+    YGlobal,
+    ZGlobal,
+}
+
+/// <summary>
 /// Base class for grey primitives. Owns the serialized mesh and exposes <see cref="RebuildMesh"/>;
 /// rebuilds run only when explicitly triggered — inspector change-check, scene tools, undo/redo,
 /// the "Rebuild Mesh" button, or <see cref="Reset"/>. Nothing rebuilds on load, domain reload, or
@@ -28,6 +46,26 @@ public abstract class GreyPrimitive : MonoBehaviour
         get => _subdivisionMultiplier;
         set => _subdivisionMultiplier = value;
     }
+
+    // ─── Planar UV ───────────────────────────────────────────────
+
+    [SerializeField]
+    [Tooltip("Replace the baked UVs with a flat projection onto a plane. None keeps this type's own " +
+             "UVs. The axis names the plane normal; Local projects in object space, Global in world " +
+             "space (baked once — rebuild to refresh after moving). The projection is normalized to " +
+             "fill 0–1 across the object's bounding box on that plane (the box is padded 1% per side " +
+             "to avoid edge tiling). On a Greybox the UV tile scale further multiplies the result.")]
+    PlanarUvProjection _planarUv = PlanarUvProjection.None;
+
+    public PlanarUvProjection PlanarUv
+    {
+        get => _planarUv;
+        set => _planarUv = value;
+    }
+
+    /// <summary>Extra multiplier applied to the normalized planar UVs. 1 for most types; Greybox
+    /// overrides it with its UV tile scale so the existing field keeps tiling the projection.</summary>
+    protected virtual float PlanarUvMultiplier => 1f;
 
     // ─── Boolean ─────────────────────────────────────────────────
     // Optional CSG subtraction. When set, this primitive is the Subject, the reference is the
@@ -141,6 +179,7 @@ public abstract class GreyPrimitive : MonoBehaviour
 #endif
         GenerateMesh(_mesh);
         _mesh.RecalculateBounds();
+        ApplyPlanarUv(_mesh);
 
         // Types that opt in (Greybox, GreyBooleanResult) bake an unsubdivided collider twin from the
         // same inputs and feed it to the MeshCollider. Others (Greypipe, Greyroad) just point the
@@ -198,6 +237,63 @@ public abstract class GreyPrimitive : MonoBehaviour
         var manager = GetComponentInParent<GreyboxManager>();
         float density = manager != null ? manager.VertexDensity : 0f;
         return density * multiplier;
+    }
+
+    // ─── Planar UV ───────────────────────────────────────────────
+
+    /// <summary>
+    /// When <see cref="_planarUv"/> is set, overwrites the mesh's UV0 with a flat projection onto the
+    /// plane whose normal is the chosen axis, in local or world space. The two in-plane components map
+    /// to (u, v), normalized so the object's bounding box on that plane fills 0–1 — with the box padded
+    /// 1% on each side so the texture never tiles right at the edges. <see cref="PlanarUvMultiplier"/>
+    /// scales the result (Greybox feeds its UV tile scale through it). No-op when set to None.
+    /// </summary>
+    void ApplyPlanarUv(Mesh mesh)
+    {
+        if (_planarUv == PlanarUvProjection.None) return;
+
+        int code  = (int)_planarUv - 1; // 0..5
+        int axis   = code % 3;          // 0=X, 1=Y, 2=Z plane normal
+        bool world = code >= 3;         // Local (0..2) vs Global (3..5)
+        int uComp  = (axis + 1) % 3;    // the two in-plane components
+        int vComp  = (axis + 2) % 3;
+
+        var verts = mesh.vertices;
+        int n = verts.Length;
+        if (n == 0) return;
+
+        // Project each vertex into the chosen space and find the plane-space bounds in one pass.
+        var planar = new Vector2[n];
+        float uMin = float.MaxValue, uMax = float.MinValue;
+        float vMin = float.MaxValue, vMax = float.MinValue;
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 p = world ? transform.TransformPoint(verts[i]) : verts[i];
+            float u = p[uComp];
+            float v = p[vComp];
+            planar[i] = new Vector2(u, v);
+            if (u < uMin) uMin = u; if (u > uMax) uMax = u;
+            if (v < vMin) vMin = v; if (v > vMax) vMax = v;
+        }
+
+        // Pad the box 1% per side, then normalize so the projection fills 0–1 across it.
+        float uPad = (uMax - uMin) * 0.01f;
+        float vPad = (vMax - vMin) * 0.01f;
+        uMin -= uPad; uMax += uPad;
+        vMin -= vPad; vMax += vPad;
+
+        float uRange = uMax - uMin;
+        float vRange = vMax - vMin;
+        float uInv = uRange > 1e-6f ? 1f / uRange : 0f;
+        float vInv = vRange > 1e-6f ? 1f / vRange : 0f;
+        float mult = PlanarUvMultiplier;
+
+        var uvs = new Vector2[n];
+        for (int i = 0; i < n; i++)
+            uvs[i] = new Vector2((planar[i].x - uMin) * uInv * mult,
+                                 (planar[i].y - vMin) * vInv * mult);
+
+        mesh.uv = uvs;
     }
 
     // ─── Abstract ────────────────────────────────────────────────

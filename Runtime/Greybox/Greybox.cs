@@ -47,6 +47,10 @@ public class Greybox : GreyPrimitive
 
     public float UvTileScale => _uvTileScale;
 
+    // When a planar UV projection is active (see GreyPrimitive.PlanarUv), the tile scale multiplies
+    // the normalized projection — so >1 tiles it — instead of scaling the per-face UVs in GenerateMesh.
+    protected override float PlanarUvMultiplier => _uvTileScale;
+
     public override bool UsesColliderMesh => true; // bakes a low-poly collider twin
 
     // ─── Seam Link ──────────────────────────────────────────────
