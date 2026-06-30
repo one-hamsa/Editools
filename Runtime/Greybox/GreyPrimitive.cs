@@ -89,6 +89,35 @@ public abstract class GreyPrimitive : MonoBehaviour
         _meshIsLive = false;
     }
 
+    /// <summary>
+    /// Drops a stale collider twin from a type that reuses the render mesh for collision
+    /// (<see cref="UsesColliderMesh"/> == false, e.g. Greypipe, Greyroad). Such a twin only exists
+    /// as leftover serialized data from an older bake; nothing rebuilds or references it, so it's
+    /// dead weight in the scene/prefab. Called pre-save by the save hook. No-op for collider-mesh
+    /// types and when the field is already clear. Returns true when it cleared something.
+    /// A scene-embedded twin is dropped just by nulling the reference (the save won't serialize an
+    /// unreferenced object); a twin embedded as this primitive's own prefab sub-asset is also
+    /// removed from the asset, guarded so a mesh a sibling still shares is never yanked.
+    /// </summary>
+    public bool ClearStaleColliderMesh()
+    {
+        if (UsesColliderMesh) return false;
+        if (_colliderMesh == null && _colliderMeshOwnerId == 0) return false;
+
+        if (_colliderMesh != null
+            && _colliderMesh.name == $"{GetType().Name} Collider"
+            && AssetDatabase.Contains(_colliderMesh)
+            && AssetDatabase.GetAssetPath(_colliderMesh) == GetContainingPrefabPath()
+            && !MeshSharedWithinContainer())
+        {
+            AssetDatabase.RemoveObjectFromAsset(_colliderMesh);
+        }
+
+        _colliderMesh = null;
+        _colliderMeshOwnerId = 0;
+        return true;
+    }
+
     protected virtual void Reset()
     {
         ResetToDefaults();
