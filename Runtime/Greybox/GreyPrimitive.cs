@@ -400,22 +400,28 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
     /// <summary>Ensures live mesh objects exist to write geometry into, with no AssetDatabase work —
-    /// the existing meshes are reused as-is and only their contents are regenerated. Used while a
-    /// drag is deferred; the real bake target selection runs in <see cref="PrepareBakeTargets"/> on
-    /// the persisting rebuild at drag end.</summary>
+    /// existing meshes this instance owns are reused as-is and only their contents are regenerated.
+    /// A mesh this instance doesn't own (a fresh duplicate still shares the source's mesh) is split
+    /// off first, so a drag doesn't write geometry into the original's mesh. Used while a drag is
+    /// deferred; the real bake target selection runs in <see cref="PrepareBakeTargets"/> at drag end.</summary>
     void EnsureLiveMeshTargets()
     {
-        if (_mesh == null)
+        if (_mesh == null || !OwnsMesh(_meshOwnerId))
         {
             _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
             _meshOwnerId = GetInstanceID();
         }
-        if (UsesColliderMesh && _colliderMesh == null)
+        if (UsesColliderMesh && (_colliderMesh == null || !OwnsMesh(_colliderMeshOwnerId)))
         {
             _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
             _colliderMeshOwnerId = GetInstanceID();
         }
     }
+
+    // A duplicate serializes the source's owner id; when it doesn't match this instance the mesh still
+    // belongs to the original and must be split off. Prefab-embedded meshes (owner guid set) are shared
+    // across instances by design, so they always count as owned here.
+    bool OwnsMesh(int ownerId) => !string.IsNullOrEmpty(_meshOwnerGuid) || ownerId == GetInstanceID();
 
     // ─── Mesh persistence (editor) ───────────────────────────────
 

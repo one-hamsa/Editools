@@ -78,7 +78,7 @@ static class GreyBooleanOrchestrator
             Undo.SetTransformParent(op.transform, result.transform, "Boolean: nest operator");
 
         result.Configure(subject, op);
-        CopySettings(subject, result);
+        CopySettings(subject, result, created);
         SetInputEnabled(subject, false);
         SetInputEnabled(op, false);
         NameOperator(op, result.transform);
@@ -173,14 +173,17 @@ static class GreyBooleanOrchestrator
         return false;
     }
 
-    static void CopySettings(GreyPrimitive subject, GreyBooleanResult result)
+    static void CopySettings(GreyPrimitive subject, GreyBooleanResult result, bool created)
     {
         var sr = subject.GetComponent<MeshRenderer>();
         var rr = result.GetComponent<MeshRenderer>();
         if (sr != null && rr != null)
         {
             Undo.RecordObject(rr, "Sync Boolean Result settings");
-            rr.sharedMaterial    = sr.sharedMaterial;
+            // Seed the material from the subject only when the result is first created; afterwards the
+            // result owns its material so an artist's override survives re-bakes and adjustments.
+            if (created)
+                rr.sharedMaterial = sr.sharedMaterial;
             rr.shadowCastingMode = sr.shadowCastingMode;
         }
 
