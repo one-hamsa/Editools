@@ -135,70 +135,131 @@ sealed class CsgNode
     CsgNode _back;
     readonly List<CsgPolygon> _polygons = new List<CsgPolygon>();
 
+    // Runaway backstop for pathological/degenerate input — e.g. sliver polygons from chaining many
+    // booleans that keep spanning-splitting. The tree is built on an explicit stack (no call-stack
+    // recursion), so this bounds work/memory, not stack frames. Far above any legitimate mesh's BSP depth.
+    internal const int MaxDepth = 4096;
+
+    // Set by Build when MaxDepth is reached; CsgSolid.Subtract reads it to fail the bake loudly instead
+    // of returning silently-wrong geometry. XXX: static is safe — the boolean bake is edit-time and
+    // single-threaded, and Subtract clears it before each operation.
+    internal static bool s_depthExceeded;
+
     public CsgNode() { }
     public CsgNode(List<CsgPolygon> polygons) => Build(polygons);
 
+    // The traversals below are iterative (explicit stack) rather than the recursive csg.js originals:
+    // a deep/degenerate BSP — which chaining booleans produces — would otherwise overflow the call
+    // stack and hard-crash the editor.
+
     public void Invert()
     {
-        for (int i = 0; i < _polygons.Count; i++) _polygons[i].Flip();
-        _plane?.Flip();
-        _front?.Invert();
-        _back?.Invert();
-        (_front, _back) = (_back, _front);
+        var stack = new Stack<CsgNode>();
+        stack.Push(this);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            for (int i = 0; i < node._polygons.Count; i++) node._polygons[i].Flip();
+            node._plane?.Flip();
+            (node._front, node._back) = (node._back, node._front);
+            if (node._front != null) stack.Push(node._front);
+            if (node._back != null) stack.Push(node._back);
+        }
     }
 
     public List<CsgPolygon> ClipPolygons(List<CsgPolygon> polygons)
     {
-        if (_plane == null) return new List<CsgPolygon>(polygons);
+        var result = new List<CsgPolygon>();
+        var stack = new Stack<(CsgNode node, List<CsgPolygon> polys)>();
+        stack.Push((this, polygons));
+        while (stack.Count > 0)
+        {
+            var (node, polys) = stack.Pop();
+            if (node._plane == null)
+            {
+                result.AddRange(polys);
+                continue;
+            }
 
-        var front = new List<CsgPolygon>();
-        var back = new List<CsgPolygon>();
-        for (int i = 0; i < polygons.Count; i++)
-            _plane.SplitPolygon(polygons[i], front, back, front, back);
+            var front = new List<CsgPolygon>();
+            var back = new List<CsgPolygon>();
+            for (int i = 0; i < polys.Count; i++)
+                node._plane.SplitPolygon(polys[i], front, back, front, back);
 
-        if (_front != null) front = _front.ClipPolygons(front);
-        if (_back != null) back = _back.ClipPolygons(back);
-        else back.Clear();
+            if (node._front != null) stack.Push((node._front, front));
+            else result.AddRange(front);
 
-        front.AddRange(back);
-        return front;
+            if (node._back != null) stack.Push((node._back, back));
+            // no back child -> back polygons are inside the solid and dropped
+        }
+        return result;
     }
 
     public void ClipTo(CsgNode bsp)
     {
-        var clipped = bsp.ClipPolygons(_polygons);
-        _polygons.Clear();
-        _polygons.AddRange(clipped);
-        _front?.ClipTo(bsp);
-        _back?.ClipTo(bsp);
+        var stack = new Stack<CsgNode>();
+        stack.Push(this);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            var clipped = bsp.ClipPolygons(node._polygons);
+            node._polygons.Clear();
+            node._polygons.AddRange(clipped);
+            if (node._front != null) stack.Push(node._front);
+            if (node._back != null) stack.Push(node._back);
+        }
     }
 
     public void AllPolygons(List<CsgPolygon> result)
     {
-        result.AddRange(_polygons);
-        _front?.AllPolygons(result);
-        _back?.AllPolygons(result);
+        var stack = new Stack<CsgNode>();
+        stack.Push(this);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            result.AddRange(node._polygons);
+            // push back then front so front pops first — preserves the original self→front→back order
+            if (node._back != null) stack.Push(node._back);
+            if (node._front != null) stack.Push(node._front);
+        }
     }
 
     public void Build(List<CsgPolygon> polygons)
     {
         if (polygons == null || polygons.Count == 0) return;
-        _plane ??= polygons[0].plane.Clone();
 
-        var front = new List<CsgPolygon>();
-        var back = new List<CsgPolygon>();
-        for (int i = 0; i < polygons.Count; i++)
-            _plane.SplitPolygon(polygons[i], _polygons, _polygons, front, back);
+        var stack = new Stack<(CsgNode node, List<CsgPolygon> polys, int depth)>();
+        stack.Push((this, polygons, 0));
+        while (stack.Count > 0)
+        {
+            var (node, polys, depth) = stack.Pop();
+            if (polys.Count == 0) continue;
+            node._plane ??= polys[0].plane.Clone();
 
-        if (front.Count > 0)
-        {
-            _front ??= new CsgNode();
-            _front.Build(front);
-        }
-        if (back.Count > 0)
-        {
-            _back ??= new CsgNode();
-            _back.Build(back);
+            // Pathological geometry: stop subdividing and keep the remaining polygons as a leaf rather
+            // than splitting forever; flag it so Subtract fails loudly instead of the editor hanging.
+            if (depth >= MaxDepth)
+            {
+                s_depthExceeded = true;
+                node._polygons.AddRange(polys);
+                continue;
+            }
+
+            var front = new List<CsgPolygon>();
+            var back = new List<CsgPolygon>();
+            for (int i = 0; i < polys.Count; i++)
+                node._plane.SplitPolygon(polys[i], node._polygons, node._polygons, front, back);
+
+            if (front.Count > 0)
+            {
+                node._front ??= new CsgNode();
+                stack.Push((node._front, front, depth + 1));
+            }
+            if (back.Count > 0)
+            {
+                node._back ??= new CsgNode();
+                stack.Push((node._back, back, depth + 1));
+            }
         }
     }
 }
@@ -213,6 +274,8 @@ sealed class CsgSolid
     /// <summary>Returns a − b (the part of <paramref name="a"/> outside <paramref name="b"/>).</summary>
     public static CsgSolid Subtract(CsgSolid a, CsgSolid b)
     {
+        CsgNode.s_depthExceeded = false;
+
         var na = new CsgNode(ClonePolygons(a.polygons));
         var nb = new CsgNode(ClonePolygons(b.polygons));
 
@@ -227,6 +290,14 @@ sealed class CsgSolid
         nb.AllPolygons(bPolys);
         na.Build(bPolys);
         na.Invert();
+
+        if (CsgNode.s_depthExceeded)
+        {
+            Debug.LogError($"[GreyBoolean] CSG subtraction hit the max BSP depth ({CsgNode.MaxDepth}) — " +
+                           "input geometry is too complex or degenerate (usually from chaining many " +
+                           "booleans). Keeping the un-cut subject; flatten or simplify the chain.");
+            return a;
+        }
 
         var result = new List<CsgPolygon>();
         na.AllPolygons(result);

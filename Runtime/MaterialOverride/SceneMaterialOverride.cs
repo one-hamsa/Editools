@@ -341,10 +341,23 @@ public static class SceneMaterialOverride
 		var materials = renderer.sharedMaterials;
 		for (int i = 0; i < materials.Length; i++)
 		{
-			if (materials[i] != null && materials[i].renderQueue >= 3000)
-				return true;
+			var mat = materials[i];
+			if (mat == null) continue;
+			if (mat.renderQueue >= 3000) return true;
+			// Also catch materials whose custom queue override is transparent (>= 2500) but
+			// whose Material.renderQueue reports the shader default (e.g. Amplify blend shaders
+			// on the Geometry queue with a per-material transparent override).
+			if (MaterialCustomRenderQueue(mat) >= 2500) return true;
 		}
 		return false;
+	}
+
+	// The render queue set on the material itself (Inspector's "Render Queue" field),
+	// ignoring the shader default. Returns -1 when the material is left on "From Shader".
+	static int MaterialCustomRenderQueue(Material mat)
+	{
+		using var so = new SerializedObject(mat);
+		return so.FindProperty("m_CustomRenderQueue").intValue;
 	}
 
 	static void UnsubscribeSafetyEvents()

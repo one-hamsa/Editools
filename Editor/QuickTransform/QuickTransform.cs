@@ -891,13 +891,38 @@ static partial class QuickTransform
 
     static void ComputeBounds(Transform[] targets)
     {
-        if (targets.Length == 1)
-            ComputeOBB(targets[0]);
+        // Inactive objects shouldn't contribute to the transform bounds. If the whole
+        // selection is inactive, fall back to the full set so the gizmo stays usable.
+        Transform[] bounded = FilterActive(targets);
+        if (bounded.Length == 0)
+            bounded = targets;
+
+        if (bounded.Length == 1)
+            ComputeOBB(bounded[0]);
         else
-            ComputeAABB(targets);
+            ComputeAABB(bounded);
 
         for (int i = 0; i < 3; i++)
             boundsExtents[i] = Mathf.Max(boundsExtents[i], MinBoundsExtent);
+    }
+
+    /// <summary>
+    /// Returns only the active-in-hierarchy targets. Returns the input array
+    /// unchanged (no allocation) when nothing is filtered.
+    /// </summary>
+    static Transform[] FilterActive(Transform[] targets)
+    {
+        int count = 0;
+        for (int i = 0; i < targets.Length; i++)
+            if (targets[i] != null && targets[i].gameObject.activeInHierarchy) count++;
+
+        if (count == targets.Length) return targets;
+
+        Transform[] result = new Transform[count];
+        int w = 0;
+        for (int i = 0; i < targets.Length; i++)
+            if (targets[i] != null && targets[i].gameObject.activeInHierarchy) result[w++] = targets[i];
+        return result;
     }
 
     /// <summary>
