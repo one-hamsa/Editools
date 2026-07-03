@@ -11,21 +11,17 @@ public class GreyPrimitiveEditor : Editor
         "click one in the scene. Creates a baked 'Boolean Result' child (Subject minus Operator).");
 
     // Rebuilds are push-only: every path that mutates the primitive's state explicitly triggers
-    // RebuildMesh. Inspector edits go through the change-check below. Undo/redo restores serialized
-    // fields but leaves the in-memory mesh built from the pre-undo state, so we rebuild explicitly.
+    // RebuildMesh. Inspector edits go through the change-check below. Undo/redo rebuilds are
+    // handled by GreyboxUndoRebuilder, which rebuilds only what the undo actually touched.
     protected virtual void OnEnable()
     {
-        Undo.undoRedoPerformed += OnUndoRedo;
         GreyBooleanLiveWatcher.Acquire();
     }
 
     protected virtual void OnDisable()
     {
-        Undo.undoRedoPerformed -= OnUndoRedo;
         GreyBooleanLiveWatcher.Release();
     }
-
-    void OnUndoRedo() => RebuildTargetsWithDependents();
 
     public override void OnInspectorGUI()
     {
@@ -89,29 +85,9 @@ public class GreyPrimitiveEditor : Editor
             if (t is GreyPrimitive p) { p.RebuildMesh(); GreyBooleanOrchestrator.Sync(p); }
     }
 
-    // Undo/redo restored serialized fields and seam/boolean links, but the in-memory meshes are still
-    // built from the pre-undo state. Rebuild each selected primitive together with everything derived
-    // from it, so dependent geometry doesn't go stale when its source is undone.
-    void RebuildTargetsWithDependents()
-    {
-        foreach (var t in targets)
-            if (t is GreyPrimitive p) RebuildWithDependents(p);
-    }
-
-    // Rebuild root, every grey primitive beneath it, and — for each — the boolean results and
-    // seam-welded boxes that reference it. A Boolean Result is the parent of its subject/operator, so
-    // GetComponentsInChildren also reaches the inputs nested under a result.
-    static void RebuildWithDependents(GreyPrimitive root)
-    {
-        if (root == null) return;
-
-        foreach (var prim in root.GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
-            RebuildPrimitiveAndDependents(prim);
-    }
-
     // Rebuild a single primitive together with everything derived from it — its own boolean,
-    // any result that references it, and any seam-welded boxes. Shared between this editor's
-    // selection-scoped undo path and the global GreyboxUndoRebuilder so both regenerate identically.
+    // any result that references it, and any seam-welded boxes. Called by GreyboxUndoRebuilder
+    // for each primitive an undo/redo actually touched.
     internal static void RebuildPrimitiveAndDependents(GreyPrimitive prim)
     {
         if (prim == null) return;

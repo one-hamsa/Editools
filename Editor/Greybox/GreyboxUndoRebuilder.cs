@@ -5,9 +5,8 @@ using UnityEngine;
 // Global, selection-independent rebuild of grey geometry after an undo/redo.
 //
 // Undo restores serialized fields but leaves in-memory meshes built from the pre-undo state.
-// The CustomEditor hooks (GreyPrimitiveEditor / GreyboxManagerEditor) only run while a grey
-// object is selected, so anything edited and then deselected would never get rebuilt on undo.
-// This hook covers the unselected case, but rebuilds ONLY what the undo actually touched:
+// This hook is the undo/redo rebuild path for grey primitives — selection-independent, and it
+// rebuilds ONLY what the undo actually touched:
 //
 //   • a primitive whose own properties were undone,
 //   • every primitive on (or under) an object whose SCALE was undone — mesh density is baked
