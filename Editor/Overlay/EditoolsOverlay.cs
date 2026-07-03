@@ -1153,7 +1153,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 13 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 15 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1213,6 +1213,11 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Alt + left-click in the Scene View to select the material of the object under the cursor " +
 		"(first material slot). The material is highlighted in the Project window.");
 
+	static readonly GUIContent k_SelectShadowOnly = new GUIContent(
+		"Select Shadow Only",
+		"Selects all scene objects whose MeshRenderer has Cast Shadows set to Shadows Only. " +
+		"Includes inactive objects.");
+
 	static readonly GUIContent k_FpsCounter = new GUIContent(
 		"FPS Counter",
 		"Shows a live FPS counter in the top-left corner of each Scene View. " +
@@ -1236,6 +1241,12 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Alt+A in the Scene View drops the selected object onto the surface under the " +
 		"cursor and aligns it to that surface's normal. Left-click confirms, right-click cancels.\n\n" +
 		"Click ▸ to choose which surface types are snap targets (skinned, static, transparent).");
+
+	static readonly GUIContent k_ChangeOrientation = new GUIContent(
+		"Change Orientation",
+		"Shows a floating Scene View panel with X / Y / Z buttons. Each click rotates the " +
+		"selected objects 90° clockwise around their local axis and swaps the scale of the " +
+		"other two axes, so objects keep their world-space proportions while reorienting inside them.");
 
 	static readonly GUIContent k_GammaCorrector = new GUIContent(
 		"Gamma Corrector",
@@ -1278,6 +1289,8 @@ class EditoolsSettingsPopup : PopupWindowContent
 		DrawToggleRow(k_SelectMaterial, SelectMaterial.Enabled,
 			v => SelectMaterial.Enabled = v, null);
 
+		DrawSubmenuOnlyRow(k_SelectShadowOnly, _ => SelectShadowOnly());
+
 		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
 			v => SceneViewFpsCounter.Enabled = v, null);
 
@@ -1291,6 +1304,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 			v => SnapToSurface.Enabled = v,
 			() => UnityEditor.PopupWindow.Show(
 				GUILayoutUtility.GetLastRect(), new SnapToSurfaceSettingsPopup()));
+
+		DrawToggleRow(k_ChangeOrientation, ChangeOrientationOverlay.Enabled,
+			v => ChangeOrientationOverlay.Enabled = v, null);
 
 		DrawToggleRow(k_GammaCorrector, EditoolsGammaCorrectorButton.Enabled,
 			v => EditoolsGammaCorrectorButton.Enabled = v, null);
@@ -1350,6 +1366,17 @@ class EditoolsSettingsPopup : PopupWindowContent
 		menu.AddItem(new GUIContent("Reset Recent"), false,
 			() => HierarchyHeatmap.ResetRecent());
 		menu.ShowAsContext();
+	}
+
+	void SelectShadowOnly()
+	{
+		var objects = new List<Object>();
+		foreach (var r in Object.FindObjectsByType<MeshRenderer>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+			if (r.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly)
+				objects.Add(r.gameObject);
+		Selection.objects = objects.ToArray();
+		Debug.Log($"[Editools] Select Shadow Only: {objects.Count} object(s)");
+		editorWindow.Close();
 	}
 }
 
