@@ -62,7 +62,10 @@ static class GreyPrimitiveSettings
         return AssetDatabase.GetBuiltinExtraResource<Material>("Default-Material.mat");
     }
 
-    internal static GameObject PlacePrimitive<T>(string name, Vector3 worldPos, Quaternion worldRot, Transform parent)
+    // meshCollider / castShadows override the shared prefs when set; null falls back to the
+    // DefaultMeshCollider / DefaultShadowCasting settings (Greyquad hardcodes both off).
+    internal static GameObject PlacePrimitive<T>(string name, Vector3 worldPos, Quaternion worldRot, Transform parent,
+        bool? meshCollider = null, bool? castShadows = null)
         where T : GreyPrimitive
     {
         var go = new GameObject(name);
@@ -71,13 +74,13 @@ static class GreyPrimitiveSettings
         Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
 
         go.AddComponent<T>();
-        if (DefaultMeshCollider) go.AddComponent<MeshCollider>();
+        if (meshCollider ?? DefaultMeshCollider) go.AddComponent<MeshCollider>();
 
         var mr = go.GetComponent<MeshRenderer>();
         if (mr != null)
         {
             mr.sharedMaterial     = GetOrCreateDefaultMaterial();
-            mr.shadowCastingMode  = DefaultShadowCasting ? ShadowCastingMode.On : ShadowCastingMode.Off;
+            mr.shadowCastingMode  = (castShadows ?? DefaultShadowCasting) ? ShadowCastingMode.On : ShadowCastingMode.Off;
         }
 
         go.transform.position = worldPos;
@@ -162,7 +165,7 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         "Scene View Tooltips",
         "Show the simplified action hints in the Scene View while Grey Primitive Edit Mode is on.");
 
-    public override Vector2 GetWindowSize() => new Vector2(280, 500);
+    public override Vector2 GetWindowSize() => new Vector2(280, 545);
 
     public override void OnGUI(Rect rect)
     {
@@ -182,6 +185,10 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         EditorGUILayout.Space(8);
         EditorGUILayout.LabelField("Greyroad", s_sectionHeader);
         GreyroadSettingsGUI.DrawGUI();
+
+        EditorGUILayout.Space(8);
+        EditorGUILayout.LabelField("Greyquad", s_sectionHeader);
+        GreyquadSettingsGUI.DrawGUI();
 
         EditorGUILayout.Space(8);
         EditorGUILayout.LabelField("Edit Mode", s_sectionHeader);

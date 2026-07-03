@@ -30,9 +30,9 @@ static class GreyboxSeamSolver
     // ─── Transform-driven conform (push-based, tool-agnostic) ───────
 
     static readonly Dictionary<Greybox, Matrix4x4> s_lastMatrix = new Dictionary<Greybox, Matrix4x4>();
-    // World scale of each selected greybox captured when an interaction began, to detect a
+    // World scale of each selected grey primitive captured when an interaction began, to detect a
     // scale-apply on release and refresh size-derived subdivision then.
-    static readonly Dictionary<Greybox, Vector3> s_scaleAtGrab = new Dictionary<Greybox, Vector3>();
+    static readonly Dictionary<GreyPrimitive, Vector3> s_scaleAtGrab = new Dictionary<GreyPrimitive, Vector3>();
     static int s_lastHot;
 
     static void OnSelectionChanged()
@@ -45,7 +45,7 @@ static class GreyboxSeamSolver
     {
         // hotControl flips 0 -> non-zero on a tool grab and back on release. On grab: open a fresh
         // undo batch (so a drag's conform edits collapse into the move's own undo step) and snapshot
-        // scales. On release: rebuild any greybox whose scale changed, refreshing size-derived
+        // scales. On release: rebuild any grey primitive whose scale changed, refreshing size-derived
         // subdivision on scale-apply — push-based, so no per-frame rebuilds mid-drag.
         int hot = GUIUtility.hotControl;
         if (s_lastHot == 0 && hot != 0)
@@ -101,11 +101,11 @@ static class GreyboxSeamSolver
 
     // ─── Scale-apply rebuild ───────────────────────────────────────
     //
-    // A greybox's subdivision density is derived from its world-space size, but that's only
+    // A grey primitive's subdivision density is derived from its world-space size, but that's only
     // recomputed inside RebuildMesh — and a plain Move/Rotate/Scale (native gizmo or QuickTransform)
     // never calls one. So we snapshot scales when an interaction starts and, when it ends, rebuild
-    // any greybox whose scale actually changed. Move/rotate leave size unchanged, so they cost
-    // nothing; only a real scale triggers the single rebuild.
+    // any grey primitive whose scale actually changed. Move/rotate leave size unchanged, so they
+    // cost nothing; only a real scale triggers the single rebuild.
 
     static void SnapshotScales()
     {
@@ -115,8 +115,8 @@ static class GreyboxSeamSolver
         foreach (Transform t in selection)
         {
             if (t == null) continue;
-            var gb = t.GetComponent<Greybox>();
-            if (gb != null) s_scaleAtGrab[gb] = t.lossyScale;
+            var gp = t.GetComponent<GreyPrimitive>();
+            if (gp != null) s_scaleAtGrab[gp] = t.lossyScale;
         }
     }
 
@@ -124,12 +124,12 @@ static class GreyboxSeamSolver
     {
         foreach (var kv in s_scaleAtGrab)
         {
-            Greybox gb = kv.Key;
-            if (gb == null) continue;
-            if (gb.transform.lossyScale != kv.Value)   // scale actually changed during the drag
+            GreyPrimitive gp = kv.Key;
+            if (gp == null) continue;
+            if (gp.transform.lossyScale != kv.Value)   // scale actually changed during the drag
             {
-                gb.RebuildMesh();
-                EditorUtility.SetDirty(gb);
+                gp.RebuildMesh();
+                EditorUtility.SetDirty(gp);
             }
         }
         s_scaleAtGrab.Clear();

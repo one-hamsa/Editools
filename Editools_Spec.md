@@ -17,11 +17,13 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Runtime/Greybox/Greybox.cs` — deformable box primitive; stores 8 local-space corners, rebuilds procedural mesh on change
 - `Runtime/Greypipe/Greypipe.cs` — spline-based tube/pipe grey primitive
 - `Runtime/Greyroad/Greyroad.cs` — spline-based road grey primitive (with banking)
+- `Runtime/Greyquad/Greyquad.cs` — flat quad grey primitive (center pivot, +Y normal, no shadows/collider)
 - `Runtime/Editools.asmdef` — runtime assembly, all platforms
 
 ### Editor
 - `Editor/Overlay/EditoolsOverlay.cs` — toolbar overlay, screenshot capture, button strip
 - `Editor/Greybox/GreyboxSettings.cs` — per-project default material pref + GameObject/3D Object/Greybox menu item + settings popup
+- `Editor/Greyquad/GreyquadSettings.cs` — Greyquad default size pref + menu item + Ctrl+Q creation shortcut
 - `Editor/HierarchyHeatmap/HierarchyHeatmap.cs` — recent-selection heatmap in Hierarchy
 - `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag whole-object transform tool
 - `Editor/QuickTransform/QuickTransformConfig.cs` — per-project config SO for QuickTransform
@@ -398,6 +400,19 @@ Deformable box primitive for level blockout. Created via `GameObject > 3D Object
   world-space drag delta is converted via `InverseTransformVector` before being written back.
 - After heavy corner deformation the OBB QuickTransform uses for rotate/scale may not perfectly
   hug the geometry — acceptable for blockout.
+
+**Greyquad (Runtime `Greyquad.cs` + Editor `GreyquadSettings.cs`):**
+- Flat quad sibling of Greybox: unit 1×1 quad in the local XZ plane, **pivot at center**, surface
+  normal = local +Y; size comes from the transform scale (creation default in Editools Settings ▸
+  Greyquad, `Editools_Greyquad_DefaultSize[XZ]`)
+- Subdivides by the same rules as Greybox: `GreyboxManager.VertexDensity × SubdivisionMultiplier`
+  applied to the world-space edge lengths per axis
+- **Never casts shadows and never gets a MeshCollider** — hardcoded at creation via
+  `PlacePrimitive` overrides, regardless of the shared prefs; material, static flag, and layer
+  follow the shared grey-primitive defaults
+- Created via `GameObject > 3D Object > Greyquad` or **Ctrl+Q** (spawns at scene-view pivot and
+  enters the SnapToSurface flow, like the other creation shortcuts)
+- No Grey Primitive Edit Mode sub-elements — whole-object transforms only
 
 ### 13. Grey Primitive Edit Mode (Editor, `Editor/GPEditMode/`)
 
