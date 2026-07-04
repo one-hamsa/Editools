@@ -142,7 +142,8 @@ does on any other object.
 **Bounding Box:**
 - Single selection: OBB aligned to object's local axes (encompasses all child MeshRenderers
   and SkinnedMeshRenderers via mesh-local bounds, not inflated renderer.bounds)
-- Multi-selection: AABB in world space
+- Multi-selection: OBB using whichever target's rotation (or world axes) yields the
+  smallest box around the selection; world axes win unless a rotation is ≥1% tighter
 - Minimum extent clamped to 0.05 to prevent degenerate boxes
 
 **W = Move:**

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 
@@ -148,7 +149,8 @@ static partial class QuickTransform
     // ─── Shared Bounding Box ────────────────────────────────────
     //
     // OBB for single object (axes = object's right/up/forward).
-    // AABB for multi-select (axes = world right/up/forward).
+    // OBB for multi-select (axes = whichever target rotation, or world,
+    // yields the smallest box around the selection).
     // Face index: axisIdx = face/2, sign = (face%2==0) ? +1 : -1
     //   0:+axes[0]  1:-axes[0]  2:+axes[1]  3:-axes[1]  4:+axes[2]  5:-axes[2]
 
@@ -900,7 +902,7 @@ static partial class QuickTransform
         if (bounded.Length == 1)
             ComputeOBB(bounded[0]);
         else
-            ComputeAABB(bounded);
+            ComputeMultiOBB(bounded);
 
         for (int i = 0; i < 3; i++)
             boundsExtents[i] = Mathf.Max(boundsExtents[i], MinBoundsExtent);
@@ -1015,12 +1017,19 @@ static partial class QuickTransform
         }
     }
 
-    /// <summary>AABB encompassing all targets and their child mesh renderers.</summary>
-    static void ComputeAABB(Transform[] targets)
-    {
-        boundsAxes = new[] { Vector3.right, Vector3.up, Vector3.forward };
+    static readonly List<Vector3> s_cornerCloud = new List<Vector3>(256);
 
-        Bounds combined = new Bounds(targets[0].position, Vector3.zero);
+    /// <summary>
+    /// OBB for multi-selection. Tries each target's rotation (plus world axes)
+    /// as the box orientation and keeps whichever produces the smallest box,
+    /// so the box aligns with the object frame that fits the selection best.
+    /// Encompasses all targets and their child mesh renderers.
+    /// </summary>
+    static void ComputeMultiOBB(Transform[] targets)
+    {
+        // World-space corner cloud of every renderer's local bounds
+        // (bare transform positions for renderer-less targets)
+        s_cornerCloud.Clear();
         foreach (var t in targets)
         {
             bool any = false;
@@ -1029,26 +1038,57 @@ static partial class QuickTransform
             {
                 var mr = mf.GetComponent<MeshRenderer>();
                 if (mr == null || mf.sharedMesh == null) continue;
-                EncapsulateWorldBounds(mf.transform, mf.sharedMesh.bounds, ref combined);
+                AddWorldCorners(mf.transform, mf.sharedMesh.bounds, s_cornerCloud);
                 any = true;
             }
 
             foreach (var smr in t.GetComponentsInChildren<SkinnedMeshRenderer>())
             {
-                EncapsulateWorldBounds(smr.transform, smr.localBounds, ref combined);
+                AddWorldCorners(smr.transform, smr.localBounds, s_cornerCloud);
                 any = true;
             }
 
             if (!any)
-                combined.Encapsulate(t.position);
+                s_cornerCloud.Add(t.position);
         }
 
-        boundsCenter  = combined.center;
-        boundsExtents = new[] { combined.extents.x, combined.extents.y, combined.extents.z };
+        // World axes are the baseline; a target rotation must beat them by 1%
+        // so mostly-unrotated selections keep a predictable world-aligned box.
+        Quaternion best = Quaternion.identity;
+        float bestVolume = ProjectCloud(Quaternion.identity, s_cornerCloud,
+            out Vector3 bestMin, out Vector3 bestMax) * 0.99f;
+
+        foreach (var t in targets)
+        {
+            Quaternion q = t.rotation;
+            // Skip denormalized quaternions (can happen mid-undo).
+            float sqrLen = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+            if (sqrLen < 0.1f || sqrLen > 2f) continue;
+            q = Quaternion.Normalize(q);
+
+            float volume = ProjectCloud(q, s_cornerCloud, out Vector3 min, out Vector3 max);
+            if (volume < bestVolume)
+            {
+                best = q;
+                bestVolume = volume;
+                bestMin = min;
+                bestMax = max;
+            }
+        }
+
+        Vector3 axR = best * Vector3.right;
+        Vector3 axU = best * Vector3.up;
+        Vector3 axF = best * Vector3.forward;
+        boundsAxes = new[] { axR, axU, axF };
+
+        Vector3 mid = (bestMin + bestMax) * 0.5f;
+        Vector3 ext = (bestMax - bestMin) * 0.5f;
+        boundsCenter  = axR * mid.x + axU * mid.y + axF * mid.z;
+        boundsExtents = new[] { ext.x, ext.y, ext.z };
     }
 
-    /// <summary>Transform local bounds corners to world space and encapsulate into an AABB.</summary>
-    static void EncapsulateWorldBounds(Transform child, Bounds localBounds, ref Bounds worldBounds)
+    /// <summary>Transform the 8 corners of a local-space bounds to world space and append them.</summary>
+    static void AddWorldCorners(Transform child, Bounds localBounds, List<Vector3> cloud)
     {
         Vector3 center = localBounds.center;
         Vector3 ext    = localBounds.extents;
@@ -1059,9 +1099,38 @@ static partial class QuickTransform
             float sy = (ci & 2) != 0 ? 1f : -1f;
             float sz = (ci & 4) != 0 ? 1f : -1f;
 
-            Vector3 localCorner = center + new Vector3(ext.x * sx, ext.y * sy, ext.z * sz);
-            worldBounds.Encapsulate(child.TransformPoint(localCorner));
+            cloud.Add(child.TransformPoint(center + new Vector3(ext.x * sx, ext.y * sy, ext.z * sz)));
         }
+    }
+
+    /// <summary>
+    /// Min/max of the cloud projected onto the rotation's axes. Returns the box
+    /// volume, with each side clamped so flat selections still compare meaningfully.
+    /// </summary>
+    static float ProjectCloud(Quaternion q, List<Vector3> cloud, out Vector3 min, out Vector3 max)
+    {
+        Vector3 axR = q * Vector3.right;
+        Vector3 axU = q * Vector3.up;
+        Vector3 axF = q * Vector3.forward;
+
+        min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+        max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+
+        for (int i = 0; i < cloud.Count; i++)
+        {
+            Vector3 p = cloud[i];
+            Vector3 lp = new Vector3(
+                Vector3.Dot(p, axR),
+                Vector3.Dot(p, axU),
+                Vector3.Dot(p, axF));
+            min = Vector3.Min(min, lp);
+            max = Vector3.Max(max, lp);
+        }
+
+        Vector3 size = max - min;
+        return Mathf.Max(size.x, 2f * MinBoundsExtent)
+             * Mathf.Max(size.y, 2f * MinBoundsExtent)
+             * Mathf.Max(size.z, 2f * MinBoundsExtent);
     }
 
     // ─── Hover Detection ────────────────────────────────────────
