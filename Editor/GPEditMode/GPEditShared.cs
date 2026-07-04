@@ -32,6 +32,37 @@ static class GPEditShared
     public static readonly Color DragPlane      = new Color(1f, 0.9f, 0.3f, 0.12f);
     public static readonly Color NewVertex      = new Color(0.4f, 1f, 0.5f, 0.95f);
 
+    /// <summary>Occluded variant of an edit gizmo color: same hue, faded so geometry-hidden
+    /// handles read as "behind something" instead of vanishing.</summary>
+    public static Color Occluded(Color c) => new Color(c.r, c.g, c.b, c.a * 0.3f);
+
+    /// <summary>
+    /// True if the world point is hidden from the scene camera by any collider that is NOT
+    /// part of the edited object (which would trivially occlude vertices sitting on its own
+    /// center axis). Handle caps ignore Handles.zTest, so occlusion is tested explicitly.
+    /// </summary>
+    public static bool IsWorldPointOccluded(Vector3 worldPoint, Transform self)
+    {
+        var sv = SceneView.lastActiveSceneView;
+        if (sv == null || sv.camera == null) return false;
+        Vector3 camPos = sv.camera.transform.position;
+        Vector3 toPoint = worldPoint - camPos;
+        float dist = toPoint.magnitude;
+        if (dist < 0.001f) return false;
+        Vector3 dir = toPoint / dist;
+
+        // Pull the hit test slightly short so we don't self-occlude on the target point.
+        var hits = Physics.RaycastAll(camPos, dir, dist - 0.01f, ~0, QueryTriggerInteraction.Ignore);
+        for (int i = 0; i < hits.Length; i++)
+        {
+            var col = hits[i].collider;
+            if (col == null) continue;
+            if (col.transform == self || col.transform.IsChildOf(self)) continue;
+            return true;
+        }
+        return false;
+    }
+
     // ─── Box lookup tables ──────────────────────────────────────
     // Corner index bits: bit0 = +X, bit1 = +Y, bit2 = +Z (Greybox convention).
 

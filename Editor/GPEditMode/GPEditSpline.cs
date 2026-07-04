@@ -580,26 +580,39 @@ static partial class GPEdit
     static void DrawSpline(GPSpline sp, int hoverVertex, int hoverBezier, int hoverBezierSide, int hoverBank, int hoverBankSide,
         bool previewVertex, Vector3 previewPos)
     {
-        // Spline curve
-        Handles.color = sp.SplineColor;
-        for (int seg = 0; seg < sp.SegmentCount; seg++)
+        // Spline curve: two depth-tested passes — hidden-behind-geometry parts faded, visible
+        // parts full color. DrawBezier honors Handles.zTest; the solid handle caps below do NOT,
+        // so their occlusion is raycast per point instead.
+        var prevZTest = Handles.zTest;
+        for (int pass = 0; pass < 2; pass++)
         {
-            sp.GetSegmentControlPointsWorld(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
-            Handles.DrawBezier(p0, p3, p1, p2, sp.SplineColor, null, 2f);
+            bool curveOccluded = pass == 0;
+            Handles.zTest = curveOccluded
+                ? UnityEngine.Rendering.CompareFunction.Greater
+                : UnityEngine.Rendering.CompareFunction.LessEqual;
+            Color splineColor = curveOccluded ? GPEditShared.Occluded(sp.SplineColor) : sp.SplineColor;
+            for (int seg = 0; seg < sp.SegmentCount; seg++)
+            {
+                sp.GetSegmentControlPointsWorld(seg, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+                Handles.DrawBezier(p0, p3, p1, p2, splineColor, null, 2f);
+            }
         }
+        Handles.zTest = prevZTest;
 
-        // Preview of the vertex RMB would insert at the hovered spline point.
+        // Preview of the vertex RMB would insert at the hovered spline point (DrawDot is always-on-top).
         if (previewVertex)
             GPEditShared.DrawDot(previewPos, GPEditShared.NewVertex, 0.06f);
 
-        float scale = sp.Transform.lossyScale.z;
+        Transform self = sp.Transform;
+        float scale = self.lossyScale.z;
         for (int i = 0; i < sp.Count; i++)
         {
             Vector3 vw = sp.GetWorldVertexPos(i);
             float hs = HandleUtility.GetHandleSize(vw) * 0.08f;
             bool isEnd = i == 0 || i == sp.Count - 1;
 
-            Handles.color = i == hoverVertex ? GPEditShared.VertexHover : GPEditShared.Vertex;
+            Color vColor = i == hoverVertex ? GPEditShared.VertexHover : GPEditShared.Vertex;
+            Handles.color = GPEditShared.IsWorldPointOccluded(vw, self) ? GPEditShared.Occluded(vColor) : vColor;
             if (isEnd) Handles.CubeHandleCap(0, vw, Quaternion.identity, hs * 2f, EventType.Repaint);
             else       Handles.SphereHandleCap(0, vw, Quaternion.identity, hs * 2f, EventType.Repaint);
 
@@ -607,38 +620,45 @@ static partial class GPEdit
             Vector3 dir = sp.GetHandleDirWorld(i);
             float len = sp.GetHandleLength(i) * scale;
             Vector3 a = vw + dir * len, b = vw - dir * len;
-            Handles.color = GPEditShared.Bezier;
+            bool occA = GPEditShared.IsWorldPointOccluded(a, self);
+            bool occB = GPEditShared.IsWorldPointOccluded(b, self);
+            // Line color follows both endpoints — faded only when the whole handle is hidden.
+            Handles.color = occA && occB ? GPEditShared.Occluded(GPEditShared.Bezier) : GPEditShared.Bezier;
             Handles.DrawLine(a, vw);
             Handles.DrawLine(vw, b);
             float dot = hs * 0.8f;
-            DrawBezierDot(a, i, +1, hoverBezier, hoverBezierSide, dot);
-            DrawBezierDot(b, i, -1, hoverBezier, hoverBezierSide, dot);
+            DrawBezierDot(a, i, +1, hoverBezier, hoverBezierSide, dot, occA);
+            DrawBezierDot(b, i, -1, hoverBezier, hoverBezierSide, dot, occB);
 
             // Banking handle (road)
             if (sp.HasBanking)
             {
                 Vector3 ba = sp.GetBankingHandleWorld(i, +1), bb = sp.GetBankingHandleWorld(i, -1);
-                Handles.color = GPEditShared.Banking;
+                bool occBa = GPEditShared.IsWorldPointOccluded(ba, self);
+                bool occBb = GPEditShared.IsWorldPointOccluded(bb, self);
+                Handles.color = occBa && occBb ? GPEditShared.Occluded(GPEditShared.Banking) : GPEditShared.Banking;
                 Handles.DrawLine(ba, vw);
                 Handles.DrawLine(vw, bb);
                 float bdot = hs * 0.55f;
-                DrawBankingDot(ba, i, +1, hoverBank, hoverBankSide, bdot);
-                DrawBankingDot(bb, i, -1, hoverBank, hoverBankSide, bdot);
+                DrawBankingDot(ba, i, +1, hoverBank, hoverBankSide, bdot, occBa);
+                DrawBankingDot(bb, i, -1, hoverBank, hoverBankSide, bdot, occBb);
             }
         }
     }
 
-    static void DrawBezierDot(Vector3 p, int i, int side, int hoverV, int hoverSide, float size)
+    static void DrawBezierDot(Vector3 p, int i, int side, int hoverV, int hoverSide, float size, bool occluded)
     {
         bool hot = hoverV == i && hoverSide == side;
-        Handles.color = hot ? GPEditShared.VertexHover : GPEditShared.Bezier;
+        Color c = hot ? GPEditShared.VertexHover : GPEditShared.Bezier;
+        Handles.color = occluded ? GPEditShared.Occluded(c) : c;
         Handles.DotHandleCap(0, p, Quaternion.identity, hot ? size * 1.4f : size, EventType.Repaint);
     }
 
-    static void DrawBankingDot(Vector3 p, int i, int side, int hoverV, int hoverSide, float size)
+    static void DrawBankingDot(Vector3 p, int i, int side, int hoverV, int hoverSide, float size, bool occluded)
     {
         bool hot = hoverV == i && hoverSide == side;
-        Handles.color = hot ? GPEditShared.VertexHover : GPEditShared.Banking;
+        Color c = hot ? GPEditShared.VertexHover : GPEditShared.Banking;
+        Handles.color = occluded ? GPEditShared.Occluded(c) : c;
         Handles.DotHandleCap(0, p, Quaternion.identity, hot ? size * 1.4f : size, EventType.Repaint);
     }
 }

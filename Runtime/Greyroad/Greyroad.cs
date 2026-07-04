@@ -97,6 +97,18 @@ public class Greyroad : GreyPrimitive
     float _bankingRelaxation = 0f;
 
     [SerializeField]
+    [Tooltip("Tiling multiplier for the U texture coordinate. U spans 0-1 across the road's " +
+             "full width (top-down projection), regardless of the actual width. 1 = one texture " +
+             "repeat across the width.")]
+    float _uvUMultiplier = 1f;
+
+    [SerializeField]
+    [Tooltip("Tiling multiplier for the V texture coordinate. V follows the spline and repeats " +
+             "once per local unit of road length, so longer roads tile more. This multiplier " +
+             "scales that repeat density.")]
+    float _uvVMultiplier = 1f;
+
+    [SerializeField]
     [Tooltip("6 flags controlling which faces are included in the mesh. " +
              "Toggle via Q + LMB on a face in the Scene View. " +
              "Indices: 0=Top, 1=Bottom, 2=LeftSide, 3=RightSide, 4=StartCap, 5=EndCap.")]
@@ -146,6 +158,18 @@ public class Greyroad : GreyPrimitive
     {
         get => _bankingRelaxation;
         set { _bankingRelaxation = Mathf.Clamp01(value); }
+    }
+
+    public float UvUMultiplier
+    {
+        get => _uvUMultiplier;
+        set { _uvUMultiplier = value; }
+    }
+
+    public float UvVMultiplier
+    {
+        get => _uvVMultiplier;
+        set { _uvVMultiplier = value; }
     }
 
     public bool[] ActiveFaces => _activeFaces;
@@ -432,6 +456,7 @@ public class Greyroad : GreyPrimitive
         public float widthMul;
         public float heightMul;
         public float bankingAngle;
+        public float arcLen; // cumulative distance along the spline, in local units
     }
 
     /// <summary>
@@ -446,6 +471,7 @@ public class Greyroad : GreyPrimitive
         public Vector3 up;    // along +height
         public float halfWidth;
         public float halfHeight;
+        public float arcLen;  // cumulative distance along the spline, in local units
     }
 
     protected override void GenerateMesh(Mesh mesh)
@@ -474,6 +500,7 @@ public class Greyroad : GreyPrimitive
         // Accumulators
         var verts = new List<Vector3>(ringCount * 8);
         var norms = new List<Vector3>(ringCount * 8);
+        var uvs   = new List<Vector2>(ringCount * 8);
         var tris  = new List<int>(ringCount * 24);
 
         // Helper: corner positions of one ring's cross-section (CCW looking down the tangent).
@@ -482,16 +509,17 @@ public class Greyroad : GreyPrimitive
         // For each side strip we emit a quad strip between ring i and ring i+1, with
         // wN or sN slices across the cross-section edge and (ringCount-1) slices along length.
 
-        if (_activeFaces[FaceTop])      EmitFaceStrip(frames, ringCount, wN, FaceTop,      verts, norms, tris);
-        if (_activeFaces[FaceBottom])   EmitFaceStrip(frames, ringCount, wN, FaceBottom,   verts, norms, tris);
-        if (_activeFaces[FaceLeftSide]) EmitFaceStrip(frames, ringCount, sN, FaceLeftSide, verts, norms, tris);
-        if (_activeFaces[FaceRightSide])EmitFaceStrip(frames, ringCount, sN, FaceRightSide,verts, norms, tris);
-        if (_activeFaces[FaceStartCap]) EmitCapQuad(frames[0],              wN, sN, isStart: true,  verts, norms, tris);
-        if (_activeFaces[FaceEndCap])   EmitCapQuad(frames[ringCount - 1], wN, sN, isStart: false, verts, norms, tris);
+        if (_activeFaces[FaceTop])      EmitFaceStrip(frames, ringCount, wN, FaceTop,      verts, norms, uvs, tris);
+        if (_activeFaces[FaceBottom])   EmitFaceStrip(frames, ringCount, wN, FaceBottom,   verts, norms, uvs, tris);
+        if (_activeFaces[FaceLeftSide]) EmitFaceStrip(frames, ringCount, sN, FaceLeftSide, verts, norms, uvs, tris);
+        if (_activeFaces[FaceRightSide])EmitFaceStrip(frames, ringCount, sN, FaceRightSide,verts, norms, uvs, tris);
+        if (_activeFaces[FaceStartCap]) EmitCapQuad(frames[0],              wN, sN, isStart: true,  verts, norms, uvs, tris);
+        if (_activeFaces[FaceEndCap])   EmitCapQuad(frames[ringCount - 1], wN, sN, isStart: false, verts, norms, uvs, tris);
 
         mesh.Clear();
         mesh.SetVertices(verts);
         mesh.SetNormals(norms);
+        mesh.SetUVs(0, uvs);
         mesh.SetTriangles(tris, 0);
     }
 
@@ -526,17 +554,26 @@ public class Greyroad : GreyPrimitive
             frames[ring].up         = up;
             frames[ring].halfWidth  = 0.5f * Mathf.Max(0f, s.widthMul);
             frames[ring].halfHeight = 0.5f * Mathf.Max(0f, s.heightMul);
+            frames[ring].arcLen     = s.arcLen;
         }
     }
+
+    // Inset from the 0/1 ends of the U span. Faces sitting at exactly U=0 or U=1 (the side
+    // walls) would otherwise sample a repeating texture right on its wrap seam — at exactly
+    // 1.0 the sampler wraps to the opposite edge of the texture.
+    const float k_UvEdgeInset = 0.01f;
 
     /// <summary>
     /// Position of a point on the cross-section edge of one face, parameterized by u in [0,1].
     /// u directions are chosen so that — with rings progressing along +tangent — the cross product
     /// (tangent × u_dir) equals the face's outward normal, allowing a unified winding for all four
     /// side faces in EmitFaceStrip.
+    /// uvU is the texture U coordinate as a top-down projection: 0 at the left edge (-width),
+    /// 1 at the right edge (+width), regardless of the actual width. Side faces sit at a constant
+    /// width position, so they get a constant uvU (the texture's edge column stretches down them).
     /// </summary>
     void SampleFaceEdge(in RingFrame f, int face, float u, float baseWidth, float baseHeight,
-        out Vector3 pos, out Vector3 normal)
+        out Vector3 pos, out Vector3 normal, out float uvU)
     {
         // Spline runs along the TOP of the road. Top h = 0, bottom h = -fullH.
         // Increasing baseHeight extends the body DOWNWARD; the top stays at the spline.
@@ -566,10 +603,12 @@ public class Greyroad : GreyPrimitive
                 break;
         }
         pos = f.position + f.right * w + f.up * h;
+        uvU = halfW > 1e-5f ? (w + halfW) / (2f * halfW) : 0.5f;
+        uvU = Mathf.Clamp(uvU, k_UvEdgeInset, 1f - k_UvEdgeInset);
     }
 
     void EmitFaceStrip(RingFrame[] frames, int ringCount, int edgeVerts, int face,
-        List<Vector3> verts, List<Vector3> norms, List<int> tris)
+        List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<int> tris)
     {
         int baseIndex = verts.Count;
         int slices = Mathf.Max(2, edgeVerts);
@@ -579,9 +618,11 @@ public class Greyroad : GreyPrimitive
             for (int i = 0; i < slices; i++)
             {
                 float u = i / (float)(slices - 1);
-                SampleFaceEdge(frames[ring], face, u, _baseWidth, _baseHeight, out Vector3 p, out Vector3 n);
+                SampleFaceEdge(frames[ring], face, u, _baseWidth, _baseHeight, out Vector3 p, out Vector3 n, out float uvU);
                 verts.Add(p);
                 norms.Add(n);
+                // Top-down projected UV: U spans 0-1 across the width, V repeats by arc length.
+                uvs.Add(new Vector2(uvU * _uvUMultiplier, frames[ring].arcLen * _uvVMultiplier));
             }
         }
 
@@ -603,7 +644,7 @@ public class Greyroad : GreyPrimitive
     }
 
     void EmitCapQuad(in RingFrame f, int wN, int sN, bool isStart,
-        List<Vector3> verts, List<Vector3> norms, List<int> tris)
+        List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, List<int> tris)
     {
         float halfW = _baseWidth  * f.halfWidth;
         float fullH = _baseHeight * (f.halfHeight * 2f);
@@ -624,6 +665,10 @@ public class Greyroad : GreyPrimitive
                 float w  = Mathf.Lerp(-halfW, +halfW, su);
                 verts.Add(f.position + f.right * w + f.up * h);
                 norms.Add(normal);
+                // Caps are vertical, so the top-down projection collapses their height axis:
+                // U spans the width, V is the cap's constant arc-length position.
+                float capU = Mathf.Clamp(su, k_UvEdgeInset, 1f - k_UvEdgeInset);
+                uvs.Add(new Vector2(capU * _uvUMultiplier, f.arcLen * _uvVMultiplier));
             }
         }
 
@@ -771,6 +816,7 @@ public class Greyroad : GreyPrimitive
                 widthMul     = EvaluateHermite(widthVals[seg],  widthTan[seg],  widthVals[seg + 1],  widthTan[seg + 1],  u, segLen),
                 heightMul    = EvaluateHermite(heightVals[seg], heightTan[seg], heightVals[seg + 1], heightTan[seg + 1], u, segLen),
                 bankingAngle = EvaluateHermite(bankVals[seg],   bankTan[seg],   bankVals[seg + 1],   bankTan[seg + 1],   u, segLen) * Mathf.Deg2Rad,
+                arcLen       = target,
             });
         }
 
