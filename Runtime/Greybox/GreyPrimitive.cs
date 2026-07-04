@@ -29,9 +29,12 @@ public enum PlanarUvProjection
 /// any other Unity callback.
 ///
 /// Mesh persistence: a primitive on a plain scene object keeps its meshes scene-embedded (serialized
-/// into the scene file). A primitive that belongs to a prefab embeds its meshes inside the prefab
-/// file itself, as sub-assets — no external mesh files. The prefab and every scene instance
-/// reference the same embedded bake, so rebaking from anywhere updates all of them.
+/// into the scene file). A primitive baked inside a prefab (prefab stage, or directly on the asset)
+/// embeds its meshes inside the prefab file itself, as sub-assets — no external mesh files; the
+/// prefab and its instances reference that embedded bake. Rebaking a prefab instance in a scene
+/// never touches the prefab: the bake forks to a fresh scene-embedded mesh and the changed
+/// references serialize as regular prefab instance overrides — revert restores the prefab's bake,
+/// and applying the overrides re-bakes the prefab (see GreyPrimitiveApplyGuard).
 /// </summary>
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public abstract class GreyPrimitive : MonoBehaviour
@@ -150,11 +153,17 @@ public abstract class GreyPrimitive : MonoBehaviour
     /// A scene-embedded twin is dropped just by nulling the reference (the save won't serialize an
     /// unreferenced object); a twin embedded as this primitive's own prefab sub-asset is also
     /// removed from the asset, guarded so a mesh a sibling still shares is never yanked.
+    /// On a prefab instance, a twin still embedded in an asset is the prefab's state, not this
+    /// instance's — the prefab's own save clears it; nulling it here would only spam an override.
     /// </summary>
     public bool ClearStaleColliderMesh()
     {
         if (UsesColliderMesh) return false;
         if (_colliderMesh == null && _colliderMeshOwnerId == 0) return false;
+
+        if (_colliderMesh != null && AssetDatabase.Contains(_colliderMesh)
+            && PrefabUtility.GetCorrespondingObjectFromSource(this) != null)
+            return false;
 
         if (_colliderMesh != null
             && _colliderMesh.name == $"{GetType().Name} Collider"
@@ -400,28 +409,36 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
     /// <summary>Ensures live mesh objects exist to write geometry into, with no AssetDatabase work —
-    /// existing meshes this instance owns are reused as-is and only their contents are regenerated.
-    /// A mesh this instance doesn't own (a fresh duplicate still shares the source's mesh) is split
-    /// off first, so a drag doesn't write geometry into the original's mesh. Used while a drag is
-    /// deferred; the real bake target selection runs in <see cref="PrepareBakeTargets"/> at drag end.</summary>
+    /// existing meshes this bake may write into are reused as-is and only their contents are
+    /// regenerated; anything else is split off first. Used while a drag is deferred; the real bake
+    /// target selection runs in <see cref="PrepareBakeTargets"/> at drag end.</summary>
     void EnsureLiveMeshTargets()
     {
-        if (_mesh == null || !OwnsMesh(_meshOwnerId))
+        string containerPath = GetContainingPrefabPath();
+        if (!CanWriteLiveInto(_mesh, _meshOwnerId, containerPath))
         {
             _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
             _meshOwnerId = GetInstanceID();
         }
-        if (UsesColliderMesh && (_colliderMesh == null || !OwnsMesh(_colliderMeshOwnerId)))
+        if (UsesColliderMesh && !CanWriteLiveInto(_colliderMesh, _colliderMeshOwnerId, containerPath))
         {
             _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
             _colliderMeshOwnerId = GetInstanceID();
         }
     }
 
-    // A duplicate serializes the source's owner id; when it doesn't match this instance the mesh still
-    // belongs to the original and must be split off. Prefab-embedded meshes (owner guid set) are shared
-    // across instances by design, so they always count as owned here.
-    bool OwnsMesh(int ownerId) => !string.IsNullOrEmpty(_meshOwnerGuid) || ownerId == GetInstanceID();
+    // A mesh is a legal live-write target only when this bake would own it anyway: an asset-contained
+    // mesh only inside the container (prefab stage / asset) it's embedded in — a drag on a prefab
+    // instance must fork instead of deforming the shared prefab bake in memory — and a scene-embedded
+    // mesh only when the owner id matches (a fresh duplicate still shares the source's mesh and must
+    // split off, so a drag doesn't write geometry into the original's mesh).
+    bool CanWriteLiveInto(Mesh mesh, int ownerId, string containerPath)
+    {
+        if (mesh == null) return false;
+        if (AssetDatabase.Contains(mesh))
+            return containerPath != null && AssetDatabase.GetAssetPath(mesh) == containerPath;
+        return ownerId == GetInstanceID();
+    }
 
     // ─── Mesh persistence (editor) ───────────────────────────────
 
@@ -431,14 +448,16 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     /// <summary>
     /// Decides, before generation, which Mesh objects this bake writes into.
-    /// Plain scene object: scene-embedded meshes, recreated when the instance id doesn't match (a
-    /// duplicated object splits off its own mesh) or when the current mesh is a prefab-owned asset
-    /// (an unpacked/detached object must never write into the prefab's bake).
-    /// Prefab-contained: writes in place into the mesh embedded in this prefab when this component
-    /// owns it — no serialized change at all, so the prefab and every instance update together.
-    /// Otherwise (first bake, mesh trapped in a scene file or an external asset, duplicated object
-    /// or duplicated prefab) fresh meshes are created here and PersistBakedMeshes embeds them into
-    /// the prefab file as sub-assets.
+    /// Scene-owned (plain scene object, prefab instance in a scene, unpacked/detached object):
+    /// scene-embedded meshes, recreated when the instance id doesn't match (a duplicated object
+    /// splits off its own mesh) or when the current mesh is asset-contained — the first local bake
+    /// on a prefab instance forks off the prefab's embedded bake this way, and the changed
+    /// references serialize as regular prefab instance overrides. The prefab's own bake is never
+    /// written into from a scene.
+    /// Prefab stage / prefab asset: writes in place into the mesh embedded in this prefab when this
+    /// component owns it — no serialized change at all. Otherwise (first bake, mesh trapped in a
+    /// scene file or an external asset, duplicated object or duplicated prefab) fresh meshes are
+    /// created here and PersistBakedMeshes embeds them into the prefab file as sub-assets.
     /// </summary>
     void PrepareBakeTargets()
     {
@@ -503,17 +522,17 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
     /// <summary>
-    /// Path of the prefab asset that owns this primitive's serialized state — the open prefab stage,
-    /// or the prefab this component is an instance of. Null for plain scene objects, including
-    /// objects added on top of a prefab instance (their serialized state lives in the scene file).
+    /// Path of the prefab asset whose file owns this primitive's baked meshes — the open prefab
+    /// stage, or the prefab asset itself when this component lives directly inside one. Null for
+    /// anything whose serialized state lands in a scene file: plain scene objects, objects added on
+    /// top of a prefab instance, and prefab instances themselves — an instance bake is local by
+    /// design (scene-embedded mesh, referenced through instance overrides), never a write into the
+    /// shared prefab.
     /// </summary>
     string GetContainingPrefabPath()
     {
         var stage = PrefabStageUtility.GetPrefabStage(gameObject);
         if (stage != null) return stage.assetPath;
-
-        var source = PrefabUtility.GetCorrespondingObjectFromSource(this);
-        if (source != null) return AssetDatabase.GetAssetPath(source);
 
         if (PrefabUtility.IsPartOfPrefabAsset(this))
             return AssetDatabase.GetAssetPath(this);
@@ -564,7 +583,7 @@ public abstract class GreyPrimitive : MonoBehaviour
             }
 
             EditorUtility.SetDirty(this);
-            WritePrefabAndApplyRefs();
+            WritePrefabIfDirty();
         }
         else
         {
@@ -575,7 +594,7 @@ public abstract class GreyPrimitive : MonoBehaviour
                 {
                     AssetDatabase.AddObjectToAsset(_colliderMesh, _bakeContainerPath);
                     EditorUtility.SetDirty(this);
-                    WritePrefabAndApplyRefs();
+                    WritePrefabIfDirty();
                 }
                 EditorUtility.SetDirty(_colliderMesh);
             }
@@ -583,54 +602,38 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
     /// <summary>
-    /// Persists newly embedded meshes after a bake outside a prefab stage: writes the prefab file
-    /// (so the sub-assets exist on disk) and pushes the mesh references into the prefab. Inside a
-    /// prefab stage this is a no-op — writing the file under the open stage would conflict with it;
-    /// the stage save serializes both the sub-assets and the references.
+    /// Writes the prefab file after a bake directly on the prefab asset, so freshly embedded
+    /// sub-assets exist on disk. Inside a prefab stage this is a no-op — writing the file under the
+    /// open stage would conflict with it; the stage save serializes the sub-assets and references.
     /// </summary>
-    void WritePrefabAndApplyRefs()
+    void WritePrefabIfDirty()
     {
         if (PrefabStageUtility.GetPrefabStage(gameObject) == null)
             AssetDatabase.SaveAssetIfDirty(_mesh);
-        ApplyMeshRefsToPrefab();
     }
 
     /// <summary>
-    /// After a bake on a prefab instance in a scene, pushes the changed mesh references (and the
-    /// MeshFilter/MeshCollider assignments) into the prefab asset itself instead of leaving them as
-    /// instance overrides — prefab mode and every other instance see the new bake immediately. No-op
-    /// in a prefab stage (the stage save serializes the fields) and for objects added on top of an
-    /// instance (their state belongs to the scene).
+    /// True when this component's baked meshes live inside the prefab file that owns it — the
+    /// healthy state for a component in a prefab asset. False after an instance's local bake was
+    /// applied onto the prefab: the applied references then point at a scene-embedded (or nulled)
+    /// mesh and the owner guid no longer matches. GreyPrimitiveApplyGuard checks this after every
+    /// apply and re-bakes the asset to restore an embedded bake. Meaningful only on prefab asset
+    /// objects; anything scene-owned reports true (nothing to validate).
     /// </summary>
-    void ApplyMeshRefsToPrefab()
+    public bool PrefabAssetBakeIsValid()
     {
-        if (PrefabStageUtility.GetPrefabStage(gameObject) != null) return;
-        if (PrefabUtility.GetCorrespondingObjectFromSource(this) == null) return;
-
-        ApplyOverrideToContainer(this, "_mesh");
-        ApplyOverrideToContainer(this, "_colliderMesh");
-        ApplyOverrideToContainer(this, "_meshOwnerGuid");
-
-        var mf = GetComponent<MeshFilter>();
-        if (mf != null && PrefabUtility.GetCorrespondingObjectFromSource(mf) != null)
-            ApplyOverrideToContainer(mf, "m_Mesh");
-
-        var mc = GetComponent<MeshCollider>();
-        if (mc != null && PrefabUtility.GetCorrespondingObjectFromSource(mc) != null)
-            ApplyOverrideToContainer(mc, "m_Mesh");
+        string path = AssetDatabase.GetAssetPath(this);
+        if (string.IsNullOrEmpty(path)) return true;
+        if (_mesh == null || AssetDatabase.GetAssetPath(_mesh) != path) return false;
+        if (_meshOwnerGuid != AssetDatabase.AssetPathToGUID(path)) return false;
+        if (UsesColliderMesh && (_colliderMesh == null || AssetDatabase.GetAssetPath(_colliderMesh) != path))
+            return false;
+        return true;
     }
 
-    void ApplyOverrideToContainer(Object obj, string propertyName)
-    {
-        var so = new SerializedObject(obj);
-        var prop = so.FindProperty(propertyName);
-        if (prop == null)
-        {
-            Debug.LogError($"[Greybox] '{name}' — no serialized property '{propertyName}' on {obj.GetType().Name}.");
-            return;
-        }
-        if (!prop.prefabOverride) return; // already matches the prefab — nothing to push
-        PrefabUtility.ApplyPropertyOverride(prop, _bakeContainerPath, InteractionMode.AutomatedAction);
-    }
+    /// <summary>Render mesh of the last bake — for editor tooling that needs the serialized
+    /// reference itself (e.g. the apply guard's orphan sweep keep-set), independent of what the
+    /// MeshFilter currently shows.</summary>
+    public Mesh BakedRenderMesh => _mesh;
 #endif
 }
