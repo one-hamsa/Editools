@@ -274,6 +274,10 @@ sealed class CsgSolid
     /// <summary>Returns a − b (the part of <paramref name="a"/> outside <paramref name="b"/>).</summary>
     public static CsgSolid Subtract(CsgSolid a, CsgSolid b)
     {
+        // An empty subject builds an empty BSP that clips nothing, so the operator would come back
+        // whole and inverted (an inside-out copy of the cutter). Nothing minus anything is nothing.
+        if (a.polygons.Count == 0) return new CsgSolid(new List<CsgPolygon>());
+
         CsgNode.s_depthExceeded = false;
 
         var na = new CsgNode(ClonePolygons(a.polygons));

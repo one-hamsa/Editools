@@ -19,8 +19,9 @@ using UnityEngine.Rendering;
 public class GreyBooleanResult : GreyPrimitive
 {
     // Polygon tags. Subject Greybox faces keep their index 0..5 (so per-face visibility is inherited
-    // and the source frame is recoverable). Operator Greybox faces use 20+index. Non-Greybox bodies
-    // use the body tags. Anything >= 6 is never dropped by the face-visibility filter.
+    // and the source frame is recoverable) — including through chained results, where they refer to
+    // the innermost Greybox subject. Operator Greybox faces use 20+index. Non-Greybox bodies use the
+    // body tags. Anything >= 6 is never dropped by the face-visibility filter.
     const int k_OperatorFaceBase = 20;
     const int k_SubjectBodyTag   = 100;
     const int k_OperatorBodyTag  = 101;
@@ -81,67 +82,103 @@ public class GreyBooleanResult : GreyPrimitive
 #if UNITY_EDITOR
         if (_subject == null) return; // not configured yet (transient on AddComponent)
 
-        CsgSolid baked;
-        bool[] activeFaces;
-        float uvScale;
+        // Collider pass (SubdivisionSuppressed) reuses the render pass's subtraction, just meshes it
+        // minimally (density 0). The (expensive) CSG only runs once per RebuildMesh.
+        if (!(SubdivisionSuppressed && _bakedSolid != null))
+            _bakedSolid = ComputeSolid(out _bakedActiveFaces, out _bakedUvScale);
 
-        if (SubdivisionSuppressed && _bakedSolid != null)
-        {
-            // Collider pass: reuse the render pass's subtraction, just mesh it minimally (density 0).
-            baked = _bakedSolid;
-            activeFaces = _bakedActiveFaces;
-            uvScale = _bakedUvScale;
-        }
-        else
-        {
-            var subjectPolys = new List<CsgPolygon>();
-            activeFaces = null;
-            uvScale = 1f;
-
-            if (_subject is Greybox gb)
-            {
-                _subjLocal = ToLocal(gb.transform, gb.Corners);
-                AddBoxPolygons(subjectPolys, _subjLocal, faceTagBase: 0);
-                activeFaces = gb.ActiveFaces;
-                uvScale = gb.UvTileScale;
-            }
-            else
-            {
-                _subjLocal = null;
-                AddMeshPolygons(subjectPolys, _subject, k_SubjectBodyTag);
-            }
-            var subject = new CsgSolid(subjectPolys);
-
-            baked = subject;
-            if (_operator != null && _operator != _subject)
-            {
-                var opPolys = new List<CsgPolygon>();
-                if (_operator is Greybox opBox)
-                {
-                    _opLocal = ToLocal(opBox.transform, opBox.Corners);
-                    AddBoxPolygons(opPolys, _opLocal, faceTagBase: k_OperatorFaceBase);
-                }
-                else
-                {
-                    _opLocal = null;
-                    AddMeshPolygons(opPolys, _operator, k_OperatorBodyTag);
-                }
-
-                if (opPolys.Count > 0)
-                    baked = CsgSolid.Subtract(subject, new CsgSolid(opPolys));
-            }
-
-            _bakedSolid = baked;
-            _bakedActiveFaces = activeFaces;
-            _bakedUvScale = uvScale;
-        }
-
-        BuildMesh(mesh, baked, activeFaces, uvScale);
+        BuildMesh(mesh, _bakedSolid, _bakedActiveFaces, _bakedUvScale);
 #endif
     }
 
 #if UNITY_EDITOR
     // ─── Solid construction (everything in THIS result's local space) ─────────
+
+    /// <summary>
+    /// Computes the Subject − Operator solid in this result's local space, along with the
+    /// face-visibility mask and UV scale the mesh pass applies to it. Also refreshes
+    /// _subjLocal/_opLocal (the source-face frames the surface grids align to).
+    /// </summary>
+    CsgSolid ComputeSolid(out bool[] activeFaces, out float uvScale)
+    {
+        var subjectPolys = new List<CsgPolygon>();
+        activeFaces = null;
+        uvScale = 1f;
+
+        if (_subject is Greybox gb)
+        {
+            _subjLocal = ToLocal(gb.transform, gb.Corners);
+            AddBoxPolygons(subjectPolys, _subjLocal, faceTagBase: 0);
+            activeFaces = gb.ActiveFaces;
+            uvScale = gb.UvTileScale;
+        }
+        else if (_subject is GreyBooleanResult chained)
+        {
+            // A chained boolean consumes the inner result's exact CSG polygons, NOT its baked render
+            // mesh — the quad-grid remesh is full of T-vertices whose jittery per-triangle planes
+            // leak through the BSP classification, keeping inside-out operator faces in regions an
+            // earlier cut already hollowed.
+            AddResultPolygons(subjectPolys, chained, keepSubjectFaceTags: true, bodyTag: k_SubjectBodyTag);
+
+            // Subject face tags (0..5) survive the whole chain, so the innermost box remains the
+            // source of face visibility, grid frames and UV scale — the outer bake renders those
+            // faces exactly as the inner one did.
+            var innermost = InnermostSubjectBox(chained);
+            if (innermost != null)
+            {
+                _subjLocal = ToLocal(innermost.transform, innermost.Corners);
+                activeFaces = innermost.ActiveFaces;
+                uvScale = innermost.UvTileScale;
+            }
+            else
+                _subjLocal = null;
+        }
+        else
+        {
+            _subjLocal = null;
+            AddMeshPolygons(subjectPolys, _subject, k_SubjectBodyTag);
+        }
+        var subject = new CsgSolid(subjectPolys);
+
+        var baked = subject;
+        if (_operator != null && _operator != _subject)
+        {
+            var opPolys = new List<CsgPolygon>();
+            if (_operator is Greybox opBox)
+            {
+                _opLocal = ToLocal(opBox.transform, opBox.Corners);
+                AddBoxPolygons(opPolys, _opLocal, faceTagBase: k_OperatorFaceBase);
+            }
+            else if (_operator is GreyBooleanResult chainedOp)
+            {
+                _opLocal = null;
+                AddResultPolygons(opPolys, chainedOp, keepSubjectFaceTags: false, bodyTag: k_OperatorBodyTag);
+            }
+            else
+            {
+                _opLocal = null;
+                AddMeshPolygons(opPolys, _operator, k_OperatorBodyTag);
+            }
+
+            if (opPolys.Count > 0)
+                baked = CsgSolid.Subtract(subject, new CsgSolid(opPolys));
+        }
+        return baked;
+    }
+
+    /// <summary>
+    /// The subtraction solid of this result's last bake, computed on demand when no bake has run
+    /// since load. Consumed by an outer <see cref="GreyBooleanResult"/> that uses this result as an
+    /// input (the chain re-bakes inner-to-outer, so a fresh outer bake sees a fresh inner solid).
+    /// </summary>
+    CsgSolid GetOrComputeSolid()
+    {
+        if (_subject == null) return new CsgSolid(new List<CsgPolygon>()); // not configured yet
+
+        if (_bakedSolid == null)
+            _bakedSolid = ComputeSolid(out _bakedActiveFaces, out _bakedUvScale);
+        return _bakedSolid;
+    }
 
     Vector3[] ToLocal(Transform src, Vector3[] localCorners)
     {
@@ -190,6 +227,46 @@ public class GreyBooleanResult : GreyPrimitive
     {
         if (CsgPlane.TryFromPoints(a, b, c, out var plane))
             dst.Add(new CsgPolygon(new List<Vector3>(3) { a, b, c }, tag, plane));
+    }
+
+    /// <summary>
+    /// Adds the exact CSG polygons of another result's solid, mapped into this result's local space.
+    /// Subject face tags (0..5) are kept when requested so face visibility and grid frames inherit
+    /// through the chain; every other polygon takes <paramref name="bodyTag"/>.
+    /// </summary>
+    void AddResultPolygons(List<CsgPolygon> dst, GreyBooleanResult src, bool keepSubjectFaceTags, int bodyTag)
+    {
+        var solid = src.GetOrComputeSolid();
+        foreach (var p in solid.polygons)
+        {
+            var verts = new List<Vector3>(p.verts.Count);
+            for (int i = 0; i < p.verts.Count; i++)
+                verts.Add(transform.InverseTransformPoint(src.transform.TransformPoint(p.verts[i])));
+
+            int tag = keepSubjectFaceTags && p.tag >= 0 && p.tag < 6 ? p.tag : bodyTag;
+            if (TryPlaneFromVerts(verts, out var plane))
+                dst.Add(new CsgPolygon(verts, tag, plane));
+        }
+    }
+
+    // Recomputes a polygon's plane after a space change; false for a fully degenerate sliver
+    // (skipped — it contributes nothing to the solid).
+    static bool TryPlaneFromVerts(List<Vector3> verts, out CsgPlane plane)
+    {
+        for (int i = 1; i < verts.Count - 1; i++)
+            if (CsgPlane.TryFromPoints(verts[0], verts[i], verts[i + 1], out plane))
+                return true;
+        plane = null;
+        return false;
+    }
+
+    // The Greybox at the bottom of a Subject chain (Result -> Result -> ... -> Greybox); null when
+    // the chain bottoms out in a mesh-based primitive.
+    static Greybox InnermostSubjectBox(GreyBooleanResult result)
+    {
+        GreyPrimitive s = result;
+        while (s is GreyBooleanResult r) s = r.Subject;
+        return s as Greybox;
     }
 
     // ─── Mesh output: group into flat surfaces, mesh each as a face-aligned quad grid ──
