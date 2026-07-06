@@ -1153,7 +1153,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 15 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 16 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1217,6 +1217,13 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Select Shadow Only",
 		"Selects all scene objects whose MeshRenderer has Cast Shadows set to Shadows Only. " +
 		"Includes inactive objects.");
+
+	static readonly GUIContent k_PlaneToQuad = new GUIContent(
+		"Plane → Quad",
+		"Replaces the built-in Plane mesh (121 verts) on the selected objects with a shared " +
+		"4-vertex quad in the same coordinate system — 10x10 on local XZ, facing +Y. " +
+		"Only the mesh reference changes: transform, materials, and prefab overrides are kept. " +
+		"MeshColliders using the Plane mesh are swapped too.");
 
 	static readonly GUIContent k_FpsCounter = new GUIContent(
 		"FPS Counter",
@@ -1290,6 +1297,8 @@ class EditoolsSettingsPopup : PopupWindowContent
 			v => SelectMaterial.Enabled = v, null);
 
 		DrawSubmenuOnlyRow(k_SelectShadowOnly, _ => SelectShadowOnly());
+
+		DrawSubmenuOnlyRow(k_PlaneToQuad, _ => PlaneToQuad.ReplaceSelectedPlanes());
 
 		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
 			v => SceneViewFpsCounter.Enabled = v, null);

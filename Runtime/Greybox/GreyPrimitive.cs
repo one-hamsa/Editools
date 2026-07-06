@@ -561,16 +561,25 @@ public abstract class GreyPrimitive : MonoBehaviour
     }
 
     /// <summary>
-    /// Saves freshly baked meshes after generation. Scene-embedded meshes need nothing — the scene
-    /// file carries them. Prefab-owned meshes are embedded into the prefab file itself as sub-assets
-    /// (render mesh + collider twin): added here on a fresh bake, or just marked dirty on an
-    /// in-place bake. The actual disk write happens on save — a prefab stage save serializes the
-    /// embedded meshes with the file, a scene save triggers the save hook — so inspector drags
+    /// Saves freshly baked meshes after generation. Scene-embedded meshes are carried by the scene
+    /// file — the component is just dirtied so the scene knows to save, and on a prefab instance
+    /// the changed mesh-reference fields are recorded as instance overrides (unrecorded, the next
+    /// prefab merge — scene reload, play mode, prefab reimport — would silently revert the bake to
+    /// the prefab's meshes). Prefab-owned meshes are embedded into the prefab file itself as
+    /// sub-assets (render mesh + collider twin): added here on a fresh bake, or just marked dirty
+    /// on an in-place bake. The actual disk write happens on save — a prefab stage save serializes
+    /// the embedded meshes with the file, a scene save triggers the save hook — so inspector drags
     /// never hit the disk per tick.
     /// </summary>
     void PersistBakedMeshes()
     {
-        if (_bakeContainerPath == null) return;
+        if (_bakeContainerPath == null)
+        {
+            if (PrefabUtility.IsPartOfPrefabInstance(this))
+                PrefabUtility.RecordPrefabInstancePropertyModifications(this);
+            EditorUtility.SetDirty(this);
+            return;
+        }
 
         if (_bakeEmbedMeshes)
         {
