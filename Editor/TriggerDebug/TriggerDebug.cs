@@ -6,10 +6,14 @@ using UnityEngine;
 using UnityEngine.UIElements;
 
 /// <summary>
-/// Editools "Trigger Debug" mode. While active, paints every opaque scene renderer
-/// gray and tints green any pixel that falls inside a selected box or sphere collider
-/// (selection plus its children). Lets you see at a glance what world space is inside
-/// vs. outside your trigger volumes. The selection can change live while the mode is on.
+/// Editools "Trigger Debug" mode. While active, paints opaque scene renderers gray and
+/// tints green any pixel that falls inside a selected box or sphere collider (selection
+/// plus its children). Lets you see at a glance what world space is inside vs. outside
+/// your trigger volumes. The selection can change live while the mode is on.
+///
+/// A per-user material whitelist (see TriggerDebugWhitelist) extends the gray fill to
+/// materials that are normally excluded from it — renderers with transparent materials
+/// are skipped by default, whitelisting such a material paints its renderers too.
 ///
 /// Delegates the gray scene fill to the shared SceneMaterialOverride engine (same one
 /// Material Check / LG Edit Mode use) and uploads the selected collider volumes as global
@@ -68,10 +72,11 @@ static class TriggerDebug
 		}
 		s_material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
 
-		SceneMaterialOverride.Enter(s_material, k_ModeName, OnForceExit);
+		SceneMaterialOverride.Enter(new WhitelistStrategy(s_material), k_ModeName, OnForceExit);
 		Selection.selectionChanged += UploadVolumes;
 		SceneView.duringSceneGui += OnSceneGui;
 		TriggerDebugVolumes.Changed += UploadVolumes;
+		TriggerDebugWhitelist.Changed += OnWhitelistChanged;
 		UploadVolumes();
 
 		SessionState.SetBool(k_SessionKey, true);
@@ -86,6 +91,37 @@ static class TriggerDebug
 
 		SessionState.SetBool(k_SessionKey, false);
 		StateChanged?.Invoke(false);
+	}
+
+	// Restart the override so the swap re-runs against the new whitelist
+	// (SceneMaterialOverride has no re-scan API — exit/enter is the supported path).
+	static void OnWhitelistChanged()
+	{
+		if (!IsActive) return;
+		Disable();
+		Enable();
+	}
+
+	/// <summary>
+	/// Fill strategy with an additive whitelist: every opaque renderer is painted as
+	/// always, and whitelisted materials additionally pass the transparent-renderer
+	/// filter so their renderers get painted too (normally they'd be skipped).
+	/// The set is snapshotted at Enter — whitelist edits restart the mode to re-resolve.
+	/// </summary>
+	sealed class WhitelistStrategy : ISceneMaterialOverrideStrategy, ISceneMaterialOverrideTransparencyFilter
+	{
+		readonly Material _debugMaterial;
+		readonly HashSet<Material> _whitelist;
+
+		public WhitelistStrategy(Material debugMaterial)
+		{
+			_debugMaterial = debugMaterial;
+			_whitelist = TriggerDebugWhitelist.BuildSet();
+		}
+
+		public Material Resolve(Renderer renderer, int slotIndex, Material original) => _debugMaterial;
+
+		public bool IncludeTransparent(Material mat) => _whitelist.Contains(mat);
 	}
 
 	/// <summary>
@@ -105,6 +141,7 @@ static class TriggerDebug
 		Selection.selectionChanged -= UploadVolumes;
 		SceneView.duringSceneGui -= OnSceneGui;
 		TriggerDebugVolumes.Changed -= UploadVolumes;
+		TriggerDebugWhitelist.Changed -= OnWhitelistChanged;
 	}
 
 	static void Cleanup()
@@ -196,7 +233,8 @@ static class TriggerDebug
 
 /// <summary>
 /// Scene View toolbar toggle for <see cref="TriggerDebug"/>. Stays in sync with the
-/// underlying mode (e.g. when another override force-exits it).
+/// underlying mode (e.g. when another override force-exits it). Right-click opens the
+/// material whitelist window; drag-dropping materials onto the button whitelists them.
 /// </summary>
 [EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsTriggerDebugButton : EditorToolbarToggle
@@ -208,18 +246,86 @@ class EditoolsTriggerDebugButton : EditorToolbarToggle
 		icon = EditorGUIUtility.IconContent("d_BoxCollider Icon").image as Texture2D;
 		tooltip = "Trigger Debug — paints the scene gray and tints anything inside the " +
 			"selected box/sphere colliders (selection + children), plus any registered debug " +
-			"volumes (e.g. baker bounds). Selection can change live.";
+			"volumes (e.g. baker bounds). Selection can change live.\n" +
+			"Right-click: material whitelist — extra materials (e.g. transparent ones, " +
+			"normally skipped) that get painted too. Drag a material here to add it.";
 
 		SetValueWithoutNotify(TriggerDebug.IsActive);
 		this.RegisterValueChangedCallback(OnToggled);
 
+		RegisterCallback<ContextClickEvent>(OnContextClick);
+		RegisterCallback<DragEnterEvent>(_ => AcceptMaterialDrag());
+		RegisterCallback<DragUpdatedEvent>(_ => AcceptMaterialDrag());
+		RegisterCallback<DragPerformEvent>(OnDragPerform);
+
+		RegisterCallback<AttachToPanelEvent>(OnAttachToPanel);
+		RegisterCallback<DetachFromPanelEvent>(OnDetachFromPanel);
+	}
+
+	void OnAttachToPanel(AttachToPanelEvent evt)
+	{
 		TriggerDebug.StateChanged += OnExternalStateChanged;
-		RegisterCallback<UnityEngine.UIElements.DetachFromPanelEvent>(_ =>
-			TriggerDebug.StateChanged -= OnExternalStateChanged);
+		SetValueWithoutNotify(TriggerDebug.IsActive);
+
+		// Right-click watcher at the panel root, trickle-down: the Scene View consumes
+		// right mouse for camera/context handling before it reaches toolbar elements,
+		// so a callback on this element alone never sees it. The root sees it first.
+		evt.destinationPanel?.visualTree.RegisterCallback<PointerDownEvent>(
+			OnPanelPointerDown, TrickleDown.TrickleDown);
+	}
+
+	void OnDetachFromPanel(DetachFromPanelEvent evt)
+	{
+		TriggerDebug.StateChanged -= OnExternalStateChanged;
+		evt.originPanel?.visualTree.UnregisterCallback<PointerDownEvent>(
+			OnPanelPointerDown, TrickleDown.TrickleDown);
+	}
+
+	void OnPanelPointerDown(PointerDownEvent evt)
+	{
+		if (evt.button != 1) return;
+		if (!worldBound.Contains(new Vector2(evt.position.x, evt.position.y))) return;
+
+		TriggerDebugWhitelistWindow.Open();
+		evt.StopImmediatePropagation();
 	}
 
 	void OnToggled(UnityEngine.UIElements.ChangeEvent<bool> evt) => TriggerDebug.SetEnabled(evt.newValue);
 
 	void OnExternalStateChanged(bool on) => SetValueWithoutNotify(on);
+
+	// Fallback for panels where right-click does reach the element — the panel-root
+	// watcher above already opened the window and stopped propagation in that case.
+	void OnContextClick(ContextClickEvent evt)
+	{
+		TriggerDebugWhitelistWindow.Open();
+		evt.StopPropagation();
+	}
+
+	static void AcceptMaterialDrag()
+	{
+		if (DragContainsMaterial())
+			DragAndDrop.visualMode = DragAndDropVisualMode.Link;
+	}
+
+	void OnDragPerform(DragPerformEvent evt)
+	{
+		if (!DragContainsMaterial()) return;
+		DragAndDrop.AcceptDrag();
+		foreach (var obj in DragAndDrop.objectReferences)
+			if (obj is Material mat)
+				TriggerDebugWhitelist.Add(mat);
+
+		// Visible confirmation — a bare drop otherwise gives no feedback at all.
+		TriggerDebugWhitelistWindow.Open();
+	}
+
+	static bool DragContainsMaterial()
+	{
+		foreach (var obj in DragAndDrop.objectReferences)
+			if (obj is Material)
+				return true;
+		return false;
+	}
 }
 #endif

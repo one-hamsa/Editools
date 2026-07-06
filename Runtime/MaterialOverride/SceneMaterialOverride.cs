@@ -23,6 +23,18 @@ public interface ISceneMaterialOverrideStrategy
 	Material Resolve(Renderer renderer, int slotIndex, Material original);
 }
 
+/// <summary>
+/// Optional companion to <see cref="ISceneMaterialOverrideStrategy"/>. By default any
+/// renderer carrying a transparent material is skipped entirely; a strategy that also
+/// implements this can admit specific transparent materials so their renderers stay
+/// override candidates (e.g. Trigger Debug's user whitelist).
+/// </summary>
+public interface ISceneMaterialOverrideTransparencyFilter
+{
+	/// <summary>Return true to let this transparent material pass the opaque-only renderer filter.</summary>
+	bool IncludeTransparent(Material mat);
+}
+
 #if UNITY_EDITOR
 
 /// <summary>
@@ -338,16 +350,24 @@ public static class SceneMaterialOverride
 
 	static bool HasTransparentMaterial(Renderer renderer)
 	{
+		var filter = _strategy as ISceneMaterialOverrideTransparencyFilter;
 		var materials = renderer.sharedMaterials;
 		for (int i = 0; i < materials.Length; i++)
 		{
 			var mat = materials[i];
 			if (mat == null) continue;
-			if (mat.renderQueue >= 3000) return true;
-			// Also catch materials whose custom queue override is transparent (>= 2500) but
-			// whose Material.renderQueue reports the shader default (e.g. Amplify blend shaders
+
+			// renderQueue >= 3000 is transparent; the custom-queue check also catches
+			// materials whose per-material queue override is transparent (>= 2500) while
+			// Material.renderQueue reports the shader default (e.g. Amplify blend shaders
 			// on the Geometry queue with a per-material transparent override).
-			if (MaterialCustomRenderQueue(mat) >= 2500) return true;
+			bool transparent = mat.renderQueue >= 3000 || MaterialCustomRenderQueue(mat) >= 2500;
+			if (!transparent) continue;
+
+			// The strategy can admit specific transparent materials (e.g. a user whitelist).
+			if (filter != null && filter.IncludeTransparent(mat)) continue;
+
+			return true;
 		}
 		return false;
 	}
