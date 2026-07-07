@@ -131,12 +131,42 @@ static class GPEditShared
         return Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
     }
 
-    /// <summary>Screen-space distance from a point to a world-space segment.</summary>
+    /// <summary>
+    /// Screen-space distance from a point to a world-space segment. The segment is clipped to
+    /// the camera's near plane first — points behind the camera project to garbage GUI coords,
+    /// which made partially-visible segments unhoverable.
+    /// </summary>
     public static float DistToSegment(Vector3 segA, Vector3 segB, Vector2 screenPos)
     {
+        if (!ClipSegmentToCameraFront(ref segA, ref segB)) return float.MaxValue;
         Vector2 a = HandleUtility.WorldToGUIPoint(segA);
         Vector2 b = HandleUtility.WorldToGUIPoint(segB);
         return DistPointToSegment2D(screenPos, a, b);
+    }
+
+    /// <summary>
+    /// Clips a world segment to the region in front of the scene camera's near plane, so it can
+    /// be projected to GUI space safely. Returns false when the whole segment is behind the
+    /// camera; leaves the segment unchanged when no camera is available.
+    /// </summary>
+    public static bool ClipSegmentToCameraFront(ref Vector3 a, ref Vector3 b)
+    {
+        Camera cam = Camera.current;
+        if (cam == null)
+        {
+            var sv = SceneView.lastActiveSceneView;
+            cam = sv != null ? sv.camera : null;
+        }
+        if (cam == null) return true;
+
+        Transform ct = cam.transform;
+        float planeDist = cam.nearClipPlane + 0.001f;
+        float da = Vector3.Dot(a - ct.position, ct.forward) - planeDist;
+        float db = Vector3.Dot(b - ct.position, ct.forward) - planeDist;
+        if (da < 0f && db < 0f) return false;
+        if (da < 0f)      a = Vector3.Lerp(a, b, da / (da - db));
+        else if (db < 0f) b = Vector3.Lerp(b, a, db / (db - da));
+        return true;
     }
 
     public static float DistPointToSegment2D(Vector2 p, Vector2 a, Vector2 b)
@@ -148,9 +178,11 @@ static class GPEditShared
         return Vector2.Distance(p, a + ab * t);
     }
 
-    /// <summary>Closest point on a world segment to a screen position (projected in screen space).</summary>
+    /// <summary>Closest point on a world segment to a screen position (projected in screen space).
+    /// The segment is clipped to the camera near plane so the result stays on its visible part.</summary>
     public static Vector3 ClosestPointOnSegmentToScreenPos(Vector3 segA, Vector3 segB, Vector2 screenPos)
     {
+        ClipSegmentToCameraFront(ref segA, ref segB);
         Vector2 sa = HandleUtility.WorldToGUIPoint(segA);
         Vector2 sb = HandleUtility.WorldToGUIPoint(segB);
         Vector2 ab = sb - sa;
@@ -158,6 +190,80 @@ static class GPEditShared
         if (lenSq < 0.0001f) return (segA + segB) * 0.5f;
         float t = Mathf.Clamp01(Vector2.Dot(screenPos - sa, ab) / lenSq);
         return Vector3.Lerp(segA, segB, t);
+    }
+
+    // ─── Screen-space plane drag ────────────────────────────────
+
+    /// <summary>
+    /// Pixel↔world mapping for dragging a point across the plane spanned by two world axis
+    /// directions, captured once at drag start. Mouse deltas are decomposed onto the axes'
+    /// screen-space directions and converted back to world units — no ray/plane intersection,
+    /// so the drag never inverts or blows up when the camera views the plane edge-on, and the
+    /// per-axis pixel contributions it reports are the right quantity for axis-lock decisions.
+    /// </summary>
+    public struct PlaneDragFrame
+    {
+        public Vector3 axisA, axisB;     // world-space unit directions of the two free axes
+        public float   step;             // world units represented by one screenA/screenB step
+        public Vector2 screenA, screenB; // GUI-space pixel offset of +step along each axis
+
+        const float MinAxisPx = 2f;      // axis unusable below this screen length (points at the camera)
+        const float MinDetSin = 0.035f;  // ~2° — screen dirs more parallel than this → single-axis fallback
+
+        public static PlaneDragFrame Capture(Vector3 anchor, Vector3 axisA, Vector3 axisB)
+        {
+            var f = new PlaneDragFrame
+            {
+                axisA = axisA,
+                axisB = axisB,
+                step  = HandleUtility.GetHandleSize(anchor),
+            };
+            Vector2 origin = HandleUtility.WorldToGUIPoint(anchor);
+            f.screenA = HandleUtility.WorldToGUIPoint(anchor + axisA * f.step) - origin;
+            f.screenB = HandleUtility.WorldToGUIPoint(anchor + axisB * f.step) - origin;
+            return f;
+        }
+
+        /// <summary>
+        /// Decomposes a mouse delta (GUI px) into per-axis parameters for <see cref="WorldDelta"/>.
+        /// lockAxis: -1 = both axes free, 0/1 = confine to axisA/axisB (least-squares projection).
+        /// pxA/pxB are each axis's screen-space contribution in pixels — compare these (not world
+        /// deltas, which perspective distorts) when deciding which axis the user is moving along.
+        /// </summary>
+        public void Solve(Vector2 mouseDelta, int lockAxis, out float ta, out float tb, out float pxA, out float pxB)
+        {
+            ta = 0f; tb = 0f;
+            float lenA = screenA.magnitude, lenB = screenB.magnitude;
+            bool useA = lockAxis != 1 && lenA >= MinAxisPx;
+            bool useB = lockAxis != 0 && lenB >= MinAxisPx;
+
+            if (useA && useB)
+            {
+                float det = screenA.x * screenB.y - screenA.y * screenB.x;
+                if (Mathf.Abs(det) < MinDetSin * lenA * lenB)
+                {
+                    // Near-parallel screen directions — the 2x2 solve would explode; keep only
+                    // the better-conditioned axis.
+                    if (lenA >= lenB) useB = false; else useA = false;
+                }
+                else
+                {
+                    ta = (mouseDelta.x * screenB.y - mouseDelta.y * screenB.x) / det;
+                    tb = (mouseDelta.y * screenA.x - mouseDelta.x * screenA.y) / det;
+                }
+            }
+
+            if (useA != useB)
+            {
+                if (useA) ta = Vector2.Dot(mouseDelta, screenA) / (lenA * lenA);
+                else      tb = Vector2.Dot(mouseDelta, screenB) / (lenB * lenB);
+            }
+
+            pxA = ta * lenA;
+            pxB = tb * lenB;
+        }
+
+        public Vector3 WorldDelta(float ta, float tb) => axisA * (ta * step) + axisB * (tb * step);
     }
 
     // ─── Handle drawing ─────────────────────────────────────────

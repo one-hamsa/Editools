@@ -27,11 +27,15 @@ static partial class GPEdit
     // Edge / face drag
     static int     s_gbEdge;
     static int     s_gbFace;
-    static int     s_gbEdgeAxis;
     static Vector3 s_gbPlanePoint;
     static Vector3 s_gbPlaneNormal;
     static Vector3 s_gbHitStart;
     static float   s_gbNormalStartDist;
+
+    // Edge drag: pixel↔world mapping frozen at drag start (see GPEditShared.PlaneDragFrame)
+    static GPEditShared.PlaneDragFrame s_gbEdgeFrame;
+    static Vector2 s_gbEdgePressPos;
+    static int     s_gbEdgeLockAxis; // Shift lock: -1 undecided, 0/1 = frame axis A/B
 
     // Extrude
     static Greybox s_gbExtrudeNew;
@@ -159,14 +163,27 @@ static partial class GPEdit
         s_gbDrag = GbDrag.Edge;
         s_gbEdge = edge;
         s_gbStartCorners = (Vector3[])gb.Corners.Clone();
-        s_gbEdgeAxis = edge / 4;
-        s_gbPlaneNormal = s_gbEdgeAxis == 0 ? gb.transform.right
-                        : s_gbEdgeAxis == 1 ? gb.transform.up
-                        : gb.transform.forward;
+
+        // An edge is free to move along the two local axes perpendicular to it.
+        int edgeAxis = edge / 4;
+        Vector3 axisA = GreyboxAxisWorldDir(gb.transform, (edgeAxis + 1) % 3);
+        Vector3 axisB = GreyboxAxisWorldDir(gb.transform, (edgeAxis + 2) % 3);
+
+        // Anchor the mapping at the grabbed point on the camera-visible part of the edge, so the
+        // pixel↔world conversion is exact where the user is looking even when most of the edge
+        // is off-screen.
         int[] ec = GPEditShared.EdgeCornerIndices[edge];
-        s_gbPlanePoint = (s_gbWc[ec[0]] + s_gbWc[ec[1]]) * 0.5f;
-        GPEditShared.RaycastPlane(mousePos, s_gbPlanePoint, s_gbPlaneNormal, out s_gbHitStart);
+        Vector3 p0 = s_gbWc[ec[0]], p1 = s_gbWc[ec[1]];
+        GPEditShared.ClipSegmentToCameraFront(ref p0, ref p1);
+        Vector3 anchor = GPEditShared.ClosestPointOnSegmentToScreenPos(p0, p1, mousePos);
+
+        s_gbEdgeFrame = GPEditShared.PlaneDragFrame.Capture(anchor, axisA, axisB);
+        s_gbEdgePressPos = mousePos;
+        s_gbEdgeLockAxis = -1;
     }
+
+    static Vector3 GreyboxAxisWorldDir(Transform t, int axis)
+        => axis == 0 ? t.right : axis == 1 ? t.up : t.forward;
 
     static void StartGreyboxFaceNormal(Greybox gb, int face, Vector2 mousePos)
     {
@@ -207,7 +224,11 @@ static partial class GPEdit
     {
         if (s_gbTarget == null) { ResetGreyboxDrag(); return; }
 
-        if (e.type == EventType.MouseDrag && e.button == s_gbButton)
+        // Events outside the window arrive as Ignore with the real type in rawType — honoring it
+        // keeps the drag updating off-window and lets the release register wherever it happens.
+        EventType type = e.type == EventType.Ignore ? e.rawType : e.type;
+
+        if (type == EventType.MouseDrag && e.button == s_gbButton)
         {
             ApplyGreyboxDrag(e.mousePosition);
             sv.Repaint();
@@ -215,7 +236,7 @@ static partial class GPEdit
             return;
         }
 
-        if ((e.type == EventType.MouseUp && e.button == s_gbButton) || !Enabled)
+        if ((type == EventType.MouseUp && e.button == s_gbButton) || !Enabled)
         {
             FinishGreyboxDrag();
             e.Use();
@@ -244,16 +265,30 @@ static partial class GPEdit
 
     static void ApplyGreyboxEdge(Vector2 mousePos)
     {
-        if (!GPEditShared.RaycastPlane(mousePos, s_gbPlanePoint, s_gbPlaneNormal, out Vector3 hit)) return;
-        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(hit - s_gbHitStart);
+        Vector2 mouseDelta = mousePos - s_gbEdgePressPos;
 
+        int lockAxis = -1;
         if (Event.current.shift)
         {
-            int a = (s_gbEdgeAxis + 1) % 3;
-            int b = (s_gbEdgeAxis + 2) % 3;
-            if (Mathf.Abs(localDelta[a]) >= Mathf.Abs(localDelta[b])) localDelta[b] = 0f;
-            else localDelta[a] = 0f;
+            // Lock to the axis the mouse actually moved along, compared in pixels; hysteresis so
+            // the choice doesn't flip mid-drag on near-diagonal motion.
+            s_gbEdgeFrame.Solve(mouseDelta, -1, out _, out _, out float pxA, out float pxB);
+            int dominant = Mathf.Abs(pxA) >= Mathf.Abs(pxB) ? 0 : 1;
+            if (s_gbEdgeLockAxis == -1)
+                s_gbEdgeLockAxis = dominant;
+            else if (dominant != s_gbEdgeLockAxis)
+            {
+                float lockedPx = s_gbEdgeLockAxis == 0 ? Mathf.Abs(pxA) : Mathf.Abs(pxB);
+                float otherPx  = s_gbEdgeLockAxis == 0 ? Mathf.Abs(pxB) : Mathf.Abs(pxA);
+                if (otherPx > lockedPx * 1.3f) s_gbEdgeLockAxis = dominant;
+            }
+            lockAxis = s_gbEdgeLockAxis;
         }
+        else s_gbEdgeLockAxis = -1;
+
+        s_gbEdgeFrame.Solve(mouseDelta, lockAxis, out float ta, out float tb, out _, out _);
+        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(s_gbEdgeFrame.WorldDelta(ta, tb));
+        localDelta[s_gbEdge / 4] = 0f; // numeric hygiene — an edge never moves along its own axis
 
         int[] ec = GPEditShared.EdgeCornerIndices[s_gbEdge];
         s_gbTarget.Corners[ec[0]] = s_gbStartCorners[ec[0]] + localDelta;

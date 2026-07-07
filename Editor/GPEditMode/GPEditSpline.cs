@@ -368,7 +368,11 @@ static partial class GPEdit
     {
         if (s_sp == null || s_sp.Obj == null) { ResetSplineDrag(); return; }
 
-        if (e.type == EventType.MouseDrag && e.button == s_spButton)
+        // Events outside the window arrive as Ignore with the real type in rawType — honoring it
+        // keeps the drag updating off-window and lets the release register wherever it happens.
+        EventType type = e.type == EventType.Ignore ? e.rawType : e.type;
+
+        if (type == EventType.MouseDrag && e.button == s_spButton)
         {
             ApplySplineDrag(e.mousePosition);
             s_sp.Rebuild();
@@ -378,7 +382,7 @@ static partial class GPEdit
             return;
         }
 
-        if ((e.type == EventType.MouseUp && e.button == s_spButton) || !Enabled)
+        if ((type == EventType.MouseUp && e.button == s_spButton) || !Enabled)
         {
             FinishSplineDrag();
             e.Use();
