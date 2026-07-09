@@ -1153,7 +1153,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 16 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 17 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1261,6 +1261,13 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Left-click picks a color and live-converts between gamma and linear; " +
 		"right-click copies/pastes or switches conversion direction.");
 
+	static readonly GUIContent k_ReplaceObject = new GUIContent(
+		"Replace Object",
+		"Replaces every selected Hierarchy object with a duplicate of one reference " +
+		"object, keeping each original's transform (parent, position, rotation, scale, " +
+		"sibling index) and name. The reference may be a prefab asset (linked instances) " +
+		"or a scene object (plain duplicates). Click to open the window.");
+
 	static readonly GUIContent k_SdfGenerator = new GUIContent(
 		"SDF Generator",
 		"Bakes a source texture into a signed distance field. Pick a source, tune channel, " +
@@ -1321,6 +1328,8 @@ class EditoolsSettingsPopup : PopupWindowContent
 			v => EditoolsGammaCorrectorButton.Enabled = v, null);
 
 		DrawSubmenuOnlyRow(k_SdfGenerator, _ => SdfGeneratorWindow.ShowWindow());
+
+		DrawSubmenuOnlyRow(k_ReplaceObject, _ => ReplaceObjectWindow.ShowWindow());
 	}
 
 	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
