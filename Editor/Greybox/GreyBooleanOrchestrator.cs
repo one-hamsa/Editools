@@ -90,8 +90,19 @@ static class GreyBooleanOrchestrator
         if (created)
             Selection.activeObject = result.gameObject;
 
-        // If this result is itself an input to a further boolean, propagate the change up the chain.
-        ReBakeChain(OwningResult(result), depth + 1);
+        // If this result is itself an input to a further boolean, propagate the change up the chain —
+        // rebuilding each outer mesh AND re-syncing its material slots, since a cut material assigned
+        // deep in the chain must appear on the outer (rendered) result too.
+        var outer = OwningResult(result);
+        int d = depth + 1;
+        while (outer != null && d <= k_MaxChainDepth)
+        {
+            outer.RebuildMesh();
+            ApplyResultMaterials(outer);
+            EditorUtility.SetDirty(outer);
+            outer = OwningResult(outer);
+            d++;
+        }
     }
 
     static GreyBooleanResult CreateResultWrapper(GreyPrimitive subject, GreyPrimitive op)
@@ -179,20 +190,37 @@ static class GreyBooleanOrchestrator
         var rr = result.GetComponent<MeshRenderer>();
         if (sr != null && rr != null)
         {
-            Undo.RecordObject(rr, "Sync Boolean Result settings");
             // Slot 0 (Subject faces): seeded from the subject only when the result is first created;
             // afterwards the result owns it so an artist's override survives re-bakes.
             Material slot0 = created ? sr.sharedMaterial : rr.sharedMaterial;
-            // Slot 1 (Operator-cut faces): driven by the subject's cut material — a second slot appears
-            // when it's set and disappears when it's cleared, matching the mesh's submesh split.
-            Material cut = subject.BooleanCutMaterial;
-            rr.sharedMaterials = cut != null ? new[] { slot0, cut } : new[] { slot0 };
+            ApplyResultMaterials(result, slot0);
+            Undo.RecordObject(rr, "Sync Boolean Result settings");
             rr.shadowCastingMode = sr.shadowCastingMode;
         }
 
         var go = result.gameObject;
         go.isStatic = subject.gameObject.isStatic;
         go.layer    = subject.gameObject.layer;
+    }
+
+    // Rebuild the result's material array to match its submesh split: slot 0 (its own Subject material)
+    // followed by one slot per cut level that has a material, innermost first. Levels without a material
+    // share slot 0, so an artist's assigned cut materials all survive further booleans.
+    static void ApplyResultMaterials(GreyBooleanResult result, Material slot0)
+    {
+        var rr = result.GetComponent<MeshRenderer>();
+        if (rr == null) return;
+        Undo.RecordObject(rr, "Sync Boolean Result materials");
+        var mats = new System.Collections.Generic.List<Material>(4) { slot0 };
+        foreach (var m in result.CollectCutMaterials())
+            if (m != null) mats.Add(m);
+        rr.sharedMaterials = mats.ToArray();
+    }
+
+    static void ApplyResultMaterials(GreyBooleanResult result)
+    {
+        var rr = result.GetComponent<MeshRenderer>();
+        if (rr != null) ApplyResultMaterials(result, rr.sharedMaterial);
     }
 
     // Show/hide an input: toggles both its renderer AND its mesh collider, since the result owns

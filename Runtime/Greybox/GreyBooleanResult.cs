@@ -25,6 +25,9 @@ public class GreyBooleanResult : GreyPrimitive
     const int k_OperatorFaceBase = 20;
     const int k_SubjectBodyTag   = 100;
     const int k_OperatorBodyTag  = 101;
+    // A cut's faces, once an outer boolean nests it, are frozen to k_CutLevelBase + level so each
+    // boolean level keeps a distinct identity (and its own material slot) all the way up the chain.
+    const int k_CutLevelBase     = 200;
 
     const float k_QuantScale = 10000f; // position quantization for vertex/edge matching (0.1mm)
     const float k_CoordEps   = 1e-4f;  // merge tolerance for grid-line coordinates
@@ -231,11 +234,15 @@ public class GreyBooleanResult : GreyPrimitive
 
     /// <summary>
     /// Adds the exact CSG polygons of another result's solid, mapped into this result's local space.
-    /// Subject face tags (0..5) are kept when requested so face visibility and grid frames inherit
-    /// through the chain; every other polygon takes <paramref name="bodyTag"/>.
+    /// When <paramref name="keepSubjectFaceTags"/> (the src is our Subject), the level identity of every
+    /// fragment is preserved so materials inherit through the chain: Subject faces (0..5) and Subject
+    /// body (100) stay level 0, already-frozen inner cuts (>= k_CutLevelBase) keep their level, and the
+    /// src's own Operator faces are frozen to <c>k_CutLevelBase + ResultDepth(src)</c>. When src is our
+    /// Operator, every fragment collapses to <paramref name="bodyTag"/> — one new cut level.
     /// </summary>
     void AddResultPolygons(List<CsgPolygon> dst, GreyBooleanResult src, bool keepSubjectFaceTags, int bodyTag)
     {
+        int frozenLevel = keepSubjectFaceTags ? k_CutLevelBase + ResultDepth(src) : 0;
         var solid = src.GetOrComputeSolid();
         foreach (var p in solid.polygons)
         {
@@ -243,10 +250,47 @@ public class GreyBooleanResult : GreyPrimitive
             for (int i = 0; i < p.verts.Count; i++)
                 verts.Add(transform.InverseTransformPoint(src.transform.TransformPoint(p.verts[i])));
 
-            int tag = keepSubjectFaceTags && p.tag >= 0 && p.tag < 6 ? p.tag : bodyTag;
+            int tag;
+            if (!keepSubjectFaceTags)
+                tag = bodyTag;                                        // src is the Operator: one new cut
+            else if ((p.tag >= 0 && p.tag < 6) || p.tag == k_SubjectBodyTag)
+                tag = p.tag;                                          // Subject-derived (level 0)
+            else if (p.tag >= k_CutLevelBase)
+                tag = p.tag;                                          // inner cut, already frozen
+            else
+                tag = frozenLevel;                                    // src's own Operator -> freeze its level
+
             if (TryPlaneFromVerts(verts, out var plane))
                 dst.Add(new CsgPolygon(verts, tag, plane));
         }
+    }
+
+    // Number of booleans in this result's Subject chain (this result = 1, +1 per nested result Subject).
+    static int ResultDepth(GreyBooleanResult r)
+    {
+        int d = 0;
+        GreyPrimitive s = r;
+        while (s is GreyBooleanResult rr) { d++; s = rr.Subject; }
+        return d;
+    }
+
+    /// <summary>
+    /// The chain's cut materials, innermost cut first (level 1) to the outermost Operator (level N).
+    /// A null entry is a cut with no assigned material — its faces fall back to the Subject slot.
+    /// Each result's own Operator cut material is declared on its Subject (the object that owns the
+    /// Operator reference), so the walk reads <c>Subject.BooleanCutMaterial</c> at every step.
+    /// </summary>
+    public List<Material> CollectCutMaterials()
+    {
+        var outerToInner = new List<Material>();
+        GreyPrimitive cur = this;
+        while (cur is GreyBooleanResult r)
+        {
+            outerToInner.Add(r.Subject != null ? r.Subject.BooleanCutMaterial : null);
+            cur = r.Subject;
+        }
+        outerToInner.Reverse();
+        return outerToInner;
     }
 
     // Recomputes a polygon's plane after a space change; false for a fully degenerate sliver
@@ -318,21 +362,31 @@ public class GreyBooleanResult : GreyPrimitive
             list.Add(pi);
         }
 
-        // When a cut material is assigned, operator-carved faces go to submesh 1 (their own material
-        // slot) and everything from the Subject to submesh 0; otherwise a single submesh shares one
-        // material as before. The collider pass (SubdivisionSuppressed) never splits — collision
-        // doesn't care about slots.
-        bool splitCut = !SubdivisionSuppressed && _subject != null && _subject.BooleanCutMaterial != null;
+        // Each cut level (the faces one Operator carved) can carry its own material, preserved through
+        // further booleans. Every level that has an assigned material gets its own submesh/slot, in
+        // level order (innermost first); the Subject and any unassigned cut levels share slot 0. With
+        // no cut materials anywhere this is a single submesh, exactly as before. The collider pass
+        // (SubdivisionSuppressed) never splits — collision doesn't care about slots.
+        var cutMats = CollectCutMaterials();       // index 0 => level 1 .. up to the outermost cut
+        int levels  = cutMats.Count;               // == ResultDepth(this)
 
-        var verts    = new List<Vector3>();
-        var normals  = new List<Vector3>();
-        var uvs      = new List<Vector2>();
-        var trisSubj = new List<int>();
-        var trisCut  = splitCut ? new List<int>() : trisSubj;
+        var slotForLevel = new int[levels + 1];    // cut level (0..N) -> submesh slot
+        int slotCount = 1;                         // slot 0 = Subject + unassigned cuts
+        for (int lvl = 1; lvl <= levels; lvl++)
+            slotForLevel[lvl] = cutMats[lvl - 1] != null ? slotCount++ : 0;
+
+        bool split = !SubdivisionSuppressed && slotCount > 1;
+
+        var verts   = new List<Vector3>();
+        var normals = new List<Vector3>();
+        var uvs     = new List<Vector2>();
+        var slotTris = new List<int>[split ? slotCount : 1];
+        for (int i = 0; i < slotTris.Length; i++) slotTris[i] = new List<int>();
+
         foreach (var group in groups.Values)
         {
-            var tris = splitCut && GroupIsOperator(group, polys) ? trisCut : trisSubj;
-            EmitSurface(group, polys, polyIds, target, uvScale, verts, normals, uvs, tris);
+            int slot = split ? slotForLevel[GroupLevel(group, polys, levels)] : 0;
+            EmitSurface(group, polys, polyIds, target, uvScale, verts, normals, uvs, slotTris[slot]);
         }
 
         mesh.Clear();
@@ -340,32 +394,25 @@ public class GreyBooleanResult : GreyPrimitive
         mesh.SetVertices(verts);
         mesh.SetNormals(normals);
         mesh.SetUVs(0, uvs);
-        if (splitCut)
-        {
-            mesh.subMeshCount = 2;
-            mesh.SetTriangles(trisSubj, 0);
-            mesh.SetTriangles(trisCut, 1);
-        }
-        else
-        {
-            mesh.subMeshCount = 1;
-            mesh.SetTriangles(trisSubj, 0);
-        }
+        mesh.subMeshCount = slotTris.Length;
+        for (int i = 0; i < slotTris.Length; i++)
+            mesh.SetTriangles(slotTris[i], i);
     }
 
-    // A flat surface is a single coplanar, edge-connected group — its fragments all share one source,
-    // so the first decisive tag classifies the whole group as Operator-carved (its faces / body) or
-    // Subject-derived.
-    static bool GroupIsOperator(List<int> group, List<CsgPolygon> polys)
+    // The cut level a flat surface belongs to: 0 = Subject-derived, N (== immediateLevel) = this
+    // result's own Operator, 1..N-1 = an inner Operator frozen into the chain. A coplanar edge-connected
+    // group shares one source, so the first decisive tag classifies the whole group.
+    static int GroupLevel(List<int> group, List<CsgPolygon> polys, int immediateLevel)
     {
         foreach (int pi in group)
         {
             int tag = polys[pi].tag;
-            if (tag >= k_OperatorFaceBase && tag < k_OperatorFaceBase + 6) return true;
-            if (tag == k_OperatorBodyTag) return true;
-            if ((tag >= 0 && tag < 6) || tag == k_SubjectBodyTag) return false;
+            if ((tag >= 0 && tag < 6) || tag == k_SubjectBodyTag) return 0;
+            if ((tag >= k_OperatorFaceBase && tag < k_OperatorFaceBase + 6) || tag == k_OperatorBodyTag)
+                return immediateLevel;
+            if (tag >= k_CutLevelBase) return tag - k_CutLevelBase;
         }
-        return false;
+        return 0;
     }
 
     void EmitSurface(List<int> group, List<CsgPolygon> polys, List<int[]> polyIds,
