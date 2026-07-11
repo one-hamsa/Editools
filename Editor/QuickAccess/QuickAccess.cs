@@ -267,8 +267,8 @@ public class QuickAccess : EditorWindow
 		rootVisualElement.Clear();
 
 		BuildLayout();
-		LoadFromPrefs();
-		RebuildAllRows();
+		LoadFromPrefs();          // loads data AND builds scene rows + anchors + badges (via ReloadSceneItems)
+		RebuildRows(isScene: false); // project rows are the only list LoadFromPrefs didn't build — avoids a full second rebuild
 
 		Undo.undoRedoPerformed += OnUndoRedo;
 		Selection.selectionChanged += OnSelectionChanged;
@@ -893,36 +893,57 @@ public class QuickAccess : EditorWindow
 		SyncSelectionHighlights(projectRows);
 	}
 
+	// Hot path: fires on EVERY global selection change, even when the selected
+	// object has nothing to do with QuickAccess. It must stay cheap — do nothing
+	// but toggle the "selected" class.
+	//
+	// Two things are deliberately NOT done here:
+	//  1. No RefreshRowDetails — selecting an object doesn't change its name or
+	//     icon, so there's no reason to rebuild them (ObjectContent + UQuery
+	//     traversal per row is what made selection feel sluggish). Labels/icons
+	//     refresh on rebuild and scene-change instead.
+	//  2. No slow ID resolution — we read only the resolution caches (warmed when
+	//     rows are built) and never fall through to GlobalObjectIdentifierToObjectSlow.
+	//     An unresolved/missing item simply won't highlight until the next rebuild,
+	//     which is fine and infinitely cheaper than re-running the slow API on
+	//     every click.
 	void SyncSelectionHighlights(ScrollView rows)
 	{
-		var currentSelection = Selection.objects;
+		if (rows == null) return;
+
+		var selected = Selection.objects;
+		if (selected == null || selected.Length == 0)
+		{
+			foreach (var row in rows.Children())
+				row.RemoveFromClassList("selected");
+			return;
+		}
+
+		// HashSet so per-row lookup is O(1) rather than a linear array scan.
+		var selectedSet = new HashSet<Object>(selected);
 
 		foreach (var row in rows.Children())
 		{
 			var id = row.userData as string;
-			bool isMulti = id != null && id.StartsWith("multi:");
-
-			if (isMulti)
-			{
-				var resolved = ObjectsFromID(id);
-				bool anySelected = resolved.Any(o => currentSelection.Contains(o));
-				row.EnableInClassList("selected", anySelected);
-
-				// Refresh details for multi items
-				var primaryObj = resolved.Length > 0 ? resolved[0] : null;
-				RefreshRowDetails(row, primaryObj, id, true, resolved);
-			}
-			else
-			{
-				var obj = ObjectFromID(id);
-				RefreshRowDetails(row, obj, id, false, null);
-
-				if (obj != null && currentSelection.Contains(obj))
-					row.AddToClassList("selected");
-				else
-					row.RemoveFromClassList("selected");
-			}
+			row.EnableInClassList("selected", id != null && IsIdSelected(id, selectedSet));
 		}
+	}
+
+	/// <summary>Cache-only membership test used by the selection-highlight hot path.
+	/// Reads s_singleCache/s_multiCache only — never triggers the slow resolve APIs.</summary>
+	static bool IsIdSelected(string id, HashSet<Object> selectedSet)
+	{
+		if (id.StartsWith("multi:"))
+		{
+			if (s_multiCache.TryGetValue(id, out var objs))
+				foreach (var o in objs)
+					if (o != null && selectedSet.Contains(o)) return true;
+			return false;
+		}
+
+		return s_singleCache.TryGetValue(id, out var obj)
+		       && obj != null
+		       && selectedSet.Contains(obj);
 	}
 
 	// ─── Scene Change ──────────────────────────────────────────
@@ -984,6 +1005,10 @@ public class QuickAccess : EditorWindow
 		// undo reverted us to a different scene's data — see the field comment for the full
 		// rationale.
 		sceneIdsOwnerGuid = currentSceneGuid;
+
+		// Batch-resolve all scene items up front (one scene scan) so the per-row
+		// ObjectFromID calls inside RebuildRows are cache hits instead of N slow ones.
+		WarmSceneIdCache(sceneIds);
 
 		RebuildAnchorRows();
 		RebuildRows(isScene: true);
@@ -1528,6 +1553,61 @@ public class QuickAccess : EditorWindow
 		if (ids.Count == 0) return null;
 		if (ids.Count == 1) return ids[0];
 		return "multi:" + string.Join("|", ids);
+	}
+
+	/// <summary>
+	/// Batch pre-resolve every <c>globalid:</c> scene item in a single
+	/// <c>GlobalObjectIdentifiersToObjectsSlow</c> call, warming <c>s_singleCache</c>
+	/// so the subsequent per-row <c>ObjectFromID</c> calls are cache hits.
+	///
+	/// This is the load-time hot spot: resolving N scene items used to mean N separate
+	/// <c>GlobalObjectIdentifierToObjectSlow</c> calls, each of which scans the scene.
+	/// The batch form scans once for all ids. Only active-scene ids are included — the
+	/// same cross-scene guard <see cref="ObjectFromID"/> uses, so the batch never
+	/// synchronously loads another scene.
+	/// </summary>
+	static void WarmSceneIdCache(IEnumerable<string> ids)
+	{
+		var activeGuid = GuidForActiveScene();
+		if (string.IsNullOrEmpty(activeGuid)) return;
+
+		// Gather uncached globalid: strings, expanding multi: items into their sub-ids.
+		var pending = new List<string>();
+		void Collect(string id)
+		{
+			if (string.IsNullOrEmpty(id)) return;
+			if (id.StartsWith("multi:"))
+			{
+				foreach (var sub in id.Substring("multi:".Length).Split('|'))
+					Collect(sub);
+				return;
+			}
+			if (!id.StartsWith("globalid:")) return;   // guid:/instance: resolve cheaply on demand
+			if (s_singleCache.ContainsKey(id)) return;
+			pending.Add(id);
+		}
+		foreach (var id in ids) Collect(id);
+		if (pending.Count == 0) return;
+
+		// Parse, keeping only ids that belong to the active scene.
+		var gids = new List<GlobalObjectId>(pending.Count);
+		var keys = new List<string>(pending.Count);
+		foreach (var s in pending)
+		{
+			if (GlobalObjectId.TryParse(s.Substring("globalid:".Length), out var gid)
+			    && gid.assetGUID.ToString() == activeGuid)
+			{
+				gids.Add(gid);
+				keys.Add(s);
+			}
+		}
+		if (gids.Count == 0) return;
+
+		var results = new Object[gids.Count];
+		GlobalObjectId.GlobalObjectIdentifiersToObjectsSlow(gids.ToArray(), results);
+		for (int i = 0; i < results.Length; i++)
+			if (results[i] != null)
+				s_singleCache[keys[i]] = results[i];
 	}
 
 	/// <summary>
