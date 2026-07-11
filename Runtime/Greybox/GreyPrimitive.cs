@@ -99,6 +99,15 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     public GreyPrimitive BooleanOperator => _booleanOperator;
 
+    [SerializeField]
+    [Tooltip("Optional material for the faces the Operator carves out. Shown only while an Operator is " +
+             "set. Empty = the whole result keeps one material slot, as before. Assign one and the " +
+             "Boolean Result gets a second material slot holding it, applied to the cut faces only; " +
+             "clear it to drop back to a single slot.")]
+    Material _booleanCutMaterial;
+
+    public Material BooleanCutMaterial => _booleanCutMaterial;
+
     // ─── Mesh ───────────────────────────────────────────────────
 
     [SerializeField, HideInInspector]

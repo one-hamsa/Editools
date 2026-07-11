@@ -7,11 +7,13 @@ using UnityEngine;
 /// deformed edges of the visible faces — plus a dot handle at each face center.
 ///
 ///   Outline edge:  LMB drag = deform edge (Shift confines to a local axis)
-///   Face handle:   LMB drag = move face along its normal
-///                  Shift+LMB = skew face (slide its 4 corners together across the face plane)
-///                  MMB       = hide / unhide face
-///                  RMB drag  = extrude an independent box from the face
-///                  Shift+RMB = extrude a seam-linked box from the face
+///   Face handle:   LMB drag       = move face along the object's closest local axis
+///                  Shift+LMB      = move face along its actual normal
+///                  Ctrl+LMB       = skew face (slide its 4 corners together across the face plane)
+///                  Ctrl+Shift+LMB = skew, locked to one of the face plane's two local axes
+///                  MMB            = hide / unhide face
+///                  RMB drag       = extrude an independent box from the face
+///                  Shift+RMB      = extrude a seam-linked box from the face
 /// </summary>
 static partial class GPEdit
 {
@@ -31,6 +33,10 @@ static partial class GPEdit
     static Vector3 s_gbPlaneNormal;
     static Vector3 s_gbHitStart;
     static float   s_gbNormalStartDist;
+
+    // Face skew: axis lock (Ctrl+Shift). s_gbSkewLockAxis is the kept in-plane local axis (-1 = undecided).
+    static bool    s_gbSkewAxisLock;
+    static int     s_gbSkewLockAxis;
 
     // Edge drag: pixel↔world mapping frozen at drag start (see GPEditShared.PlaneDragFrame)
     static GPEditShared.PlaneDragFrame s_gbEdgeFrame;
@@ -128,9 +134,9 @@ static partial class GPEdit
         {
             if (e.button == 2) { ToggleGreyboxFace(gb, hoverFace); e.Use(); return; }
 
-            if (e.button == 0 && !e.shift)      StartGreyboxFaceNormal(gb, hoverFace, e.mousePosition);
-            else if (e.button == 0 && e.shift)  StartGreyboxFaceSkew(gb, hoverFace, e.mousePosition);
-            else if (e.button == 1)             StartGreyboxExtrude(gb, hoverFace, e.mousePosition, linked: e.shift);
+            if (e.button == 0 && e.control)  StartGreyboxFaceSkew(gb, hoverFace, e.mousePosition, axisLock: e.shift);
+            else if (e.button == 0)          StartGreyboxFaceMove(gb, hoverFace, e.mousePosition, alongNormal: e.shift);
+            else if (e.button == 1)          StartGreyboxExtrude(gb, hoverFace, e.mousePosition, linked: e.shift);
             else return;
         }
         else if (hoverEdge >= 0)
@@ -185,23 +191,42 @@ static partial class GPEdit
     static Vector3 GreyboxAxisWorldDir(Transform t, int axis)
         => axis == 0 ? t.right : axis == 1 ? t.up : t.forward;
 
-    static void StartGreyboxFaceNormal(Greybox gb, int face, Vector2 mousePos)
+    /// <summary>The object local axis (signed, world space) whose direction is closest to the face's
+    /// current normal. On an un-skewed box this is the face's own axis; it only diverges once the face
+    /// has been deformed off-axis.</summary>
+    static Vector3 ClosestLocalAxisDir(Greybox gb, int face)
+    {
+        Vector3 n = GreyboxFaceNormal(gb, face);
+        Vector3 best = gb.transform.right;
+        float bestAbs = -1f;
+        for (int axis = 0; axis < 3; axis++)
+        {
+            Vector3 dir = GreyboxAxisWorldDir(gb.transform, axis);
+            float d = Vector3.Dot(n, dir);
+            if (Mathf.Abs(d) > bestAbs) { bestAbs = Mathf.Abs(d); best = d < 0f ? -dir : dir; }
+        }
+        return best;
+    }
+
+    static void StartGreyboxFaceMove(Greybox gb, int face, Vector2 mousePos, bool alongNormal)
     {
         BeginGreyboxUndo(gb, "Greybox Move Face");
         s_gbDrag = GbDrag.FaceNormal;
         s_gbFace = face;
         s_gbStartCorners = (Vector3[])gb.Corners.Clone();
-        s_gbPlaneNormal = GreyboxFaceNormal(gb, face);
+        s_gbPlaneNormal = alongNormal ? GreyboxFaceNormal(gb, face) : ClosestLocalAxisDir(gb, face);
         s_gbPlanePoint = GreyboxFaceCenter(face);
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
         s_gbNormalStartDist = GPEditShared.ProjectRayOntoLine(ray, s_gbPlanePoint, s_gbPlaneNormal);
     }
 
-    static void StartGreyboxFaceSkew(Greybox gb, int face, Vector2 mousePos)
+    static void StartGreyboxFaceSkew(Greybox gb, int face, Vector2 mousePos, bool axisLock)
     {
         BeginGreyboxUndo(gb, "Greybox Skew Face");
         s_gbDrag = GbDrag.FaceSkew;
         s_gbFace = face;
+        s_gbSkewAxisLock = axisLock;
+        s_gbSkewLockAxis = -1;
         s_gbStartCorners = (Vector3[])gb.Corners.Clone();
         s_gbPlaneNormal = GreyboxFaceNormal(gb, face);
         s_gbPlanePoint = GreyboxFaceCenter(face);
@@ -308,6 +333,25 @@ static partial class GPEdit
     {
         if (!GPEditShared.RaycastPlane(mousePos, s_gbPlanePoint, s_gbPlaneNormal, out Vector3 hit)) return;
         Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(hit - s_gbHitStart);
+
+        if (s_gbSkewAxisLock)
+        {
+            // The face plane spans the two local axes other than the face's own; lock to whichever the
+            // drag runs along most, with hysteresis so the choice doesn't flip on near-diagonal motion.
+            int faceAxis = s_gbFace / 2;
+            int a1 = (faceAxis + 1) % 3;
+            int a2 = (faceAxis + 2) % 3;
+            int dominant = Mathf.Abs(localDelta[a1]) >= Mathf.Abs(localDelta[a2]) ? a1 : a2;
+            if (s_gbSkewLockAxis == -1)
+                s_gbSkewLockAxis = dominant;
+            else if (dominant != s_gbSkewLockAxis
+                     && Mathf.Abs(localDelta[dominant]) > Mathf.Abs(localDelta[s_gbSkewLockAxis]) * 1.3f)
+                s_gbSkewLockAxis = dominant;
+
+            for (int ax = 0; ax < 3; ax++)
+                if (ax != s_gbSkewLockAxis) localDelta[ax] = 0f;
+        }
+
         MoveGreyboxFaceCorners(localDelta);
     }
 

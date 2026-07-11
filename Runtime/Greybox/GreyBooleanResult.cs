@@ -318,19 +318,54 @@ public class GreyBooleanResult : GreyPrimitive
             list.Add(pi);
         }
 
-        var verts   = new List<Vector3>();
-        var normals = new List<Vector3>();
-        var uvs     = new List<Vector2>();
-        var tris    = new List<int>();
+        // When a cut material is assigned, operator-carved faces go to submesh 1 (their own material
+        // slot) and everything from the Subject to submesh 0; otherwise a single submesh shares one
+        // material as before. The collider pass (SubdivisionSuppressed) never splits — collision
+        // doesn't care about slots.
+        bool splitCut = !SubdivisionSuppressed && _subject != null && _subject.BooleanCutMaterial != null;
+
+        var verts    = new List<Vector3>();
+        var normals  = new List<Vector3>();
+        var uvs      = new List<Vector2>();
+        var trisSubj = new List<int>();
+        var trisCut  = splitCut ? new List<int>() : trisSubj;
         foreach (var group in groups.Values)
+        {
+            var tris = splitCut && GroupIsOperator(group, polys) ? trisCut : trisSubj;
             EmitSurface(group, polys, polyIds, target, uvScale, verts, normals, uvs, tris);
+        }
 
         mesh.Clear();
         if (verts.Count > 65535) mesh.indexFormat = IndexFormat.UInt32;
         mesh.SetVertices(verts);
         mesh.SetNormals(normals);
         mesh.SetUVs(0, uvs);
-        mesh.SetTriangles(tris, 0);
+        if (splitCut)
+        {
+            mesh.subMeshCount = 2;
+            mesh.SetTriangles(trisSubj, 0);
+            mesh.SetTriangles(trisCut, 1);
+        }
+        else
+        {
+            mesh.subMeshCount = 1;
+            mesh.SetTriangles(trisSubj, 0);
+        }
+    }
+
+    // A flat surface is a single coplanar, edge-connected group — its fragments all share one source,
+    // so the first decisive tag classifies the whole group as Operator-carved (its faces / body) or
+    // Subject-derived.
+    static bool GroupIsOperator(List<int> group, List<CsgPolygon> polys)
+    {
+        foreach (int pi in group)
+        {
+            int tag = polys[pi].tag;
+            if (tag >= k_OperatorFaceBase && tag < k_OperatorFaceBase + 6) return true;
+            if (tag == k_OperatorBodyTag) return true;
+            if ((tag >= 0 && tag < 6) || tag == k_SubjectBodyTag) return false;
+        }
+        return false;
     }
 
     void EmitSurface(List<int> group, List<CsgPolygon> polys, List<int[]> polyIds,

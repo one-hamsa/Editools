@@ -180,10 +180,13 @@ static class GreyBooleanOrchestrator
         if (sr != null && rr != null)
         {
             Undo.RecordObject(rr, "Sync Boolean Result settings");
-            // Seed the material from the subject only when the result is first created; afterwards the
-            // result owns its material so an artist's override survives re-bakes and adjustments.
-            if (created)
-                rr.sharedMaterial = sr.sharedMaterial;
+            // Slot 0 (Subject faces): seeded from the subject only when the result is first created;
+            // afterwards the result owns it so an artist's override survives re-bakes.
+            Material slot0 = created ? sr.sharedMaterial : rr.sharedMaterial;
+            // Slot 1 (Operator-cut faces): driven by the subject's cut material — a second slot appears
+            // when it's set and disappears when it's cleared, matching the mesh's submesh split.
+            Material cut = subject.BooleanCutMaterial;
+            rr.sharedMaterials = cut != null ? new[] { slot0, cut } : new[] { slot0 };
             rr.shadowCastingMode = sr.shadowCastingMode;
         }
 

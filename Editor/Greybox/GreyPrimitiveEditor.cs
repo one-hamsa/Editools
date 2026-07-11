@@ -10,6 +10,16 @@ public class GreyPrimitiveEditor : Editor
         "Optional Operator to subtract from this object. Drag a Grey object here, or use Pick to " +
         "click one in the scene. Creates a baked 'Boolean Result' child (Subject minus Operator).");
 
+    static readonly GUIContent s_cutMaterialLabel = new GUIContent(
+        "Cut Material",
+        "Material for the faces the Operator carves out. Empty = the result keeps one material slot. " +
+        "Assign one to give the Boolean Result a second slot applied to the cut faces only.");
+
+    static readonly GUIContent s_recenterLabel = new GUIContent(
+        "Recenter Pivot",
+        "Move the pivot to the center of the box's bounding box, shifting the transform so the geometry " +
+        "stays put.");
+
     // Rebuilds are push-only: every path that mutates the primitive's state explicitly triggers
     // RebuildMesh. Inspector edits go through the change-check below. Undo/redo rebuilds are
     // handled by GreyboxUndoRebuilder, which rebuilds only what the undo actually touched.
@@ -41,7 +51,7 @@ public class GreyPrimitiveEditor : Editor
 
         serializedObject.Update();
         EditorGUI.BeginChangeCheck();
-        DrawPropertiesExcluding(serializedObject, "m_Script", "_booleanOperator");
+        DrawPropertiesExcluding(serializedObject, "m_Script", "_booleanOperator", "_booleanCutMaterial");
         DrawBooleanRow();
         bool changed = EditorGUI.EndChangeCheck();
         serializedObject.ApplyModifiedProperties();
@@ -57,6 +67,37 @@ public class GreyPrimitiveEditor : Editor
                 foreach (var t in targets)
                     if (t is GreyPrimitive p) p.ApplyColliderMesh();
         }
+
+        if (prim is Greybox && GUILayout.Button(s_recenterLabel))
+            foreach (var t in targets)
+                if (t is Greybox g) RecenterGreyboxPivot(g);
+    }
+
+    // Re-origin a Greybox at its bounding-box center: shift every corner by -center in local space and
+    // push the transform by +center in world space, so the geometry doesn't visibly move. Seam-welded
+    // partners need no resync — nothing changes in world space.
+    static void RecenterGreyboxPivot(Greybox gb)
+    {
+        var corners = gb.Corners;
+        Vector3 min = corners[0], max = corners[0];
+        for (int i = 1; i < corners.Length; i++)
+        {
+            min = Vector3.Min(min, corners[i]);
+            max = Vector3.Max(max, corners[i]);
+        }
+        Vector3 center = (min + max) * 0.5f;
+        if (center.sqrMagnitude < 1e-12f) return; // already centered
+
+        Undo.RegisterCompleteObjectUndo(gb, "Recenter Greybox Pivot");
+        Undo.RecordObject(gb.transform, "Recenter Greybox Pivot");
+
+        gb.transform.position += gb.transform.TransformVector(center);
+        for (int i = 0; i < corners.Length; i++)
+            corners[i] -= center;
+
+        gb.RebuildMesh();
+        GreyBooleanOrchestrator.Sync(gb);
+        EditorUtility.SetDirty(gb);
     }
 
     // The Boolean field is exposed only on Greybox and Boolean Results (so it can be chained),
@@ -76,6 +117,14 @@ public class GreyPrimitiveEditor : Editor
                            && GreyBooleanPicker.PickingSubject == (GreyPrimitive)target;
             if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f)))
                 GreyBooleanPicker.Begin((GreyPrimitive)target);
+        }
+
+        // The cut-material slot appears only once an Operator is set.
+        if (prop.objectReferenceValue != null)
+        {
+            var matProp = serializedObject.FindProperty("_booleanCutMaterial");
+            if (matProp != null)
+                EditorGUILayout.PropertyField(matProp, s_cutMaterialLabel);
         }
     }
 

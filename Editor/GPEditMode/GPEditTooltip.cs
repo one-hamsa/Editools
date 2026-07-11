@@ -13,13 +13,15 @@ static partial class GPEdit
 
     static readonly (string input, string output)[] k_GreyboxHints =
     {
-        ("Edge LMB",          "move"),
-        ("Edge LMB+Shift",    "axis lock"),
-        ("Face LMB",          "move along normal"),
-        ("Face LMB+Shift",    "skew"),
-        ("Face MMB",          "hide / show"),
-        ("Face RMB",          "extrude"),
-        ("Face RMB+Shift",    "extrude linked"),
+        ("Edge LMB",           "move"),
+        ("Edge LMB+Shift",     "axis lock"),
+        ("Face LMB",           "move (local axis)"),
+        ("Face LMB+Shift",     "move (normal)"),
+        ("Face LMB+Ctrl",      "skew"),
+        ("Face LMB+Ctrl+Shift","skew axis lock"),
+        ("Face MMB",           "hide / show"),
+        ("Face RMB",           "extrude"),
+        ("Face RMB+Shift",     "extrude linked"),
     };
 
     static readonly (string input, string output)[] k_PipeHints =
@@ -75,11 +77,11 @@ static partial class GPEdit
         float totalH = hints.Length * lineH;
         float startY = sv.position.height - 30f - totalH;
 
-        EditorGUI.DrawRect(new Rect(x - 4f, startY - 3f, 210f, totalH + 6f), new Color(0f, 0f, 0f, 0.55f));
+        EditorGUI.DrawRect(new Rect(x - 4f, startY - 3f, 260f, totalH + 6f), new Color(0f, 0f, 0f, 0.55f));
 
         for (int i = 0; i < hints.Length; i++)
         {
-            var r = new Rect(x, startY + i * lineH, 202f, lineH);
+            var r = new Rect(x, startY + i * lineH, 252f, lineH);
             GUI.Label(r, $"{hints[i].Item1}  —  {hints[i].Item2}", s_ttStyle);
         }
 
