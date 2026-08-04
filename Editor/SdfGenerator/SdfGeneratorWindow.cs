@@ -14,7 +14,7 @@ using UnityEngine.UIElements;
 /// </summary>
 class SdfGeneratorWindow : EditorWindow
 {
-	[MenuItem("Tools/Editools/SDF Generator")]
+	[MenuItem("Window/One Hamsa/Editools/SDF Generator")]
 	public static void ShowWindow()
 	{
 		var window = GetWindow<SdfGeneratorWindow>();
