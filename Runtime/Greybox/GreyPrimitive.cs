@@ -224,6 +224,9 @@ public abstract class GreyPrimitive : MonoBehaviour
         _mesh.RecalculateBounds();
         ApplyPlanarUv(_mesh);
         ApplyFaceFlip(_mesh);
+        // position -> stream 0 so position-only passes (tiler binning/shadow/depth) fetch
+        // 12 B/vertex; the layout persists through the serialized bake
+        PositionStreamSplitter.TrySplit(_mesh, out _);
 
         // Types that opt in (Greybox, GreyBooleanResult) bake an unsubdivided collider twin from the
         // same inputs and feed it to the MeshCollider. Others (Greypipe, Greyroad) just point the
