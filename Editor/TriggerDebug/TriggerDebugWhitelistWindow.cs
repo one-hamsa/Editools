@@ -17,7 +17,7 @@ class TriggerDebugWhitelistWindow : EditorWindow
 	readonly List<Material> _materials = new List<Material>();
 	Vector2 _scroll;
 
-	[MenuItem("Tools/Editools/Trigger Debug Whitelist")]
+	[MenuItem("Window/One Hamsa/Editools/Trigger Debug Whitelist")]
 	internal static void Open()
 	{
 		var window = GetWindow<TriggerDebugWhitelistWindow>(utility: true, title: "Trigger Debug Whitelist");

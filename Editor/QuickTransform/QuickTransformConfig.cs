@@ -9,7 +9,7 @@ using UnityEngine;
 /// editable via the Editools toolbar dropdown. This ScriptableObject only
 /// holds the project-level up-axis setting.
 /// </summary>
-[CreateAssetMenu(fileName = "QuickTransformConfig", menuName = "BlockBuster/Quick Transform Config")]
+[CreateAssetMenu(fileName = "QuickTransformConfig", menuName = "One Hamsa/Editools/Quick Transform Config")]
 public class QuickTransformConfig : ScriptableObject
 {
     [Header("Axes")]

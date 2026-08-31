@@ -334,10 +334,12 @@ public class SnapToSurface : EditorWindow
         if (e == null)
             return;
 
-        // Shift cancels placement. It's the modifier for scene chords the user reaches
-        // for mid-snap (Alt+Shift+A activate/deactivate), so holding it drops out of
-        // snap rather than fighting them. Left un-consumed so the chord still fires.
-        if (e.shift) {
+        // Shift and Ctrl/Cmd cancel placement. They're the modifiers for scene chords
+        // the user reaches for mid-snap (Alt+Shift+A activate/deactivate, Ctrl+Alt+A
+        // toggle-active), so holding either drops out of snap rather than fighting
+        // them — mirroring the blockingMods gate in ActivateSnapMode. Left un-consumed
+        // so the chord still fires.
+        if (e.shift || e.control || e.command) {
             ExitSnapMode(false);
             return;
         }
@@ -466,7 +468,7 @@ public class SnapToSurface : EditorWindow
             Undo.PerformUndo();
         }
 
-        EditorApplication.delayCall += CleanupSnapMode;
+        CleanupSnapMode();
     }
 
     private static void CleanupSnapMode() {
