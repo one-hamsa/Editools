@@ -135,9 +135,9 @@ sealed class CsgNode
     CsgNode _back;
     readonly List<CsgPolygon> _polygons = new List<CsgPolygon>();
 
-    // Runaway backstop for pathological/degenerate input — e.g. sliver polygons from chaining many
-    // booleans that keep spanning-splitting. The tree is built on an explicit stack (no call-stack
-    // recursion), so this bounds work/memory, not stack frames. Far above any legitimate mesh's BSP depth.
+    // Runaway backstop for pathological/degenerate input that keeps spanning-splitting. The tree is
+    // built on an explicit stack (no call-stack recursion), so this bounds work/memory, not stack
+    // frames. Far above any legitimate mesh's BSP depth, which Build keeps at O(polygon count).
     internal const int MaxDepth = 4096;
 
     // Set by Build when MaxDepth is reached; CsgSolid.Subtract reads it to fail the bake loudly instead
@@ -234,7 +234,9 @@ sealed class CsgNode
         {
             var (node, polys, depth) = stack.Pop();
             if (polys.Count == 0) continue;
-            node._plane ??= polys[0].plane.Clone();
+
+            bool planeFromFirst = node._plane == null;
+            if (planeFromFirst) node._plane = polys[0].plane.Clone();
 
             // Pathological geometry: stop subdividing and keep the remaining polygons as a leaf rather
             // than splitting forever; flag it so Subtract fails loudly instead of the editor hanging.
@@ -245,9 +247,22 @@ sealed class CsgNode
                 continue;
             }
 
+            // The plane came from polys[0], so that polygon belongs to this node - take it directly
+            // instead of classifying it against its own plane. A clip fragment is never exactly planar
+            // (its plane is fitted to 3 of its verts, split pieces inherit the parent's plane, and a
+            // space change moves every vert), so a vert past Epsilon would classify the whole polygon
+            // Front/Back and hand the list to a child unchanged: the descent consumes nothing and only
+            // MaxDepth stops it.
+            int first = 0;
+            if (planeFromFirst)
+            {
+                node._polygons.Add(polys[0]);
+                first = 1;
+            }
+
             var front = new List<CsgPolygon>();
             var back = new List<CsgPolygon>();
-            for (int i = 0; i < polys.Count; i++)
+            for (int i = first; i < polys.Count; i++)
                 node._plane.SplitPolygon(polys[i], node._polygons, node._polygons, front, back);
 
             if (front.Count > 0)
