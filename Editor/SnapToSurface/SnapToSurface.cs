@@ -19,6 +19,37 @@ public class SnapToSurface : EditorWindow
     /// confirm-click lands on the placement instead of grabbing a face/edge under the cursor.</summary>
     internal static bool IsSnapping => isSnapping;
 
+    /// <summary>The object being placed, or null outside snap mode.</summary>
+    internal static GameObject SnappingObject => selectedObject;
+
+    // Placement frozen: the object holds its transform and only the confirm/cancel clicks stay live.
+    private static bool s_placementFrozen;
+    // Set by a scene chord that acts on snap mode while its own modifier is still held, so the
+    // modifier cancel in OnSceneGUI doesn't read that press as the user leaving.
+    private static bool s_suppressModifierCancel;
+
+    /// <summary>True while the cursor is not driving the placement (see <see cref="SetPlacementFrozen"/>).</summary>
+    internal static bool PlacementFrozen => s_placementFrozen;
+
+    /// <summary>
+    /// Stop or resume the cursor driving the placement. Used by Ctrl+G's fit-to-selection, where the
+    /// box has to hold the transform it was fitted to until the confirming click. Resuming puts the
+    /// object back under the cursor without waiting for a mouse move.
+    /// </summary>
+    internal static void SetPlacementFrozen(bool frozen)
+    {
+        s_placementFrozen = frozen;
+        if (!frozen)
+            ApplyPlacement();
+        SceneView.RepaintAll();
+    }
+
+    /// <summary>
+    /// Ignore the placement-cancelling modifier until it is released. A chord that deliberately acts
+    /// on snap mode (Ctrl+G's fit-to-selection) still holds its modifier down when it runs.
+    /// </summary>
+    internal static void SuppressModifierCancelUntilRelease() => s_suppressModifierCancel = true;
+
     // Per-session scene snapshot built on snap entry so MouseMove doesn't have to
     // FindObjectsOfType<MeshFilter>() and re-fetch mesh.vertices/triangles every frame
     // (mesh.vertices returns a fresh array each call — that was the GC hotspot).
@@ -339,7 +370,10 @@ public class SnapToSurface : EditorWindow
         // toggle-active), so holding either drops out of snap rather than fighting
         // them — mirroring the blockingMods gate in ActivateSnapMode. Left un-consumed
         // so the chord still fires.
-        if (e.shift || e.control || e.command) {
+        if (s_suppressModifierCancel) {
+            if (!e.shift && !e.control && !e.command)
+                s_suppressModifierCancel = false;
+        } else if (e.shift || e.control || e.command) {
             ExitSnapMode(false);
             return;
         }
@@ -360,7 +394,7 @@ public class SnapToSurface : EditorWindow
         }
 
         // Update position on mouse move
-        if (e.type == EventType.MouseMove) {
+        if (e.type == EventType.MouseMove && !s_placementFrozen) {
             UpdateObjectPosition(e.mousePosition);
             e.Use();
             sceneView.Repaint();
@@ -456,7 +490,7 @@ public class SnapToSurface : EditorWindow
     }
 
     private static void ExitSnapMode(bool confirm) {
-        if (confirm && lastHitSurfaceObject != null)
+        if (confirm && !s_placementFrozen && lastHitSurfaceObject != null)
             Debug.Log($"[SnapToSurface] Aligned to surface: {lastHitSurfaceObject.name}");
 
         if (!confirm && selectedObject != null) {
@@ -473,6 +507,8 @@ public class SnapToSurface : EditorWindow
 
     private static void CleanupSnapMode() {
         isSnapping = false;
+        s_placementFrozen = false;
+        s_suppressModifierCancel = false;
         SceneView.duringSceneGui -= OnSceneGUI;
         ignoredObjects.Clear();
         ReleaseSnapMeshCache();
