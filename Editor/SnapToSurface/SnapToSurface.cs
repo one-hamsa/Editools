@@ -45,8 +45,9 @@ public class SnapToSurface : EditorWindow
     }
 
     /// <summary>
-    /// Ignore the placement-cancelling modifier until it is released. A chord that deliberately acts
-    /// on snap mode (Ctrl+G's fit-to-selection) still holds its modifier down when it runs.
+    /// Ignore the placement-cancelling modifier until it is released. A chord that starts or acts on
+    /// snap mode (the Ctrl+G/Q/T/R creates, Ctrl+G's fit-to-selection) still holds its modifier down
+    /// when it runs.
     /// </summary>
     internal static void SuppressModifierCancelUntilRelease() => s_suppressModifierCancel = true;
 
@@ -166,6 +167,11 @@ public class SnapToSurface : EditorWindow
     internal static void BeginSnap(GameObject target) {
         if (isSnapping || target == null)
             return;
+
+        // Every caller is a Ctrl-based create shortcut, so the cancelling modifier is still held as
+        // snap mode starts - without this the first scene event reads it as the user leaving and
+        // undoes the object that was just created.
+        SuppressModifierCancelUntilRelease();
 
         selectedObject   = target;
         originalPosition = target.transform.position;
