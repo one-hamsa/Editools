@@ -42,6 +42,29 @@ public class Greypipe : GreyPrimitive
              "from girth and vertex density; this multiplier tweaks the result manually.")]
     float _girthSubdivMultiplier = 1f;
 
+    // Below one degree the cross-section collapses to nothing to sweep.
+    const float k_MinArcDegrees = 1f;
+
+    [SerializeField]
+    [Range(k_MinArcDegrees, 360f)]
+    [Tooltip("How much of the circular cross-section the pipe covers. 360 = a closed tube, " +
+             "180 = an open half-pipe. The arc starts on the cross-section's local right and " +
+             "sweeps toward its local up; rotate the object to aim the opening.")]
+    float _arcDegrees = 360f;
+
+    [SerializeField]
+    [Tooltip("Close the first end (vertex 0) with a flat disc.")]
+    bool _startCap;
+
+    [SerializeField]
+    [Tooltip("Close the last end with a flat disc.")]
+    bool _endCap;
+
+    [SerializeField]
+    [Tooltip("Also render the pipe from the inside — adds a copy of every triangle with reversed " +
+             "winding and negated normals. Doubles the vertex and triangle count.")]
+    bool _doubleSided;
+
     // ─── Public accessors ───────────────────────────────────────
 
     public List<SplineVertex> Vertices => _vertices;
@@ -62,6 +85,33 @@ public class Greypipe : GreyPrimitive
     {
         get => _girthSubdivMultiplier;
         set { _girthSubdivMultiplier = value; }
+    }
+
+    public float ArcDegrees
+    {
+        get => _arcDegrees;
+        set { _arcDegrees = Mathf.Clamp(value, k_MinArcDegrees, 360f); }
+    }
+
+    /// <summary>Cross-section sweep actually used by the mesh, clamped to the usable range.</summary>
+    float EffectiveArcDegrees => Mathf.Clamp(_arcDegrees, k_MinArcDegrees, 360f);
+
+    public bool StartCap
+    {
+        get => _startCap;
+        set { _startCap = value; }
+    }
+
+    public bool EndCap
+    {
+        get => _endCap;
+        set { _endCap = value; }
+    }
+
+    public bool DoubleSided
+    {
+        get => _doubleSided;
+        set { _doubleSided = value; }
     }
 
     public int SegmentCount => _vertices != null ? Mathf.Max(0, _vertices.Count - 1) : 0;
@@ -355,6 +405,10 @@ public class Greypipe : GreyPrimitive
     {
         _vertices = DefaultVertices();
         _baseGirth = 0.5f;
+        _arcDegrees = 360f;
+        _startCap = false;
+        _endCap = false;
+        _doubleSided = false;
     }
 
     protected override void GenerateMesh(Mesh mesh)
@@ -369,12 +423,19 @@ public class Greypipe : GreyPrimitive
         int circleSegs = ComputeCircleSegments(density);
 
         int vertsPerRing = circleSegs + 1;
-        int totalVerts   = ringCount * vertsPerRing;
-        int totalTris    = (ringCount - 1) * circleSegs * 2;
+        int capCount     = (_startCap ? 1 : 0) + (_endCap ? 1 : 0);
+        // A cap gets its own copy of the end ring's rim so the disc's axial normal does not
+        // flatten the tube's radial ones, plus one vertex for the fan center.
+        int sideVerts    = ringCount * vertsPerRing + capCount * (vertsPerRing + 1);
+        int sideTris     = (ringCount - 1) * circleSegs * 2 + capCount * circleSegs;
+        // The inward copy needs its own vertices to carry the negated normals.
+        int sides        = _doubleSided ? 2 : 1;
 
-        var verts   = new Vector3[totalVerts];
-        var normals = new Vector3[totalVerts];
-        var tris    = new int[totalTris * 3];
+        var verts   = new Vector3[sideVerts * sides];
+        var normals = new Vector3[sideVerts * sides];
+        var tris    = new int[sideTris * 3 * sides];
+
+        float angleStep = EffectiveArcDegrees * Mathf.Deg2Rad / circleSegs;
 
         Vector3 mainAxis = MainAxisLocal;
         Vector3 refUp = DeriveUp(mainAxis);
@@ -384,11 +445,17 @@ public class Greypipe : GreyPrimitive
         Vector3 prevForward = Vector3.zero;
         Vector3 prevRight = Vector3.zero;
 
+        // End-ring tangents, kept for the cap normals.
+        Vector3 startForward = Vector3.zero;
+        Vector3 endForward = Vector3.zero;
+
         for (int ring = 0; ring < ringCount; ring++)
         {
             var s = samples[ring];
             Vector3 forward = s.tangent.normalized;
             if (forward.sqrMagnitude < 0.0001f) forward = mainAxis;
+            if (ring == 0) startForward = forward;
+            if (ring == ringCount - 1) endForward = forward;
 
             Vector3 right;
             if (ring == 0)
@@ -415,7 +482,7 @@ public class Greypipe : GreyPrimitive
 
             for (int seg = 0; seg <= circleSegs; seg++)
             {
-                float angle = (seg % circleSegs) * (2f * Mathf.PI / circleSegs);
+                float angle = seg * angleStep;
                 float cos = Mathf.Cos(angle);
                 float sin = Mathf.Sin(angle);
 
@@ -444,10 +511,71 @@ public class Greypipe : GreyPrimitive
             }
         }
 
+        int capVert = ringCount * vertsPerRing;
+        if (_startCap)
+            WriteCap(verts, normals, tris, ref capVert, ref tBase, 0, circleSegs,
+                samples[0].position, -startForward, reverse: true);
+        if (_endCap)
+            WriteCap(verts, normals, tris, ref capVert, ref tBase, (ringCount - 1) * vertsPerRing, circleSegs,
+                samples[ringCount - 1].position, endForward, reverse: false);
+
+        if (_doubleSided) WriteInwardCopy(verts, normals, tris, sideVerts, tBase);
+
         mesh.Clear();
         mesh.vertices  = verts;
         mesh.normals   = normals;
         mesh.triangles = tris;
+    }
+
+    /// <summary>
+    /// Writes one flat end disc: a copy of the end ring's rim plus a fan center, every vertex
+    /// carrying the axial normal. <paramref name="reverse"/> flips the winding for the start cap,
+    /// whose outward normal points against the path.
+    /// </summary>
+    static void WriteCap(Vector3[] verts, Vector3[] normals, int[] tris, ref int vBase, ref int tBase,
+        int ringBase, int circleSegs, Vector3 center, Vector3 outward, bool reverse)
+    {
+        int rimCount  = circleSegs + 1;
+        int centerIdx = vBase + rimCount;
+        for (int seg = 0; seg < rimCount; seg++)
+        {
+            verts[vBase + seg]   = verts[ringBase + seg];
+            normals[vBase + seg] = outward;
+        }
+        verts[centerIdx]   = center;
+        normals[centerIdx] = outward;
+
+        for (int seg = 0; seg < circleSegs; seg++)
+        {
+            int a = vBase + seg;
+            int b = vBase + seg + 1;
+            tris[tBase]     = centerIdx;
+            tris[tBase + 1] = reverse ? b : a;
+            tris[tBase + 2] = reverse ? a : b;
+            tBase += 3;
+        }
+
+        vBase = centerIdx + 1;
+    }
+
+    /// <summary>
+    /// Mirrors the geometry already written into the second half of the buffers: same positions,
+    /// negated normals, reversed winding, so the pipe also renders from the inside.
+    /// </summary>
+    static void WriteInwardCopy(Vector3[] verts, Vector3[] normals, int[] tris, int vertCount, int indexCount)
+    {
+        for (int i = 0; i < vertCount; i++)
+        {
+            verts[vertCount + i]   = verts[i];
+            normals[vertCount + i] = -normals[i];
+        }
+
+        for (int i = 0; i < indexCount; i += 3)
+        {
+            tris[indexCount + i]     = tris[i]     + vertCount;
+            tris[indexCount + i + 1] = tris[i + 2] + vertCount;
+            tris[indexCount + i + 2] = tris[i + 1] + vertCount;
+        }
     }
 
     // ─── Spline sampling ────────────────────────────────────────
@@ -512,8 +640,9 @@ public class Greypipe : GreyPrimitive
     }
 
     /// <summary>
-    /// Auto-derives the circular cross-section side count from base girth.
-    /// Reference points (with all multipliers = 1):
+    /// Auto-derives the cross-section side count from base girth, scaled by the arc so a partial
+    /// sweep keeps the same edge length instead of the same side count.
+    /// Reference points (full 360° arc, all multipliers = 1):
     ///   girth 0.3 → 4 sides
     ///   girth 1.0 → 8 sides
     ///   girth 5.0 → 12 sides
@@ -534,7 +663,10 @@ public class Greypipe : GreyPrimitive
 
         float densityFactor = density > 0f ? density : 1f;
         float girthMultiplier = Mathf.Max(0.1f, _girthSubdivMultiplier) * GetManagerGirthMultiplier();
-        return Mathf.Max(3, Mathf.RoundToInt(baseSides * densityFactor * girthMultiplier));
+        float arc = EffectiveArcDegrees;
+        // A closed tube needs three sides to enclose anything; an open arc is fine as one strip.
+        int minSides = arc >= 360f ? 3 : 1;
+        return Mathf.Max(minSides, Mathf.RoundToInt(baseSides * densityFactor * girthMultiplier * (arc / 360f)));
     }
 
     float GetManagerLengthMultiplier()
