@@ -9,6 +9,9 @@ using UnityEngine;
 ///
 ///   Vertex:  LMB drag = move in the main-axis plane · Shift+LMB = move orthogonally
 ///            Ctrl (on an end vertex) = move it alone, leaving the rest of the spline put
+///            Ctrl+Shift+LMB = move it alone along the neighbor axis — toward the single
+///                       neighbor for an end vertex, the average of both neighbor directions
+///                       for an interior one
 ///            RMB (on an end vertex)  = extrude / extend a new vertex
 ///            MMB = delete the vertex
 ///   Handle:  LMB drag = move (no Ctrl) · MMB = reset the handle
@@ -31,6 +34,7 @@ static partial class GPEdit
     static Vector3  s_spPlanePoint;
     static Vector3  s_spPlaneNormal;
     static Vector3  s_spHitStart;
+    static Vector3  s_spMoveAxis;
     static Vector2  s_spPressPos;
 
     static Vector3  s_spStartLocalPos;
@@ -236,7 +240,10 @@ static partial class GPEdit
         BeginSplineUndo(sp, "Move Vertex");
         s_spDrag = SpDrag.VertexMove;
         s_spVertex = vertex;
-        s_spOrtho = shift;
+        // Ctrl moves the vertex alone; adding Shift also confines it to the neighbor axis,
+        // which supersedes the orthogonal-axis drag Shift means on its own.
+        s_spMoveAxis = ctrl && shift ? NeighborAxisWorld(sp, vertex) : Vector3.zero;
+        s_spOrtho = shift && !ctrl;
         s_spStartLocalPos = sp.GetLocalVertexPos(vertex);
 
         s_spPlanePoint = sp.GetWorldVertexPos(vertex);
@@ -246,6 +253,24 @@ static partial class GPEdit
         bool isEnd = vertex == 0 || vertex == sp.Count - 1;
         s_spDoReshape = isEnd && sp.Count > 2 && !ctrl;
         s_spReshape = s_spDoReshape ? CaptureReshape(sp) : null;
+    }
+
+    /// <summary>
+    /// The line a Ctrl+Shift-drag confines a vertex to: toward its single neighbor for an end
+    /// vertex, the average of both neighbor directions for an interior one. Zero when it cannot be
+    /// resolved (fewer than two vertices, coincident neighbors, or a 180° fold-back) — the drag
+    /// then falls back to the unconstrained plane move.
+    /// </summary>
+    static Vector3 NeighborAxisWorld(GPSpline sp, int vertex)
+    {
+        if (sp.Count < 2) return Vector3.zero;
+        Vector3 p = sp.GetWorldVertexPos(vertex);
+        Vector3 axis;
+        if (vertex == 0)                 axis = sp.GetWorldVertexPos(1) - p;
+        else if (vertex == sp.Count - 1) axis = p - sp.GetWorldVertexPos(vertex - 1);
+        else                             axis = (p - sp.GetWorldVertexPos(vertex - 1)).normalized
+                                              + (sp.GetWorldVertexPos(vertex + 1) - p).normalized;
+        return axis.sqrMagnitude < 1e-6f ? Vector3.zero : axis.normalized;
     }
 
     static void StartSplineBezier(GPSpline sp, int vertex, int side, Vector2 mousePos, bool shift)
@@ -392,17 +417,23 @@ static partial class GPEdit
         if (e.type == EventType.Repaint)
         {
             if (s_spDrag == SpDrag.VertexMove || s_spDrag == SpDrag.Bezier || s_spDrag == SpDrag.Extend)
-                DrawSplineDragGizmo(s_spPlanePoint, s_spPlaneNormal, s_spOrtho);
+                DrawSplineDragGizmo(s_spPlanePoint, s_spPlaneNormal, s_spOrtho, s_spMoveAxis);
             DrawSpline(s_sp, s_spVertex, -1, 0, -1, 0, false, default);
         }
     }
 
     /// <summary>
-    /// While dragging: always shows the move plane (yellow quad); when Shift is held, additionally
-    /// draws two arrows along the orthogonal axis — so the user sees both options.
+    /// While dragging: an axis-locked (Ctrl+Shift) drag shows only its axis arrows. Otherwise the
+    /// move plane (yellow quad), plus arrows along the orthogonal axis when Shift is held — so the
+    /// user sees both options.
     /// </summary>
-    static void DrawSplineDragGizmo(Vector3 point, Vector3 normal, bool ortho)
+    static void DrawSplineDragGizmo(Vector3 point, Vector3 normal, bool ortho, Vector3 lockAxis)
     {
+        if (lockAxis.sqrMagnitude > 0f)
+        {
+            DrawDragAxis(point, lockAxis, HandleUtility.GetHandleSize(point));
+            return;
+        }
         if (normal.sqrMagnitude < 1e-4f) return;
         normal = normal.normalized;
         float size = HandleUtility.GetHandleSize(point);
@@ -421,15 +452,18 @@ static partial class GPEdit
         Handles.DrawSolidRectangleWithOutline(quad, GPEditShared.DragPlane, outline);
 
         // Orthogonal arrows (Shift) — added on top of the plane.
-        if (ortho)
-        {
-            Handles.color = GPEditShared.OutlineHover;
-            float len = size * 0.9f;
-            Handles.DrawLine(point, point + normal * len, 3f);
-            Handles.ConeHandleCap(0, point + normal * len, Quaternion.LookRotation(normal), size * 0.12f, EventType.Repaint);
-            Handles.DrawLine(point, point - normal * len, 3f);
-            Handles.ConeHandleCap(0, point - normal * len, Quaternion.LookRotation(-normal), size * 0.12f, EventType.Repaint);
-        }
+        if (ortho) DrawDragAxis(point, normal, size);
+    }
+
+    /// <summary>Double-headed arrow marking the line a constrained drag moves along.</summary>
+    static void DrawDragAxis(Vector3 point, Vector3 axis, float size)
+    {
+        Handles.color = GPEditShared.OutlineHover;
+        float len = size * 0.9f;
+        Handles.DrawLine(point, point + axis * len, 3f);
+        Handles.ConeHandleCap(0, point + axis * len, Quaternion.LookRotation(axis), size * 0.12f, EventType.Repaint);
+        Handles.DrawLine(point, point - axis * len, 3f);
+        Handles.ConeHandleCap(0, point - axis * len, Quaternion.LookRotation(-axis), size * 0.12f, EventType.Repaint);
     }
 
     static void ApplySplineDrag(Vector2 mousePos)
@@ -445,17 +479,21 @@ static partial class GPEdit
 
     static Vector3 PlaneDelta(Vector2 mousePos)
     {
-        if (s_spOrtho)
-        {
-            Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-            float cur = GPEditShared.ProjectRayOntoLine(ray, s_spPlanePoint, s_spPlaneNormal);
-            float start = GPEditShared.ProjectRayOntoLine(
-                HandleUtility.GUIPointToWorldRay(s_spPressPos), s_spPlanePoint, s_spPlaneNormal);
-            return s_spPlaneNormal * (cur - start);
-        }
+        if (s_spMoveAxis.sqrMagnitude > 0f) return AxisDelta(mousePos, s_spMoveAxis);
+        if (s_spOrtho) return AxisDelta(mousePos, s_spPlaneNormal);
         if (!GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out Vector3 hit))
             return Vector3.zero;
         return hit - s_spHitStart;
+    }
+
+    /// <summary>Drag delta confined to a line through the drag anchor. <paramref name="axis"/> must be normalized.</summary>
+    static Vector3 AxisDelta(Vector2 mousePos, Vector3 axis)
+    {
+        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
+        float cur = GPEditShared.ProjectRayOntoLine(ray, s_spPlanePoint, axis);
+        float start = GPEditShared.ProjectRayOntoLine(
+            HandleUtility.GUIPointToWorldRay(s_spPressPos), s_spPlanePoint, axis);
+        return axis * (cur - start);
     }
 
     static void ApplySplineVertexMove(Vector2 mousePos)
@@ -531,6 +569,7 @@ static partial class GPEdit
     {
         s_spDrag = SpDrag.None;
         s_sp = null;
+        s_spMoveAxis = Vector3.zero;
         s_spReshape = null;
         s_spDoReshape = false;
     }
