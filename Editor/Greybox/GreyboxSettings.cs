@@ -37,9 +37,9 @@ static class GreyboxSettings
     [MenuItem("GameObject/3D Object/Greybox", true)]
     static bool CreateGreyboxValidate() => true;
 
-    internal static GameObject PlaceGreybox(Vector3 worldPos, Quaternion worldRot, Transform parent)
+    internal static GameObject PlaceGreybox(Vector3 worldPos, Quaternion worldRot, Transform parent, bool select = true)
     {
-        var go = GreyPrimitiveSettings.PlacePrimitive<Greybox>("Greybox", worldPos, worldRot, parent);
+        var go = GreyPrimitiveSettings.PlacePrimitive<Greybox>("Greybox", worldPos, worldRot, parent, select: select);
         go.transform.localScale = DefaultScale;
         return go;
     }

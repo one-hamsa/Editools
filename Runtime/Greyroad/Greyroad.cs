@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Procedural box-lofted road primitive. Mirrors Greypipe for spline math, frame transport,
-/// and pivot/handle behavior — but lofts a box cross-section (width × height) rather than a
+/// Procedural box-lofted road primitive. Shares Greypipe's spline and handle behavior,
+/// but lofts a box cross-section (width x height) rather than a
 /// circle, adds per-vertex Banking (twist around the tangent), and exposes 6 face-visibility
 /// flags so the user can hide individual sides (top / bottom / left / right / start cap / end cap)
 /// in QuickTransform Special mode.
@@ -31,10 +31,10 @@ public class Greyroad : GreyPrimitive
         public Vector3 position;
 
         [Tooltip("Bezier handle direction in absolute local space. " +
-                 "Identity = handle points along local +Z. Symmetric on both sides.")]
+                 "Identity = handle points along local +Z. Both handles share this direction.")]
         public Quaternion handleRotation;
 
-        [Tooltip("Length of each bezier handle (symmetric on both sides), in local units.")]
+        [Tooltip("Length of both symmetric Bezier handles in local units.")]
         public float handleLength;
 
         [Tooltip("Local width multiplier relative to the road's base width. 1 = default.")]
@@ -79,11 +79,17 @@ public class Greyroad : GreyPrimitive
 
     [SerializeField]
     [Range(0f, 1f)]
-    [Tooltip("How relaxed the transitions of banking, width and height are between handles. " +
-             "0 = stiff (each transition eases to a flat stop at every handle), 1 = fully relaxed " +
-             "flow through handles. Never overshoots, and the value is always exact at each handle " +
-             "(road edges stay locked to the banking handles' outward vectors). " +
-             "Multiplies with the Greybox Manager's global Greyroad Edge Smoothing.")]
+    [Tooltip("Smooths the road's path while passing through every vertex and keeping its width. " +
+             "0 follows the authored Beziers; 1 uses a natural cubic through the vertices. " +
+             "Intermediate values blend their tangents. Stored symmetric handles are unchanged. " +
+             "Very tight vertex layouts can still make the inside edge overlap.")]
+    float _splineSmoothing = 0.5f;
+
+    [SerializeField]
+    [Range(0f, 1f)]
+    [Tooltip("Smooths banking and deliberately authored width/height changes between vertices, without overshoot. " +
+             "Constant width values stay constant. Multiplies with the Greybox Manager's Greyroad Edge Smoothing. " +
+             "Use Spline Smoothing to smooth the road's path.")]
     float _edgeSmoothing = 1f;
 
     [SerializeField]
@@ -146,6 +152,12 @@ public class Greyroad : GreyPrimitive
     {
         get => _sideSubdivMultiplier;
         set { _sideSubdivMultiplier = value; }
+    }
+
+    public float SplineSmoothing
+    {
+        get => _splineSmoothing;
+        set => _splineSmoothing = Mathf.Clamp01(value);
     }
 
     public float EdgeSmoothing
@@ -212,8 +224,21 @@ public class Greyroad : GreyPrimitive
 
     public void ResetVertexHandle(int index)
     {
+        Vector3 point = _vertices[index].position;
+        Vector3 before = index > 0 ? _vertices[index - 1].position : point;
+        Vector3 after = index + 1 < _vertices.Count ? _vertices[index + 1].position : point;
+        GreySplineMath.AdaptiveHandle(before, point, after, out Vector3 direction,
+            out float length);
+        SetVertexHandleDirLocal(index, direction);
         var v = _vertices[index];
-        v.handleRotation = Quaternion.identity;
+        v.handleLength = length;
+        _vertices[index] = v;
+    }
+
+    public void SetVertexHandleLength(int index, float length)
+    {
+        var v = _vertices[index];
+        v.handleLength = length;
         _vertices[index] = v;
     }
 
@@ -249,9 +274,9 @@ public class Greyroad : GreyPrimitive
         Vector3 vertexWorld = GetWorldVertexPosition(index);
         ComputeBankingHandleAxisWorld(index, out _, out Vector3 rightWorld);
         float halfW = _baseWidth * Mathf.Max(0.001f, _vertices[index].widthMultiplier) * 0.5f;
-        float lossy = Mathf.Abs(transform.lossyScale.x);
-        if (lossy < 0.0001f) lossy = 1f;
-        return vertexWorld + rightWorld * (halfW * lossy * (side >= 0 ? 1f : -1f));
+        Vector3 localRight = transform.InverseTransformVector(rightWorld);
+        float scale = localRight.magnitude > 1e-6f ? 1f / localRight.magnitude : 1f;
+        return vertexWorld + rightWorld * (halfW * scale * (side >= 0 ? 1f : -1f));
     }
 
     /// <summary>
@@ -281,22 +306,25 @@ public class Greyroad : GreyPrimitive
                           + EvaluateBezierTangent(b0, b1, b2, b3, 0f)).normalized;
         }
 
-        Vector3 tangentWorld = transform.TransformDirection(tangentLocal);
-        if (tangentWorld.sqrMagnitude < 0.0001f) tangentWorld = MainAxisWorld;
-        tangentWorld.Normalize();
+        if (tangentLocal.sqrMagnitude < 1e-8f)
+            tangentLocal = _vertices[Mathf.Min(index + 1, _vertices.Count - 1)].position
+                         - _vertices[Mathf.Max(0, index - 1)].position;
+        Vector3 refUp = transform.InverseTransformDirection(Vector3.up).normalized;
+        ReferenceFrame(tangentLocal, refUp, out Vector3 right, out Vector3 up);
+        Vector3 forward = Vector3.Cross(right, up).normalized;
+        Quaternion bank = Quaternion.AngleAxis(_vertices[index].bankingAngle * Mathf.Rad2Deg, forward);
+        rightWorld = transform.TransformVector(bank * right).normalized;
+        upWorld = transform.TransformVector(bank * up).normalized;
+    }
 
-        Vector3 worldUp = Vector3.up;
-        if (Mathf.Abs(Vector3.Dot(tangentWorld, worldUp)) > 0.99f)
-            worldUp = Vector3.right;
-
-        Vector3 right0 = Vector3.Cross(worldUp, tangentWorld).normalized;
-        Vector3 up0    = Vector3.Cross(tangentWorld, right0).normalized;
-
-        // Apply banking — rotate (right, up) by bankingAngle around the tangent.
-        float angle = _vertices[index].bankingAngle;
-        Quaternion bank = Quaternion.AngleAxis(angle * Mathf.Rad2Deg, tangentWorld);
-        rightWorld = bank * right0;
-        upWorld    = bank * up0;
+    static void ReferenceFrame(Vector3 tangent, Vector3 refUp, out Vector3 right, out Vector3 up)
+    {
+        Vector3 forward = tangent.sqrMagnitude > 1e-8f ? tangent.normalized : Vector3.forward;
+        right = Vector3.Cross(refUp, forward);
+        if (right.sqrMagnitude < 1e-8f)
+            right = Vector3.Cross(Mathf.Abs(forward.x) < 0.9f ? Vector3.right : Vector3.forward, forward);
+        right.Normalize();
+        up = Vector3.Cross(forward, right).normalized;
     }
 
     // ─── Pivot recenter ─────────────────────────────────────────
@@ -310,7 +338,7 @@ public class Greyroad : GreyPrimitive
         for (int i = 0; i < _vertices.Count; i++)
         {
             worldPositions[i]  = transform.TransformPoint(_vertices[i].position);
-            worldHandleDirs[i] = GetVertexHandleDirWorld(i);
+            worldHandleDirs[i] = transform.TransformVector(GetVertexHandleDirLocal(i));
         }
 
         Vector3 newWorldPivot = Vector3.zero;
@@ -339,9 +367,11 @@ public class Greyroad : GreyPrimitive
 
         for (int i = 0; i < _vertices.Count; i++)
         {
-            Vector3 localDir = transform.InverseTransformDirection(worldHandleDirs[i]).normalized;
+            Vector3 localHandle = transform.InverseTransformVector(worldHandleDirs[i]);
+            Vector3 localDir = localHandle.normalized;
             if (localDir.sqrMagnitude < 0.0001f) continue;
             var v = _vertices[i];
+            v.handleLength *= localHandle.magnitude;
             v.handleRotation = Quaternion.LookRotation(localDir, Vector3.up);
             _vertices[i] = v;
         }
@@ -352,40 +382,25 @@ public class Greyroad : GreyPrimitive
     public void InsertVertex(int segmentIndex, float t)
     {
         if (segmentIndex < 0 || segmentIndex >= _vertices.Count - 1) return;
+        if (t <= 0.0001f || t >= 0.9999f) return; // An endpoint already has a vertex.
 
         var a = _vertices[segmentIndex];
         var b = _vertices[segmentIndex + 1];
-
         GetSegmentControlPoints(segmentIndex, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+        GreySplineMath.FitInsertedHandle(p0, p1, p2, p3, t,
+            out Vector3 position, out Vector3 direction, out float length);
+        Vector3 localDirection = direction;
 
-        Vector3 pos = EvaluateBezier(p0, p1, p2, p3, t);
-        Vector3 tan = EvaluateBezierTangent(p0, p1, p2, p3, t).normalized;
-
-        float st = t * t * (3f - 2f * t);
-        float widthMul  = Mathf.Lerp(a.widthMultiplier,  b.widthMultiplier,  st);
-        float heightMul = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, st);
-        float banking   = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
-                                          b.bankingAngle * Mathf.Rad2Deg, st) * Mathf.Deg2Rad;
-
-        float distA = Vector3.Distance(pos, a.position);
-        float distB = Vector3.Distance(pos, b.position);
-        float hLen  = (distA + distB) * 0.25f;
-
-        Quaternion handleRot = tan.sqrMagnitude > 0.0001f
-            ? Quaternion.LookRotation(tan, Vector3.up)
-            : Quaternion.identity;
-
-        var newVert = new RoadVertex
+        _vertices.Insert(segmentIndex + 1, new RoadVertex
         {
-            position         = pos,
-            handleRotation   = handleRot,
-            handleLength     = hLen,
-            widthMultiplier  = widthMul,
-            heightMultiplier = heightMul,
-            bankingAngle     = banking,
-        };
-
-        _vertices.Insert(segmentIndex + 1, newVert);
+            position = position,
+            handleRotation = Quaternion.LookRotation(localDirection.normalized, Vector3.up),
+            handleLength = length,
+            widthMultiplier = Mathf.Lerp(a.widthMultiplier, b.widthMultiplier, t),
+            heightMultiplier = Mathf.Lerp(a.heightMultiplier, b.heightMultiplier, t),
+            bankingAngle = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
+                b.bankingAngle * Mathf.Rad2Deg, t) * Mathf.Deg2Rad,
+        });
     }
 
     public void ExtendFromEdge(int edgeIndex, Vector3 localPosition)
@@ -444,6 +459,7 @@ public class Greyroad : GreyPrimitive
         _vertices    = DefaultVertices();
         _baseWidth   = 10f;
         _baseHeight  = 2f;
+        _splineSmoothing = 0.5f;
         _activeFaces = DefaultActiveFaces();
     }
 
@@ -521,6 +537,7 @@ public class Greyroad : GreyPrimitive
         mesh.SetNormals(norms);
         mesh.SetUVs(0, uvs);
         mesh.SetTriangles(tris, 0);
+        mesh.RecalculateNormals();
     }
 
     static void ComputeRingFrames(List<SplineSample> samples, RingFrame[] frames, Vector3 refUp)
@@ -531,14 +548,8 @@ public class Greyroad : GreyPrimitive
             Vector3 forward = s.tangent.normalized;
             if (forward.sqrMagnitude < 0.0001f) forward = Vector3.forward;
 
-            // Derive frame from tangent + world up (in local space) at every ring
-            // independently. No transport — banking handles are the sole twist authority.
-            Vector3 upRef = refUp;
-            if (Mathf.Abs(Vector3.Dot(upRef, forward)) > 0.99f)
-                upRef = Vector3.Cross(forward, Vector3.one).normalized;
-
-            Vector3 right = Vector3.Cross(upRef, forward).normalized;
-            Vector3 up    = Vector3.Cross(forward, right).normalized;
+            // Cross-sections stay perpendicular to the path; orientation cannot narrow the road.
+            ReferenceFrame(forward, refUp, out Vector3 right, out Vector3 up);
 
             float bank = s.bankingAngle;
             if (Mathf.Abs(bank) > 0.00001f)
@@ -702,7 +713,7 @@ public class Greyroad : GreyPrimitive
 
     List<SplineSample> SampleSpline(float density)
     {
-        var samples = new List<SplineSample>();
+        var samples = new List<SplineSample>(64);
         int vertCount = _vertices.Count;
         int segCount = vertCount - 1;
         if (segCount < 1) return samples;
@@ -787,37 +798,38 @@ public class Greyroad : GreyPrimitive
         ComputeMonotoneTangents(heightVals, vertexLen, heightTan, smoothing);
         ComputeMonotoneTangents(bankVals,   vertexLen, bankTan,   smoothing);
 
-        // Ring count from total length × density — uniform vertices-per-meter along the road.
         float lengthMultiplier = Mathf.Max(0.1f, _lengthSubdivMultiplier) * GetManagerLengthMultiplier();
         float densityFactor = density > 0f ? density : 1f;
-        int ringCount = Mathf.Max(2, Mathf.CeilToInt(totalLen * densityFactor * lengthMultiplier));
-
-        // ── Emit rings at even arc-length; geometry uses parameter t, properties use distance ──
         int cursor = 0;
-        for (int r = 0; r < ringCount; r++)
+        for (int seg = 0; seg < segCount; seg++)
         {
-            float target = totalLen * r / (ringCount - 1);
-            while (cursor < lutN - 2 && lutLen[cursor + 1] < target) cursor++;
-            float spanLen = lutLen[cursor + 1] - lutLen[cursor];
-            float frac = spanLen > 1e-6f ? Mathf.Clamp01((target - lutLen[cursor]) / spanLen) : 0f;
-            float g = Mathf.Lerp(lutG[cursor], lutG[cursor + 1], frac);
-
-            int seg = Mathf.Clamp(Mathf.FloorToInt(g), 0, segCount - 1);
-            float t = Mathf.Clamp01(g - seg);
-
-            // Banking / width / height ease by distance within the segment, not by parameter.
             float segLen = vertexLen[seg + 1] - vertexLen[seg];
-            float u = segLen > 1e-6f ? Mathf.Clamp01((target - vertexLen[seg]) / segLen) : 0f;
-
-            samples.Add(new SplineSample
+            if (segLen < 1e-6f) continue;
+            Vector3 a = ctrl1[seg] - ctrl0[seg], b = ctrl2[seg] - ctrl1[seg], c = ctrl3[seg] - ctrl2[seg];
+            float turning = Vector3.Angle(a, b) + Vector3.Angle(b, c);
+            turning += Mathf.Abs(bankVals[seg + 1] - bankVals[seg]);
+            int steps = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(segLen * densityFactor * lengthMultiplier,
+                turning / 5f)), 2, 4096);
+            for (int r = samples.Count == 0 ? 0 : 1; r <= steps; r++)
             {
-                position     = EvaluateBezier(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t),
-                tangent      = EvaluateBezierTangent(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t),
-                widthMul     = EvaluateHermite(widthVals[seg],  widthTan[seg],  widthVals[seg + 1],  widthTan[seg + 1],  u, segLen),
-                heightMul    = EvaluateHermite(heightVals[seg], heightTan[seg], heightVals[seg + 1], heightTan[seg + 1], u, segLen),
-                bankingAngle = EvaluateHermite(bankVals[seg],   bankTan[seg],   bankVals[seg + 1],   bankTan[seg + 1],   u, segLen) * Mathf.Deg2Rad,
-                arcLen       = target,
-            });
+                float u = r / (float)steps;
+                float target = Mathf.Lerp(vertexLen[seg], vertexLen[seg + 1], u);
+                while (cursor < lutN - 2 && lutLen[cursor + 1] < target) cursor++;
+                float spanLen = lutLen[cursor + 1] - lutLen[cursor];
+                float frac = spanLen > 1e-6f ? Mathf.Clamp01((target - lutLen[cursor]) / spanLen) : 0f;
+                float t = Mathf.Clamp01(Mathf.Lerp(lutG[cursor], lutG[cursor + 1], frac) - seg);
+                Vector3 tangent = EvaluateBezierTangent(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t);
+                if (tangent.sqrMagnitude < 1e-8f) tangent = ctrl3[seg] - ctrl0[seg];
+                samples.Add(new SplineSample
+                {
+                    position = EvaluateBezier(ctrl0[seg], ctrl1[seg], ctrl2[seg], ctrl3[seg], t),
+                    tangent = tangent,
+                    widthMul = EvaluateHermite(widthVals[seg], widthTan[seg], widthVals[seg + 1], widthTan[seg + 1], u, segLen),
+                    heightMul = EvaluateHermite(heightVals[seg], heightTan[seg], heightVals[seg + 1], heightTan[seg + 1], u, segLen),
+                    bankingAngle = EvaluateHermite(bankVals[seg], bankTan[seg], bankVals[seg + 1], bankTan[seg + 1], u, segLen) * Mathf.Deg2Rad,
+                    arcLen = target,
+                });
+            }
         }
 
         return samples;
@@ -934,7 +946,16 @@ public class Greyroad : GreyPrimitive
         m[0]     = d[0];
         m[n - 1] = d[n - 2];
         for (int i = 1; i < n - 1; i++)
-            m[i] = (d[i - 1] * d[i] <= 0f) ? 0f : 0.5f * (d[i - 1] + d[i]);  // flat at local extrema
+        {
+            float left = x[i] - x[i - 1], right = x[i + 1] - x[i];
+            if (d[i - 1] * d[i] <= 0f || left <= 1e-6f || right <= 1e-6f)
+                m[i] = 0f;
+            else
+            {
+                float w1 = 2f * right + left, w2 = right + 2f * left;
+                m[i] = (w1 + w2) / (w1 / d[i - 1] + w2 / d[i]);
+            }
+        }
 
         // Fritsch–Carlson clamp: keep each interval monotone so the value never bulges past a handle.
         for (int i = 0; i < n - 1; i++)
@@ -966,7 +987,7 @@ public class Greyroad : GreyPrimitive
     public Vector3 EvaluateSplineTangentWorld(int segmentIndex, float t)
     {
         GetSegmentControlPoints(segmentIndex, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
-        return transform.TransformDirection(EvaluateBezierTangent(p0, p1, p2, p3, t));
+        return transform.TransformVector(EvaluateBezierTangent(p0, p1, p2, p3, t));
     }
 
     public void GetSegmentControlPoints(int segmentIndex, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3)
@@ -979,6 +1000,84 @@ public class Greyroad : GreyPrimitive
         p1 = a.position + aDir * a.handleLength;
         p2 = b.position - bDir * b.handleLength;
         p3 = b.position;
+        if (_splineSmoothing <= 0f) return;
+        EnsureSmoothedSpline();
+        float length = _smoothingLengths[segmentIndex];
+        p1 = p0 + SmoothedHandleOffset(segmentIndex, length);
+        p2 = p3 - SmoothedHandleOffset(segmentIndex + 1, length);
+    }
+
+    [NonSerialized] Vector3[] _smoothingPositions;
+    [NonSerialized] Vector3[] _smoothingDerivatives;
+    [NonSerialized] float[] _smoothingLengths;
+
+    Vector3 SmoothedHandleOffset(int index, float segmentLength)
+    {
+        var vertex = _vertices[index];
+        Vector3 authored = transform.TransformVector(GetVertexHandleDirLocal(index) * vertex.handleLength);
+        Vector3 smooth = _smoothingDerivatives[index];
+        float amount = Mathf.Clamp01(_splineSmoothing);
+        Vector3 direction = authored.sqrMagnitude < 1e-12f ? smooth.normalized
+            : smooth.sqrMagnitude < 1e-12f ? authored.normalized
+            : Vector3.Slerp(authored.normalized, smooth.normalized, amount).normalized;
+        float length = Mathf.Lerp(authored.magnitude, smooth.magnitude * segmentLength / 3f, amount);
+        return transform.InverseTransformVector(direction * length);
+    }
+
+    void EnsureSmoothedSpline()
+    {
+        int count = _vertices.Count;
+        bool changed = _smoothingPositions == null || _smoothingPositions.Length != count;
+        for (int i = 0; !changed && i < count; i++)
+            changed = !_smoothingPositions[i].Equals(transform.TransformPoint(_vertices[i].position));
+        if (!changed) return;
+
+        _smoothingPositions = new Vector3[count];
+        _smoothingDerivatives = new Vector3[count];
+        _smoothingLengths = new float[count - 1];
+        var points = new Vector3[count];
+        var indices = new int[count];
+        int unique = 0;
+        for (int i = 0; i < count; i++)
+        {
+            Vector3 point = transform.TransformPoint(_vertices[i].position);
+            _smoothingPositions[i] = point;
+            if (unique == 0 || !point.Equals(points[unique - 1])) points[unique++] = point;
+            indices[i] = unique - 1;
+            if (i > 0) _smoothingLengths[i - 1] = Vector3.Distance(_smoothingPositions[i - 1], point);
+        }
+        if (unique < 2) return; // Coincident knots describe no path to smooth.
+
+        var spans = new float[unique - 1];
+        for (int i = 0; i < spans.Length; i++) spans[i] = Mathf.Max(1e-6f, Vector3.Distance(points[i], points[i + 1]));
+        var second = new Vector3[unique];
+        var upper = new float[unique];
+        // Natural cubic interpolation: shared second derivatives, with zero curvature at the ends.
+        for (int i = 1; i < unique - 1; i++)
+        {
+            float left = spans[i - 1], right = spans[i];
+            float diagonal = 2f * (left + right) - left * upper[i - 1];
+            upper[i] = right / diagonal;
+            Vector3 slopes = (points[i + 1] - points[i]) / right - (points[i] - points[i - 1]) / left;
+            second[i] = (6f * slopes - left * second[i - 1]) / diagonal;
+        }
+        for (int i = unique - 2; i > 0; i--) second[i] -= upper[i] * second[i + 1];
+        for (int i = 0; i < count; i++)
+        {
+            int knot = indices[i];
+            if (knot < unique - 1)
+            {
+                float span = spans[knot];
+                _smoothingDerivatives[i] = (points[knot + 1] - points[knot]) / span
+                    - span * (2f * second[knot] + second[knot + 1]) / 6f;
+            }
+            else
+            {
+                float span = spans[knot - 1];
+                _smoothingDerivatives[i] = (points[knot] - points[knot - 1]) / span
+                    + span * (second[knot - 1] + 2f * second[knot]) / 6f;
+            }
+        }
     }
 
     // ─── Editor warning gizmo ───────────────────────────────────
@@ -1027,7 +1126,7 @@ public class Greyroad : GreyPrimitive
     public static List<RoadVertex> CreateDefaultVertices(float length)
     {
         float half = Mathf.Max(0.001f, length) * 0.5f;
-        float hLen = half;
+        float hLen = half * (2f / 3f);
         return new List<RoadVertex>
         {
             new RoadVertex

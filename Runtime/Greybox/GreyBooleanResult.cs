@@ -25,6 +25,7 @@ public class GreyBooleanResult : GreyPrimitive
     const int k_OperatorFaceBase = 20;
     const int k_SubjectBodyTag   = 100;
     const int k_OperatorBodyTag  = 101;
+    const int k_HiddenSubjectFace = -1;
     // A cut's faces, once an outer boolean nests it, are frozen to k_CutLevelBase + level so each
     // boolean level keeps a distinct identity (and its own material slot) all the way up the chain.
     const int k_CutLevelBase     = 200;
@@ -49,6 +50,9 @@ public class GreyBooleanResult : GreyPrimitive
     {
         _subject  = subject;
         _operator = op;
+#if UNITY_EDITOR
+        _bakedSolid = null;
+#endif
     }
 
     // Face index -> the 4 corner indices that form it, wound so the polygon normal points outward.
@@ -83,7 +87,12 @@ public class GreyBooleanResult : GreyPrimitive
     protected override void GenerateMesh(Mesh mesh)
     {
 #if UNITY_EDITOR
-        if (_subject == null) return; // not configured yet (transient on AddComponent)
+        if (_subject == null)
+        {
+            mesh.Clear();
+            _bakedSolid = null;
+            return; // Deleted or not yet configured subject contributes no geometry.
+        }
 
         // Collider pass (SubdivisionSuppressed) reuses the render pass's subtraction, just meshes it
         // minimally (density 0). The (expensive) CSG only runs once per RebuildMesh.
@@ -112,7 +121,7 @@ public class GreyBooleanResult : GreyPrimitive
         {
             _subjLocal = ToLocal(gb.transform, gb.Corners);
             AddBoxPolygons(subjectPolys, _subjLocal, faceTagBase: 0);
-            activeFaces = gb.ActiveFaces;
+            activeFaces = gb.VisibleFaces;
             uvScale = gb.UvTileScale;
         }
         else if (_subject is GreyBooleanResult chained)
@@ -130,7 +139,7 @@ public class GreyBooleanResult : GreyPrimitive
             if (innermost != null)
             {
                 _subjLocal = ToLocal(innermost.transform, innermost.Corners);
-                activeFaces = innermost.ActiveFaces;
+                activeFaces = innermost.VisibleFaces;
                 uvScale = innermost.UvTileScale;
             }
             else
@@ -191,22 +200,61 @@ public class GreyBooleanResult : GreyPrimitive
         return dst;
     }
 
-    void AddBoxPolygons(List<CsgPolygon> dst, Vector3[] corners, int faceTagBase)
+    void AddBoxPolygons(List<CsgPolygon> dst, Vector3[] corners, int faceTagBase, bool uniformTag = false,
+        bool[] visibility = null)
     {
+        // A reflected transform or reparented corner array must still describe an outward solid.
+        float volume = 0f;
+        Vector3 origin = corners[0];
+        for (int face = 0; face < 6; face++)
+        {
+            Vector3 a = corners[s_faceCorners[face, 0]] - origin;
+            Vector3 b = corners[s_faceCorners[face, 1]] - origin;
+            Vector3 c = corners[s_faceCorners[face, 2]] - origin;
+            Vector3 d = corners[s_faceCorners[face, 3]] - origin;
+            volume += Vector3.Dot(a, Vector3.Cross(b, c)) + Vector3.Dot(a, Vector3.Cross(c, d));
+        }
+        bool reverse = volume < 0f;
         for (int face = 0; face < 6; face++)
         {
             Vector3 q0 = corners[s_faceCorners[face, 0]];
             Vector3 q1 = corners[s_faceCorners[face, 1]];
             Vector3 q2 = corners[s_faceCorners[face, 2]];
             Vector3 q3 = corners[s_faceCorners[face, 3]];
-            int tag = faceTagBase + face;
-            AddTriangle(dst, q0, q1, q2, tag);
-            AddTriangle(dst, q0, q2, q3, tag);
+            int tag = uniformTag ? faceTagBase : faceTagBase + face;
+            if (visibility != null && !visibility[face]) tag = k_HiddenSubjectFace;
+            AddTriangle(dst, q0, reverse ? q2 : q1, reverse ? q1 : q2, tag);
+            AddTriangle(dst, q0, reverse ? q3 : q2, reverse ? q2 : q3, tag);
         }
     }
 
-    void AddMeshPolygons(List<CsgPolygon> dst, GreyPrimitive src, int tag)
+    void AddMeshPolygons(List<CsgPolygon> dst, GreyPrimitive src, int tag, int levelOffset = 0)
     {
+        if (src is Greybox box)
+        {
+            AddBoxPolygons(dst, ToLocal(box.transform, box.Corners), tag, uniformTag: true,
+                visibility: tag == k_SubjectBodyTag ? box.VisibleFaces : null);
+            return;
+        }
+        if (src is GreyBooleanResult result)
+        {
+            AddResultPolygons(dst, result, tag == k_SubjectBodyTag, tag, levelOffset, keepBoxFaceTags: false);
+            return;
+        }
+        if (src is GreyboxCompound compound)
+        {
+            var solid = new CsgSolid(new List<CsgPolygon>());
+            foreach (var part in compound.Parts)
+            {
+                if (part == null) continue;
+                var polygons = new List<CsgPolygon>();
+                AddMeshPolygons(polygons, part, tag, levelOffset);
+                solid = CsgSolid.Union(solid, new CsgSolid(polygons));
+                if (tag == k_SubjectBodyTag) levelOffset += CutCount(part);
+            }
+            dst.AddRange(solid.polygons);
+            return;
+        }
         var mf = src.GetComponent<MeshFilter>();
         var mesh = mf != null ? mf.sharedMesh : null;
         if (mesh == null)
@@ -217,13 +265,22 @@ public class GreyBooleanResult : GreyPrimitive
 
         var verts = mesh.vertices;
         var tris = mesh.triangles;
+        bool reverse = ReversesWinding(src.transform);
         for (int i = 0; i < tris.Length; i += 3)
         {
             Vector3 a = transform.InverseTransformPoint(src.transform.TransformPoint(verts[tris[i]]));
             Vector3 b = transform.InverseTransformPoint(src.transform.TransformPoint(verts[tris[i + 1]]));
             Vector3 c = transform.InverseTransformPoint(src.transform.TransformPoint(verts[tris[i + 2]]));
-            AddTriangle(dst, a, b, c, tag);
+            AddTriangle(dst, a, reverse ? c : b, reverse ? b : c, tag);
         }
+    }
+
+    bool ReversesWinding(Transform source)
+    {
+        Vector3 x = transform.InverseTransformVector(source.TransformVector(Vector3.right));
+        Vector3 y = transform.InverseTransformVector(source.TransformVector(Vector3.up));
+        Vector3 z = transform.InverseTransformVector(source.TransformVector(Vector3.forward));
+        return Vector3.Dot(x, Vector3.Cross(y, z)) < 0f;
     }
 
     static void AddTriangle(List<CsgPolygon> dst, Vector3 a, Vector3 b, Vector3 c, int tag)
@@ -237,26 +294,31 @@ public class GreyBooleanResult : GreyPrimitive
     /// When <paramref name="keepSubjectFaceTags"/> (the src is our Subject), the level identity of every
     /// fragment is preserved so materials inherit through the chain: Subject faces (0..5) and Subject
     /// body (100) stay level 0, already-frozen inner cuts (>= k_CutLevelBase) keep their level, and the
-    /// src's own Operator faces are frozen to <c>k_CutLevelBase + ResultDepth(src)</c>. When src is our
+    /// src's own Operator faces are frozen to <c>k_CutLevelBase + CutCount(src)</c>. When src is our
     /// Operator, every fragment collapses to <paramref name="bodyTag"/> — one new cut level.
     /// </summary>
-    void AddResultPolygons(List<CsgPolygon> dst, GreyBooleanResult src, bool keepSubjectFaceTags, int bodyTag)
+    void AddResultPolygons(List<CsgPolygon> dst, GreyBooleanResult src, bool keepSubjectFaceTags, int bodyTag,
+        int levelOffset = 0, bool keepBoxFaceTags = true)
     {
-        int frozenLevel = keepSubjectFaceTags ? k_CutLevelBase + ResultDepth(src) : 0;
+        int frozenLevel = keepSubjectFaceTags ? k_CutLevelBase + CutCount(src) + levelOffset : 0;
         var solid = src.GetOrComputeSolid();
+        bool reverse = ReversesWinding(src.transform);
         foreach (var p in solid.polygons)
         {
             var verts = new List<Vector3>(p.verts.Count);
             for (int i = 0; i < p.verts.Count; i++)
                 verts.Add(transform.InverseTransformPoint(src.transform.TransformPoint(p.verts[i])));
+            if (reverse) verts.Reverse();
 
             int tag;
             if (!keepSubjectFaceTags)
                 tag = bodyTag;                                        // src is the Operator: one new cut
-            else if ((p.tag >= 0 && p.tag < 6) || p.tag == k_SubjectBodyTag)
+            else if (p.tag >= 0 && p.tag < 6 && !keepBoxFaceTags)
+                tag = src._bakedActiveFaces != null && !src._bakedActiveFaces[p.tag] ? k_HiddenSubjectFace : bodyTag;
+            else if ((p.tag >= 0 && p.tag < 6) || p.tag == k_SubjectBodyTag || p.tag == k_HiddenSubjectFace)
                 tag = p.tag;                                          // Subject-derived (level 0)
             else if (p.tag >= k_CutLevelBase)
-                tag = p.tag;                                          // inner cut, already frozen
+                tag = p.tag + levelOffset;                            // inner cut within this subject group
             else
                 tag = frozenLevel;                                    // src's own Operator -> freeze its level
 
@@ -265,32 +327,32 @@ public class GreyBooleanResult : GreyPrimitive
         }
     }
 
-    // Number of booleans in this result's Subject chain (this result = 1, +1 per nested result Subject).
-    static int ResultDepth(GreyBooleanResult r)
+    static int CutCount(GreyPrimitive node)
     {
-        int d = 0;
-        GreyPrimitive s = r;
-        while (s is GreyBooleanResult rr) { d++; s = rr.Subject; }
-        return d;
+        if (node is GreyBooleanResult result) return CutCount(result.Subject) + 1;
+        int count = 0;
+        if (node is GreyboxCompound compound)
+            foreach (var part in compound.Parts) if (part != null) count += CutCount(part);
+        return count;
     }
 
-    /// <summary>
-    /// The chain's cut materials, innermost cut first (level 1) to the outermost Operator (level N).
-    /// A null entry is a cut with no assigned material — its faces fall back to the Subject slot.
-    /// Each result's own Operator cut material is declared on its Subject (the object that owns the
-    /// Operator reference), so the walk reads <c>Subject.BooleanCutMaterial</c> at every step.
-    /// </summary>
+    /// <summary>Subject cut materials in geometry traversal order, including nested compound parts.</summary>
     public List<Material> CollectCutMaterials()
     {
-        var outerToInner = new List<Material>();
-        GreyPrimitive cur = this;
-        while (cur is GreyBooleanResult r)
+        var materials = new List<Material>(4);
+        CollectCutMaterials(this, materials);
+        return materials;
+    }
+
+    static void CollectCutMaterials(GreyPrimitive node, List<Material> materials)
+    {
+        if (node is GreyBooleanResult result)
         {
-            outerToInner.Add(r.Subject != null ? r.Subject.BooleanCutMaterial : null);
-            cur = r.Subject;
+            CollectCutMaterials(result.Subject, materials);
+            materials.Add(result.Subject != null ? result.Subject.BooleanCutMaterial : null);
         }
-        outerToInner.Reverse();
-        return outerToInner;
+        else if (node is GreyboxCompound compound)
+            foreach (var part in compound.Parts) if (part != null) CollectCutMaterials(part, materials);
     }
 
     // Recomputes a polygon's plane after a space change; false for a fully degenerate sliver
@@ -323,7 +385,7 @@ public class GreyBooleanResult : GreyPrimitive
         var polys = new List<CsgPolygon>();
         foreach (var p in solid.polygons)
         {
-            if (p.tag >= 0 && p.tag < 6 && activeFaces != null && !activeFaces[p.tag]) continue;
+            if (p.tag == k_HiddenSubjectFace || (p.tag >= 0 && p.tag < 6 && activeFaces != null && !activeFaces[p.tag])) continue;
             polys.Add(p);
         }
 
@@ -349,7 +411,7 @@ public class GreyBooleanResult : GreyPrimitive
                 long key = EdgeKey(ids[k], ids[(k + 1) % n]);
                 if (edgeFirst.TryGetValue(key, out int other))
                 {
-                    if (Coplanar(polys[pi].plane, polys[other].plane)) Union(parent, pi, other);
+                    if (polys[pi].tag == polys[other].tag && Coplanar(polys[pi].plane, polys[other].plane)) Union(parent, pi, other);
                 }
                 else edgeFirst[key] = pi;
             }
@@ -368,7 +430,7 @@ public class GreyBooleanResult : GreyPrimitive
         // no cut materials anywhere this is a single submesh, exactly as before. The collider pass
         // (SubdivisionSuppressed) never splits — collision doesn't care about slots.
         var cutMats = CollectCutMaterials();       // index 0 => level 1 .. up to the outermost cut
-        int levels  = cutMats.Count;               // == ResultDepth(this)
+        int levels  = cutMats.Count;               // == CutCount(this)
 
         var slotForLevel = new int[levels + 1];    // cut level (0..N) -> submesh slot
         int slotCount = 1;                         // slot 0 = Subject + unassigned cuts

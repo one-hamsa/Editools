@@ -38,6 +38,76 @@ public class Greybox : GreyPrimitive
 
     public bool[] ActiveFaces => _activeFaces;
 
+    [System.Serializable]
+    struct FaceLink
+    {
+        public Greybox other;
+        public int face;
+    }
+
+    [SerializeField, HideInInspector]
+    [Tooltip("Faces restored when their welded neighbours are deleted.")]
+    List<FaceLink> _faceLinks = new List<FaceLink>();
+
+    public bool IsFaceVisible(int face)
+    {
+        if (_activeFaces[face]) return true;
+        bool orphaned = false;
+        foreach (var link in _faceLinks)
+        {
+            if (link.face != face) continue;
+            if (link.other != null) return false;
+            orphaned = true;
+        }
+        return orphaned;
+    }
+
+    public bool[] VisibleFaces
+    {
+        get
+        {
+            var faces = new bool[6];
+            for (int face = 0; face < 6; face++) faces[face] = IsFaceVisible(face);
+            return faces;
+        }
+    }
+
+    public void SetFaceVisible(int face, bool visible)
+    {
+        _activeFaces[face] = visible;
+        _faceLinks.RemoveAll(link => link.face == face && link.other == null);
+    }
+
+    bool RememberFaceLink(Greybox other, int[] corners)
+    {
+        if (other == null || corners == null || corners.Length != 4) return false;
+        int mask = 0;
+        foreach (int corner in corners) mask |= 1 << corner;
+        for (int face = 0; face < 6; face++)
+        {
+            int faceMask = 0, axisBit = 1 << (face / 2);
+            for (int corner = 0; corner < 8; corner++)
+                if (((corner & axisBit) != 0) == (face % 2 == 0)) faceMask |= 1 << corner;
+            if (mask != faceMask) continue;
+            foreach (var link in _faceLinks)
+                if (link.other == other && link.face == face) return false;
+            _faceLinks.Add(new FaceLink { other = other, face = face });
+            return true;
+        }
+        return false;
+    }
+
+    // Preserve both sides of older parent/child welds before either endpoint disappears.
+    public bool RememberSeamFaces()
+    {
+        bool changed = false;
+        using var scope = UnityEngine.Pool.ListPool<Seam>.Get(out var seams);
+        GetSeams(seams);
+        foreach (var seam in seams) changed |= RememberFaceLink(seam.other, seam.corners);
+        return changed;
+    }
+
+
     // ─── UV ─────────────────────────────────────────────────────
 
     [SerializeField]
@@ -87,6 +157,68 @@ public class Greybox : GreyPrimitive
     public int[]         LinkParentCorners => _linkParentCorners;
     public List<Greybox> SeamChildren      => _seamChildren;
 
+    [System.Serializable]
+    public struct Seam
+    {
+        public Greybox other;
+        public int[] corners;
+        public int[] otherCorners;
+        public bool IsAlive => other != null && corners != null && corners.Length == 4
+            && otherCorners != null && otherCorners.Length == 4;
+    }
+
+    [SerializeField, HideInInspector]
+    [Tooltip("Additional bidirectional face welds created by subdivisions.")]
+    List<Seam> _additionalSeams = new List<Seam>();
+
+    /// <summary>All live face welds, including older parent/child links.</summary>
+    public void GetSeams(List<Seam> seams)
+    {
+        seams.Clear();
+        if (IsLinkAlive)
+            seams.Add(new Seam { other = _linkedParent, corners = _linkChildCorners, otherCorners = _linkParentCorners });
+        if (_seamChildren != null)
+            foreach (var child in _seamChildren)
+                if (child != null && child.IsLinkAlive && child.LinkedParent == this)
+                    seams.Add(new Seam { other = child, corners = child.LinkParentCorners, otherCorners = child.LinkChildCorners });
+        if (_additionalSeams != null)
+            foreach (var seam in _additionalSeams)
+                if (seam.IsAlive) seams.Add(seam);
+    }
+
+    public void AddSeamLink(Greybox other, int[] corners, int[] otherCorners)
+    {
+        if (_additionalSeams == null) _additionalSeams = new List<Seam>();
+        if (other._additionalSeams == null) other._additionalSeams = new List<Seam>();
+        RememberFaceLink(other, corners);
+        other.RememberFaceLink(this, otherCorners);
+        _additionalSeams.Add(new Seam { other = other, corners = corners, otherCorners = otherCorners });
+        other._additionalSeams.Add(new Seam { other = this, corners = otherCorners, otherCorners = corners });
+    }
+
+    public void UnlinkAll()
+    {
+        for (int face = 0; face < 6; face++) _activeFaces[face] = IsFaceVisible(face);
+        foreach (var link in _faceLinks)
+            if (link.other != null) link.other._faceLinks.RemoveAll(other => other.other == this);
+        _faceLinks.Clear();
+        Unlink();
+        if (_seamChildren != null)
+        {
+            for (int i = _seamChildren.Count - 1; i >= 0; i--)
+            {
+                var child = _seamChildren[i];
+                if (child != null && child.LinkedParent == this) child.Unlink();
+            }
+            _seamChildren.Clear();
+        }
+        if (_additionalSeams == null) return;
+        foreach (var seam in _additionalSeams)
+            if (seam.other != null && seam.other._additionalSeams != null)
+                seam.other._additionalSeams.RemoveAll(link => link.other == this);
+        _additionalSeams.Clear();
+    }
+
     /// <summary>True when this box's seam is welded to a parent (valid reference + pairing).</summary>
     public bool IsLinkAlive =>
         _linkedParent != null
@@ -94,11 +226,14 @@ public class Greybox : GreyPrimitive
         && _linkParentCorners != null && _linkParentCorners.Length == 4;
 
     /// <summary>True when this box takes part in any seam — as a child, or as a welded parent.</summary>
-    public bool HasSeam => IsLinkAlive || (_seamChildren != null && _seamChildren.Count > 0);
+    public bool HasSeam => IsLinkAlive || (_seamChildren != null && _seamChildren.Count > 0)
+        || (_additionalSeams != null && _additionalSeams.Count > 0);
 
     /// <summary>Bind this box's seam face to a parent face (child side). Pairing arrays must be length 4.</summary>
     public void SetSeamLink(Greybox parent, int[] childCorners, int[] parentCorners)
     {
+        RememberFaceLink(parent, childCorners);
+        parent.RememberFaceLink(this, parentCorners);
         _linkedParent      = parent;
         _linkChildCorners  = childCorners;
         _linkParentCorners = parentCorners;
@@ -114,8 +249,12 @@ public class Greybox : GreyPrimitive
     /// <summary>Sever this box's seam link (child side) and drop it from its parent's reverse index.</summary>
     public void Unlink()
     {
-        if (_linkedParent != null && _linkedParent._seamChildren != null)
-            _linkedParent._seamChildren.Remove(this);
+        if (_linkedParent != null)
+        {
+            _linkedParent._faceLinks.RemoveAll(link => link.other == this);
+            _faceLinks.RemoveAll(link => link.other == _linkedParent);
+            if (_linkedParent._seamChildren != null) _linkedParent._seamChildren.Remove(this);
+        }
         _linkedParent      = null;
         _linkChildCorners  = null;
         _linkParentCorners = null;
@@ -150,7 +289,7 @@ public class Greybox : GreyPrimitive
         var faceCols = new int[6];
         for (int face = 0; face < 6; face++)
         {
-            if (!_activeFaces[face]) continue;
+            if (!IsFaceVisible(face)) continue;
             ComputeFaceCuts(face, effective, out int sc, out int tc);
             faceRows[face] = sc + 2;
             faceCols[face] = tc + 2;
@@ -159,7 +298,7 @@ public class Greybox : GreyPrimitive
         int totalVerts = 0, totalTris = 0;
         for (int face = 0; face < 6; face++)
         {
-            if (!_activeFaces[face]) continue;
+            if (!IsFaceVisible(face)) continue;
             totalVerts += faceRows[face] * faceCols[face];
             totalTris  += (faceRows[face] - 1) * (faceCols[face] - 1) * 2;
         }
@@ -173,7 +312,7 @@ public class Greybox : GreyPrimitive
 
         for (int face = 0; face < 6; face++)
         {
-            if (!_activeFaces[face]) continue;
+            if (!IsFaceVisible(face)) continue;
 
             int fixedComp = s_faceParams[face, 0];
             int fixedVal  = s_faceParams[face, 1];

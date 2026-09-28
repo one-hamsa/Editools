@@ -286,6 +286,31 @@ sealed class CsgSolid
 
     public CsgSolid(List<CsgPolygon> polygons) => this.polygons = polygons;
 
+    public static CsgSolid Union(CsgSolid a, CsgSolid b)
+    {
+        if (a.polygons.Count == 0) return b;
+        if (b.polygons.Count == 0) return a;
+        CsgNode.s_depthExceeded = false;
+        var na = new CsgNode(ClonePolygons(a.polygons));
+        var nb = new CsgNode(ClonePolygons(b.polygons));
+        na.ClipTo(nb);
+        nb.ClipTo(na);
+        nb.Invert();
+        nb.ClipTo(na);
+        nb.Invert();
+        var remaining = new List<CsgPolygon>();
+        nb.AllPolygons(remaining);
+        na.Build(remaining);
+        if (CsgNode.s_depthExceeded)
+        {
+            Debug.LogError("[GreyBoolean] Subdivided operand exceeded the maximum BSP depth. Keeping the previous solid; simplify the operand.");
+            return a;
+        }
+        var result = new List<CsgPolygon>();
+        na.AllPolygons(result);
+        return new CsgSolid(result);
+    }
+
     /// <summary>Returns a − b (the part of <paramref name="a"/> outside <paramref name="b"/>).</summary>
     public static CsgSolid Subtract(CsgSolid a, CsgSolid b)
     {

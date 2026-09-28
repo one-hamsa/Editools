@@ -11,6 +11,13 @@ static class GreyPrimitiveSettings
     const string k_LayerPref        = "Editools_Greybox_DefaultLayer";
     const string k_MeshColliderPref = "Editools_Greybox_DefaultMeshCollider";
     const string k_ShadowCastPref   = "Editools_Greybox_DefaultShadowCast";
+    const string k_AutoUpdatePivotPref = "Editools_GreyPrimitive_AutoUpdatePivot";
+
+    internal static bool AutoUpdatePivot
+    {
+        get => EditorPrefs.GetBool(k_AutoUpdatePivotPref, true);
+        set => EditorPrefs.SetBool(k_AutoUpdatePivotPref, value);
+    }
 
     internal static Material DefaultMaterial
     {
@@ -65,7 +72,7 @@ static class GreyPrimitiveSettings
     // meshCollider / castShadows override the shared prefs when set; null falls back to the
     // DefaultMeshCollider / DefaultShadowCasting settings (Greyquad hardcodes both off).
     internal static GameObject PlacePrimitive<T>(string name, Vector3 worldPos, Quaternion worldRot, Transform parent,
-        bool? meshCollider = null, bool? castShadows = null)
+        bool? meshCollider = null, bool? castShadows = null, bool select = true)
         where T : GreyPrimitive
     {
         var go = new GameObject(name);
@@ -89,7 +96,7 @@ static class GreyPrimitiveSettings
         go.isStatic = DefaultStatic;
         go.layer    = DefaultLayer;
 
-        Selection.activeObject = go;
+        if (select) Selection.activeObject = go;
         return go;
     }
 
@@ -165,7 +172,11 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         "Scene View Tooltips",
         "Show the simplified action hints in the Scene View while Grey Primitive Edit Mode is on.");
 
-    public override Vector2 GetWindowSize() => new Vector2(280, 545);
+    static readonly GUIContent k_AutoUpdatePivotLabel = new GUIContent(
+        "Auto Update Pivot",
+        "Recenter Greybox pivots after shape edits without moving the geometry or child objects.");
+
+    public override Vector2 GetWindowSize() => new Vector2(280, 567);
 
     public override void OnGUI(Rect rect)
     {
@@ -194,6 +205,9 @@ class GreyPrimitivesSettingsPopup : PopupWindowContent
         EditorGUILayout.LabelField("Edit Mode", s_sectionHeader);
         bool tt = EditorGUILayout.Toggle(k_TooltipsLabel, GPEdit.ShowTooltips);
         if (tt != GPEdit.ShowTooltips) GPEdit.ShowTooltips = tt;
+        bool autoPivot = EditorGUILayout.Toggle(k_AutoUpdatePivotLabel, GreyPrimitiveSettings.AutoUpdatePivot);
+        if (autoPivot != GreyPrimitiveSettings.AutoUpdatePivot)
+            GreyPrimitiveSettings.AutoUpdatePivot = autoPivot;
     }
 }
 #endif

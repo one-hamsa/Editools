@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Pool;
 
 /// <summary>
 /// Greybox inspector. Extends the shared <see cref="GreyPrimitiveEditor"/> (mesh-state label,
@@ -26,27 +27,34 @@ public class GreyboxEditor : GreyPrimitiveEditor
 
         EditorGUILayout.Space();
 
-        // Already a linked child: show the weld + an Unlink button (one parent per box).
-        if (gb.IsLinkAlive)
+        // Show existing welds while still allowing another group to be linked.
+        if (gb.HasSeam)
         {
             using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
             {
-                string parentName = gb.LinkedParent != null ? gb.LinkedParent.name : "(missing)";
-                EditorGUILayout.LabelField($"Seam welded to: {parentName}", EditorStyles.miniLabel);
+                using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+                gb.GetSeams(seams);
+                EditorGUILayout.LabelField($"Linked faces: {seams.Count}", EditorStyles.miniLabel);
                 if (GUILayout.Button("Unlink", GUILayout.Width(70f)))
                 {
+                    Undo.IncrementCurrentGroup();
+                    int undoGroup = Undo.GetCurrentGroup();
+                    using var groupScope = ListPool<Greybox>.Get(out var previousGroup);
+                    GreyboxLinkHierarchy.Collect(gb, previousGroup);
+                    var previousParent = gb.transform.parent;
                     Undo.RegisterCompleteObjectUndo(gb, "Unlink Greybox Seam");
-                    if (gb.LinkedParent != null)
-                        Undo.RegisterCompleteObjectUndo(gb.LinkedParent, "Unlink Greybox Seam");
-                    gb.Unlink();
+                    foreach (var seam in seams)
+                        Undo.RegisterCompleteObjectUndo(seam.other, "Unlink Greybox Seam");
+                    gb.UnlinkAll();
+                    GreyboxLinkHierarchy.AfterUnlink(previousGroup, previousParent, "Unlink Greybox Seam");
+                    Undo.CollapseUndoOperations(undoGroup);
+                    foreach (var seam in seams) EditorUtility.SetDirty(seam.other);
                     EditorUtility.SetDirty(gb);
                 }
             }
-            return;
         }
 
-        // Not a linked child yet — offer a drop target (one-shot: drop a box, it welds, the field
-        // clears next repaint) plus a Pick button to click the target in the scene, like Boolean.
+        // Add a weld or join two existing linked groups.
         using (new EditorGUILayout.HorizontalScope())
         {
             var picked = (Greybox)EditorGUILayout.ObjectField(s_linkLabel, null, typeof(Greybox), true);

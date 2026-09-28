@@ -1,23 +1,13 @@
 #if UNITY_EDITOR
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Pool;
 
-/// <summary>
-/// Greybox behaviors for Edit Mode. The bounding box is replaced by an Outline — the actual
-/// deformed edges of the visible faces — plus a dot handle at each face center.
-///
-///   Outline edge:  LMB drag = deform edge (Shift confines to a local axis)
-///   Face handle:   LMB drag       = move face along the object's closest local axis
-///                  Shift+LMB      = move face along its actual normal
-///                  Ctrl+LMB       = skew face (slide its 4 corners together across the face plane)
-///                  Ctrl+Shift+LMB = skew, locked to one of the face plane's two local axes
-///                  MMB            = hide / unhide face
-///                  RMB drag       = extrude an independent box from the face
-///                  Shift+RMB      = extrude a seam-linked box from the face
-/// </summary>
+/// <summary>Greybox editing in the coordinate frame shown by the hovered control.</summary>
 static partial class GPEdit
 {
-    enum GbDrag { None, Edge, FaceNormal, FaceSkew, Extrude }
+    enum GbDrag { None, Edge, FaceNormal, Extrude }
 
     static GbDrag    s_gbDrag;
     static Greybox   s_gbTarget;
@@ -26,59 +16,48 @@ static partial class GPEdit
     static int       s_gbUndoGroup;
     static Vector3[] s_gbStartCorners;
 
-    // Edge / face drag
-    static int     s_gbEdge;
-    static int     s_gbFace;
-    static Vector3 s_gbPlanePoint;
-    static Vector3 s_gbPlaneNormal;
-    static Vector3 s_gbHitStart;
-    static float   s_gbNormalStartDist;
-
-    // Face skew: axis lock (Ctrl+Shift). s_gbSkewLockAxis is the kept in-plane local axis (-1 = undecided).
-    static bool    s_gbSkewAxisLock;
-    static int     s_gbSkewLockAxis;
-
-    // Edge drag: pixel↔world mapping frozen at drag start (see GPEditShared.PlaneDragFrame)
-    static GPEditShared.PlaneDragFrame s_gbEdgeFrame;
-    static Vector2 s_gbEdgePressPos;
-    static int     s_gbEdgeLockAxis; // Shift lock: -1 undecided, 0/1 = frame axis A/B
+    static int s_gbEdge;
+    static int s_gbFace;
+    static CoordinateDrag s_gbCoordinates;
 
     // Extrude
     static Greybox s_gbExtrudeNew;
     static Vector3 s_gbExtrudeCenter;
     static Vector3 s_gbExtrudeNormal;
-    static float   s_gbExtrudeStartDist;
+    static Vector3[] s_gbExtrudeBase;
 
     static readonly Vector3[] s_gbWc = new Vector3[8];
+    static int s_gbHoverTint = -1;
 
     static partial void OnGreyboxSceneGUI(SceneView sv, Event e, Greybox gb)
     {
         if (s_gbDrag != GbDrag.None) { HandleGreyboxDrag(e, sv); return; }
 
         gb.GetWorldCorners(s_gbWc);
-        int hoverFace = HitGreyboxFaceHandle(e.mousePosition);
+        int hoverFace = HitGreyboxFaceHandle(gb, e.mousePosition);
         int hoverEdge = hoverFace >= 0 ? -1 : HitGreyboxOutlineEdge(gb, e.mousePosition);
 
-        // Alt is the Scene View navigation modifier (orbit/pan/zoom) — never start an edit while
-        // it's held, or an Alt-drag to navigate would grab an edge/handle instead.
-        if (e.type == EventType.MouseDown && !e.alt && (e.button == 0 || e.button == 1 || e.button == 2))
-            BeginGreybox(e, gb, hoverFace, hoverEdge);
+        if (e.type == EventType.MouseDown && (!e.alt || (e.button == 1 && hoverFace >= 0))
+            && (e.button == 0 || e.button == 1 || e.button == 2))
+            BeginGreybox(sv, e, gb, hoverFace, hoverEdge);
 
         if (e.type == EventType.Repaint)
-            DrawGreybox(gb, hoverFace, hoverEdge);
+            DrawGreybox(gb, hoverFace, hoverEdge, s_gbHoverTint);
 
-        if (e.type == EventType.MouseMove)
+        if (e.type == EventType.MouseMove || e.type == EventType.KeyDown || e.type == EventType.KeyUp)
             sv.Repaint();
     }
 
     // ─── Hover ──────────────────────────────────────────────────
 
-    static int HitGreyboxFaceHandle(Vector2 mousePos)
+    static int HitGreyboxFaceHandle(Greybox gb, Vector2 mousePos)
     {
         int best = -1;
         float bestDist = GPEditShared.HandlePx;
+        int seamFaces = GreyboxSeamFaceMask(gb);
         for (int face = 0; face < 6; face++)
         {
+            if ((seamFaces & (1 << face)) != 0) continue;
             Vector2 s = HandleUtility.WorldToGUIPoint(GreyboxFaceCenter(face));
             float dist = Vector2.Distance(mousePos, s);
             if (dist < bestDist) { bestDist = dist; best = face; }
@@ -86,12 +65,34 @@ static partial class GPEdit
         return best;
     }
 
+    static int GreyboxSeamFaceMask(Greybox gb)
+    {
+        using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+        gb.GetSeams(seams);
+        int mask = 0;
+        foreach (var seam in seams)
+        {
+            int seamCorners = 0;
+            foreach (int corner in seam.corners) seamCorners |= 1 << corner;
+            for (int face = 0; face < 6; face++)
+            {
+                if (gb.IsFaceVisible(face)) continue;
+                int faceCorners = 0;
+                foreach (int corner in GPEditShared.FaceCornerIndices[face]) faceCorners |= 1 << corner;
+                if (seamCorners == faceCorners) mask |= 1 << face;
+            }
+        }
+        return mask;
+    }
+
     static int HitGreyboxOutlineEdge(Greybox gb, Vector2 mousePos)
     {
         int best = -1;
         float bestDist = GPEditShared.HoverPx;
+        int seamFaces = GreyboxSeamFaceMask(gb);
         for (int ei = 0; ei < 12; ei++)
         {
+            if (!IsExternalGreyboxEdge(gb, ei, seamFaces)) continue;
             int[] ec = GPEditShared.EdgeCornerIndices[ei];
             float dist = GPEditShared.DistToSegment(s_gbWc[ec[0]], s_gbWc[ec[1]], mousePos);
             if (dist < bestDist) { bestDist = dist; best = ei; }
@@ -99,11 +100,54 @@ static partial class GPEdit
         return best;
     }
 
+    struct WeldedEdge
+    {
+        public Greybox box;
+        public int edge;
+    }
+
+    static bool IsExternalGreyboxEdge(Greybox box, int edge, int seamFaces)
+    {
+        var adjacent = GPEditShared.EdgeFaceAdjacency[edge];
+        if ((seamFaces & ((1 << adjacent[0]) | (1 << adjacent[1]))) == 0) return true;
+
+        using var edgesScope = ListPool<WeldedEdge>.Get(out var edges);
+        using var visitedScope = HashSetPool<long>.Get(out var visited);
+        edges.Add(new WeldedEdge { box = box, edge = edge });
+        visited.Add(((long)box.GetInstanceID() << 4) | (uint)edge);
+        for (int i = 0; i < edges.Count; i++)
+        {
+            var current = edges[i];
+            var corners = GPEditShared.EdgeCornerIndices[current.edge];
+            foreach (int face in GPEditShared.EdgeFaceAdjacency[current.edge])
+                if (current.box.IsFaceVisible(face)) return true;
+            using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+            current.box.GetSeams(seams);
+            foreach (var seam in seams)
+            {
+                int a = System.Array.IndexOf(seam.corners, corners[0]);
+                int b = System.Array.IndexOf(seam.corners, corners[1]);
+                if (a < 0 || b < 0) continue;
+                int mappedA = seam.otherCorners[a], mappedB = seam.otherCorners[b];
+                for (int otherEdge = 0; otherEdge < 12; otherEdge++)
+                {
+                    var pair = GPEditShared.EdgeCornerIndices[otherEdge];
+                    if (!((pair[0] == mappedA && pair[1] == mappedB) || (pair[0] == mappedB && pair[1] == mappedA))) continue;
+                    long key = ((long)seam.other.GetInstanceID() << 4) | (uint)otherEdge;
+                    if (visited.Add(key)) edges.Add(new WeldedEdge { box = seam.other, edge = otherEdge });
+                    break;
+                }
+            }
+        }
+        // Hide only edges with no visible surface anywhere around the weld.
+        return false;
+    }
+
     /// <summary>True when at least one of the edge's two faces is visible (drawn full-strength; edges of only-hidden faces are dimmed).</summary>
     static bool IsOutlineEdge(Greybox gb, int edge)
     {
         int[] adj = GPEditShared.EdgeFaceAdjacency[edge];
-        return gb.ActiveFaces[adj[0]] || gb.ActiveFaces[adj[1]];
+        return gb.IsFaceVisible(adj[0]) || gb.IsFaceVisible(adj[1]);
     }
 
     static Vector3 GreyboxFaceCenter(int face)
@@ -112,35 +156,27 @@ static partial class GPEdit
         return (s_gbWc[ci[0]] + s_gbWc[ci[1]] + s_gbWc[ci[2]] + s_gbWc[ci[3]]) * 0.25f;
     }
 
-    /// <summary>Outward world normal of a face, from winding, corrected against the local-axis sign.</summary>
+    /// <summary>Outward normal of the current face surface.</summary>
     static Vector3 GreyboxFaceNormal(Greybox gb, int face)
     {
-        int[] ci = GPEditShared.FaceCornerIndices[face];
-        Vector3 n = Vector3.Cross(s_gbWc[ci[1]] - s_gbWc[ci[0]], s_gbWc[ci[3]] - s_gbWc[ci[0]]).normalized;
-        int axis = face / 2;
-        float sign = (face % 2 == 0) ? 1f : -1f;
-        Vector3 localNormal = axis == 0 ? new Vector3(sign, 0, 0)
-                            : axis == 1 ? new Vector3(0, sign, 0)
-                            : new Vector3(0, 0, sign);
-        if (Vector3.Dot(n, gb.transform.TransformDirection(localNormal)) < 0f) n = -n;
-        return n;
+        return GreyboxFaceCoordinates(gb, face, true).a;
     }
 
     // ─── Begin ──────────────────────────────────────────────────
 
-    static void BeginGreybox(Event e, Greybox gb, int hoverFace, int hoverEdge)
+    static void BeginGreybox(SceneView sv, Event e, Greybox gb, int hoverFace, int hoverEdge)
     {
         if (hoverFace >= 0)
         {
-            if (e.button == 2) { ToggleGreyboxFace(gb, hoverFace); e.Use(); return; }
+            if (e.button == 2) { BeginPrimitiveClick(sv, e, gb, ClickAction.ToggleFace, hoverFace); return; }
 
-            if (e.button == 0 && e.control)  StartGreyboxFaceSkew(gb, hoverFace, e.mousePosition, axisLock: e.shift);
-            else if (e.button == 0)          StartGreyboxFaceMove(gb, hoverFace, e.mousePosition, alongNormal: e.shift);
-            else if (e.button == 1)          StartGreyboxExtrude(gb, hoverFace, e.mousePosition, linked: e.shift);
+            if (e.button == 0)      StartGreyboxFaceMove(gb, hoverFace, e.mousePosition);
+            else if (e.button == 1) StartGreyboxExtrude(gb, hoverFace, e.mousePosition, linked: !e.alt);
             else return;
         }
         else if (hoverEdge >= 0)
         {
+            if (e.button == 1) { BeginPrimitiveClick(sv, e, gb, ClickAction.SplitEdge, hoverEdge, GreyboxSplitFraction(gb, hoverEdge, e.mousePosition)); return; }
             if (e.button != 0) return;
             StartGreyboxEdge(gb, hoverEdge, e.mousePosition);
         }
@@ -158,7 +194,7 @@ static partial class GPEdit
     static void ToggleGreyboxFace(Greybox gb, int face)
     {
         Undo.RegisterCompleteObjectUndo(gb, "Toggle Greybox Face");
-        gb.ActiveFaces[face] = !gb.ActiveFaces[face];
+        gb.SetFaceVisible(face, !gb.IsFaceVisible(face));
         gb.RebuildMesh();
         EditorUtility.SetDirty(gb);
     }
@@ -169,68 +205,22 @@ static partial class GPEdit
         s_gbDrag = GbDrag.Edge;
         s_gbEdge = edge;
         s_gbStartCorners = (Vector3[])gb.Corners.Clone();
-
-        // An edge is free to move along the two local axes perpendicular to it.
-        int edgeAxis = edge / 4;
-        Vector3 axisA = GreyboxAxisWorldDir(gb.transform, (edgeAxis + 1) % 3);
-        Vector3 axisB = GreyboxAxisWorldDir(gb.transform, (edgeAxis + 2) % 3);
-
-        // Anchor the mapping at the grabbed point on the camera-visible part of the edge, so the
-        // pixel↔world conversion is exact where the user is looking even when most of the edge
-        // is off-screen.
-        int[] ec = GPEditShared.EdgeCornerIndices[edge];
-        Vector3 p0 = s_gbWc[ec[0]], p1 = s_gbWc[ec[1]];
-        GPEditShared.ClipSegmentToCameraFront(ref p0, ref p1);
-        Vector3 anchor = GPEditShared.ClosestPointOnSegmentToScreenPos(p0, p1, mousePos);
-
-        s_gbEdgeFrame = GPEditShared.PlaneDragFrame.Capture(anchor, axisA, axisB);
-        s_gbEdgePressPos = mousePos;
-        s_gbEdgeLockAxis = -1;
+        int[] corners = GPEditShared.EdgeCornerIndices[edge];
+        Vector3 anchor = GPEditShared.ClosestPointOnSegmentToScreenPos(s_gbWc[corners[0]], s_gbWc[corners[1]], mousePos);
+        s_gbCoordinates.Begin(anchor, mousePos, GreyboxEdgeCoordinates(gb, edge, false), GreyboxEdgeCoordinates(gb, edge, true));
     }
 
     static Vector3 GreyboxAxisWorldDir(Transform t, int axis)
-        => axis == 0 ? t.right : axis == 1 ? t.up : t.forward;
+        => t.TransformVector(axis == 0 ? Vector3.right : axis == 1 ? Vector3.up : Vector3.forward).normalized;
 
-    /// <summary>The object local axis (signed, world space) whose direction is closest to the face's
-    /// current normal. On an un-skewed box this is the face's own axis; it only diverges once the face
-    /// has been deformed off-axis.</summary>
-    static Vector3 ClosestLocalAxisDir(Greybox gb, int face)
-    {
-        Vector3 n = GreyboxFaceNormal(gb, face);
-        Vector3 best = gb.transform.right;
-        float bestAbs = -1f;
-        for (int axis = 0; axis < 3; axis++)
-        {
-            Vector3 dir = GreyboxAxisWorldDir(gb.transform, axis);
-            float d = Vector3.Dot(n, dir);
-            if (Mathf.Abs(d) > bestAbs) { bestAbs = Mathf.Abs(d); best = d < 0f ? -dir : dir; }
-        }
-        return best;
-    }
-
-    static void StartGreyboxFaceMove(Greybox gb, int face, Vector2 mousePos, bool alongNormal)
+    static void StartGreyboxFaceMove(Greybox gb, int face, Vector2 mousePos)
     {
         BeginGreyboxUndo(gb, "Greybox Move Face");
         s_gbDrag = GbDrag.FaceNormal;
         s_gbFace = face;
         s_gbStartCorners = (Vector3[])gb.Corners.Clone();
-        s_gbPlaneNormal = alongNormal ? GreyboxFaceNormal(gb, face) : ClosestLocalAxisDir(gb, face);
-        s_gbPlanePoint = GreyboxFaceCenter(face);
-        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        s_gbNormalStartDist = GPEditShared.ProjectRayOntoLine(ray, s_gbPlanePoint, s_gbPlaneNormal);
-    }
-
-    static void StartGreyboxFaceSkew(Greybox gb, int face, Vector2 mousePos, bool axisLock)
-    {
-        BeginGreyboxUndo(gb, "Greybox Skew Face");
-        s_gbDrag = GbDrag.FaceSkew;
-        s_gbFace = face;
-        s_gbSkewAxisLock = axisLock;
-        s_gbSkewLockAxis = -1;
-        s_gbStartCorners = (Vector3[])gb.Corners.Clone();
-        s_gbPlaneNormal = GreyboxFaceNormal(gb, face);
-        s_gbPlanePoint = GreyboxFaceCenter(face);
-        GPEditShared.RaycastPlane(mousePos, s_gbPlanePoint, s_gbPlaneNormal, out s_gbHitStart);
+        s_gbCoordinates.Begin(GreyboxFaceCenter(face), mousePos,
+            GreyboxFaceCoordinates(gb, face, false), GreyboxFaceCoordinates(gb, face, true));
     }
 
     static void BeginGreyboxUndo(Greybox gb, string name)
@@ -245,7 +235,7 @@ static partial class GPEdit
 
     // ─── Drag ───────────────────────────────────────────────────
 
-    static void HandleGreyboxDrag(Event e, SceneView sv)
+    static void HandleGreyboxDrag(Event e, SceneView sv, int operandIndex = -1)
     {
         if (s_gbTarget == null) { ResetGreyboxDrag(); return; }
 
@@ -253,7 +243,8 @@ static partial class GPEdit
         // keeps the drag updating off-window and lets the release register wherever it happens.
         EventType type = e.type == EventType.Ignore ? e.rawType : e.type;
 
-        if (type == EventType.MouseDrag && e.button == s_gbButton)
+        if ((type == EventType.MouseDrag && e.button == s_gbButton)
+            || type == EventType.KeyDown || type == EventType.KeyUp)
         {
             ApplyGreyboxDrag(e.mousePosition);
             sv.Repaint();
@@ -271,9 +262,9 @@ static partial class GPEdit
         if (e.type == EventType.Repaint)
         {
             s_gbTarget.GetWorldCorners(s_gbWc);
-            int face = (s_gbDrag == GbDrag.FaceNormal || s_gbDrag == GbDrag.FaceSkew) ? s_gbFace : -1;
+            int face = (s_gbDrag == GbDrag.FaceNormal || s_gbDrag == GbDrag.Extrude) ? s_gbFace : -1;
             int edge = s_gbDrag == GbDrag.Edge ? s_gbEdge : -1;
-            DrawGreybox(s_gbTarget, face, edge);
+            DrawGreybox(s_gbTarget, face, edge, operandIndex);
         }
     }
 
@@ -283,76 +274,22 @@ static partial class GPEdit
         {
             case GbDrag.Edge:       ApplyGreyboxEdge(mousePos);   break;
             case GbDrag.FaceNormal: ApplyGreyboxFaceNormal(mousePos); break;
-            case GbDrag.FaceSkew:   ApplyGreyboxFaceSkew(mousePos);   break;
             case GbDrag.Extrude:    ApplyGreyboxExtrude(mousePos);    break;
         }
     }
 
     static void ApplyGreyboxEdge(Vector2 mousePos)
     {
-        Vector2 mouseDelta = mousePos - s_gbEdgePressPos;
-
-        int lockAxis = -1;
-        if (Event.current.shift)
-        {
-            // Lock to the axis the mouse actually moved along, compared in pixels; hysteresis so
-            // the choice doesn't flip mid-drag on near-diagonal motion.
-            s_gbEdgeFrame.Solve(mouseDelta, -1, out _, out _, out float pxA, out float pxB);
-            int dominant = Mathf.Abs(pxA) >= Mathf.Abs(pxB) ? 0 : 1;
-            if (s_gbEdgeLockAxis == -1)
-                s_gbEdgeLockAxis = dominant;
-            else if (dominant != s_gbEdgeLockAxis)
-            {
-                float lockedPx = s_gbEdgeLockAxis == 0 ? Mathf.Abs(pxA) : Mathf.Abs(pxB);
-                float otherPx  = s_gbEdgeLockAxis == 0 ? Mathf.Abs(pxB) : Mathf.Abs(pxA);
-                if (otherPx > lockedPx * 1.3f) s_gbEdgeLockAxis = dominant;
-            }
-            lockAxis = s_gbEdgeLockAxis;
-        }
-        else s_gbEdgeLockAxis = -1;
-
-        s_gbEdgeFrame.Solve(mouseDelta, lockAxis, out float ta, out float tb, out _, out _);
-        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(s_gbEdgeFrame.WorldDelta(ta, tb));
-        localDelta[s_gbEdge / 4] = 0f; // numeric hygiene — an edge never moves along its own axis
-
-        int[] ec = GPEditShared.EdgeCornerIndices[s_gbEdge];
-        s_gbTarget.Corners[ec[0]] = s_gbStartCorners[ec[0]] + localDelta;
-        s_gbTarget.Corners[ec[1]] = s_gbStartCorners[ec[1]] + localDelta;
-        RebuildGreyboxWithSeams(ec[0], ec[1]);
+        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(s_gbCoordinates.Update(mousePos));
+        int[] corners = GPEditShared.EdgeCornerIndices[s_gbEdge];
+        s_gbTarget.Corners[corners[0]] = s_gbStartCorners[corners[0]] + localDelta;
+        s_gbTarget.Corners[corners[1]] = s_gbStartCorners[corners[1]] + localDelta;
+        RebuildGreyboxWithSeams(corners[0], corners[1]);
     }
 
     static void ApplyGreyboxFaceNormal(Vector2 mousePos)
     {
-        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        float dist = GPEditShared.ProjectRayOntoLine(ray, s_gbPlanePoint, s_gbPlaneNormal);
-        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(s_gbPlaneNormal * (dist - s_gbNormalStartDist));
-        MoveGreyboxFaceCorners(localDelta);
-    }
-
-    static void ApplyGreyboxFaceSkew(Vector2 mousePos)
-    {
-        if (!GPEditShared.RaycastPlane(mousePos, s_gbPlanePoint, s_gbPlaneNormal, out Vector3 hit)) return;
-        Vector3 localDelta = s_gbTarget.transform.InverseTransformVector(hit - s_gbHitStart);
-
-        if (s_gbSkewAxisLock)
-        {
-            // The face plane spans the two local axes other than the face's own; lock to whichever the
-            // drag runs along most, with hysteresis so the choice doesn't flip on near-diagonal motion.
-            int faceAxis = s_gbFace / 2;
-            int a1 = (faceAxis + 1) % 3;
-            int a2 = (faceAxis + 2) % 3;
-            int dominant = Mathf.Abs(localDelta[a1]) >= Mathf.Abs(localDelta[a2]) ? a1 : a2;
-            if (s_gbSkewLockAxis == -1)
-                s_gbSkewLockAxis = dominant;
-            else if (dominant != s_gbSkewLockAxis
-                     && Mathf.Abs(localDelta[dominant]) > Mathf.Abs(localDelta[s_gbSkewLockAxis]) * 1.3f)
-                s_gbSkewLockAxis = dominant;
-
-            for (int ax = 0; ax < 3; ax++)
-                if (ax != s_gbSkewLockAxis) localDelta[ax] = 0f;
-        }
-
-        MoveGreyboxFaceCorners(localDelta);
+        MoveGreyboxFaceCorners(s_gbTarget.transform.InverseTransformVector(s_gbCoordinates.Update(mousePos)));
     }
 
     /// <summary>Translate the dragged face's four corners together by a local-space delta.</summary>
@@ -370,16 +307,36 @@ static partial class GPEdit
         EditorUtility.SetDirty(s_gbTarget);
         foreach (int c in corners)
             GreyboxSeamSolver.SyncCorner(s_gbTarget, c);
+        GreyBooleanOrchestrator.ReBakeFrom(s_gbTarget);
     }
 
     static void FinishGreyboxDrag()
     {
+        if (GreyPrimitiveSettings.AutoUpdatePivot)
+        {
+            GreyPrimitiveEditor.RecenterGreyboxPivot(s_gbTarget);
+            if (s_gbExtrudeNew != null)
+                GreyPrimitiveEditor.RecenterGreyboxPivot(s_gbExtrudeNew);
+        }
+        if (s_gbExtrudeNew != null && s_gbExtrudeNew.IsLinkAlive)
+        {
+            KeepSplitInBoolean(s_gbTarget, s_gbExtrudeNew);
+            GreyboxLinkHierarchy.Organize(s_gbTarget, "Greybox Extrude");
+            GreyBooleanOrchestrator.ReBakeFrom(s_gbTarget);
+        }
         GreyPrimitive.EndDeferredPersist();
         GameObject extruded = s_gbExtrudeNew != null ? s_gbExtrudeNew.gameObject : null;
         Undo.CollapseUndoOperations(s_gbUndoGroup);
         GUIUtility.hotControl = 0;
         ResetGreyboxDrag();
-        if (extruded != null) Selection.activeObject = extruded;
+        if (extruded != null && !(SelectedPrimitive is GreyBooleanResult))
+        {
+            using var selectionScope = ListPool<Object>.Get(out var selection);
+            selection.AddRange(Selection.objects);
+            selection.Remove(extruded);
+            selection.Insert(0, extruded);
+            Selection.objects = selection.ToArray();
+        }
     }
 
     static void ResetGreyboxDrag()
@@ -388,12 +345,15 @@ static partial class GPEdit
         s_gbTarget = null;
         s_gbStartCorners = null;
         s_gbExtrudeNew = null;
+        s_gbExtrudeBase = null;
     }
 
     // ─── Extrude ────────────────────────────────────────────────
 
     static void StartGreyboxExtrude(Greybox sourceGb, int face, Vector2 mousePos, bool linked)
     {
+        if (linked && !GreyboxLinkHierarchy.CanLink(sourceGb, sourceGb)) return;
+        s_gbFace = face;
         Undo.IncrementCurrentGroup();
         s_gbUndoGroup = Undo.GetCurrentGroup();
         GreyPrimitive.BeginDeferredPersist();
@@ -403,19 +363,18 @@ static partial class GPEdit
         Vector3 c0 = wc[ci[0]], c1 = wc[ci[1]], c2 = wc[ci[2]], c3 = wc[ci[3]];
         s_gbExtrudeCenter = (c0 + c1 + c2 + c3) * 0.25f;
 
-        s_gbExtrudeNormal = Vector3.Cross(c1 - c0, c3 - c0).normalized;
-        int axisIdx = face / 2;
-        float signF = (face % 2 == 0) ? 1f : -1f;
-        Vector3 localNormal = axisIdx == 0 ? new Vector3(signF, 0, 0)
-                            : axisIdx == 1 ? new Vector3(0, signF, 0)
-                            : new Vector3(0, 0, signF);
-        if (Vector3.Dot(s_gbExtrudeNormal, sourceGb.transform.TransformDirection(localNormal)) < 0f)
-            s_gbExtrudeNormal = -s_gbExtrudeNormal;
+        var globalCoordinates = GreyboxFaceCoordinates(sourceGb, face, false);
+        var localCoordinates = GreyboxFaceCoordinates(sourceGb, face, true);
+        s_gbExtrudeNormal = Tools.pivotRotation == PivotRotation.Local ? localCoordinates.a : globalCoordinates.a;
+        s_gbCoordinates.Begin(s_gbExtrudeCenter, mousePos,
+            EditCoordinates.Face(globalCoordinates.a, globalCoordinates.a, Vector3.zero),
+            EditCoordinates.Face(localCoordinates.a, localCoordinates.a, Vector3.zero));
 
         Vector3 up = s_gbExtrudeNormal;
-        Vector3 tDir = Vector3.ProjectOnPlane(c3 - c0, up);
-        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(c1 - c0, up);
+        Vector3 tDir = Vector3.ProjectOnPlane(c1 - c0, up);
+        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(c3 - c0, up);
         if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(Vector3.forward, up);
+        if (tDir.sqrMagnitude < 0.0001f) tDir = Vector3.ProjectOnPlane(Vector3.right, up);
         Quaternion extrudeRot = Quaternion.LookRotation(tDir.normalized, up);
 
         Undo.RegisterCompleteObjectUndo(sourceGb, "Greybox Extrude");
@@ -423,25 +382,24 @@ static partial class GPEdit
         sourceGb.RebuildMesh();
         EditorUtility.SetDirty(sourceGb);
 
-        Transform parent = sourceGb.transform.parent;
-        var go = GreyboxSettings.PlaceGreybox(s_gbExtrudeCenter, extrudeRot, parent);
+        Transform parent = linked ? GreyboxLinkHierarchy.LinkedExtrusionParent(sourceGb) : GreyboxLinkHierarchy.UnlinkedExtrusionParent(sourceGb);
+        var go = GreyboxSettings.PlaceGreybox(s_gbExtrudeCenter, extrudeRot, parent, select: false);
+        if (parent == null && go.scene != sourceGb.gameObject.scene)
+            UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(go, sourceGb.gameObject.scene);
         go.transform.localScale = Vector3.one;
         s_gbExtrudeNew = go.GetComponent<Greybox>();
 
-        Vector3[] newCorners        = Greybox.DefaultCorners();
-        Vector3[] srcFaceCorners    = { c0, c1, c2, c3 };
-        int[]     linkChildCorners  = new int[4];
-        int[]     linkParentCorners = new int[4];
+        Vector3[] newCorners = Greybox.DefaultCorners();
+        Vector3[] srcFaceCorners = { c0, c1, c2, c3 };
+        int[] linkChildCorners = { 0, 4, 5, 1 };
+        int[] linkParentCorners = (int[])ci.Clone();
         for (int k = 0; k < 4; k++)
         {
-            Vector3 lc     = go.transform.InverseTransformPoint(srcFaceCorners[k]);
-            int     botIdx = (lc.x >= 0f ? 1 : 0) | (lc.z >= 0f ? 4 : 0);
-            int     topIdx = botIdx | 2;
-            newCorners[botIdx] = new Vector3(lc.x, 0f,     lc.z);
-            newCorners[topIdx] = new Vector3(lc.x, 0.001f, lc.z);
-            linkChildCorners[k]  = botIdx;
-            linkParentCorners[k] = ci[k];
+            int bottom = linkChildCorners[k];
+            newCorners[bottom] = go.transform.InverseTransformPoint(srcFaceCorners[k]);
+            newCorners[bottom | 2] = newCorners[bottom] + go.transform.InverseTransformVector(s_gbExtrudeNormal * 0.001f);
         }
+        s_gbExtrudeBase = (Vector3[])newCorners.Clone();
 
         var srcSO      = new SerializedObject(sourceGb);
         var dstSO      = new SerializedObject(s_gbExtrudeNew);
@@ -456,9 +414,13 @@ static partial class GPEdit
         var newMr    = go.GetComponent<MeshRenderer>();
         if (sourceMr != null && newMr != null)
         {
+            newMr.enabled           = !linked || sourceMr.enabled;
             newMr.sharedMaterial    = sourceMr.sharedMaterial;
             newMr.shadowCastingMode = sourceMr.shadowCastingMode;
         }
+        var sourceCollider = sourceGb.GetComponent<MeshCollider>();
+        var newCollider = go.GetComponent<MeshCollider>();
+        if (newCollider != null && sourceCollider != null) newCollider.enabled = !linked || sourceCollider.enabled;
         go.layer    = sourceGb.gameObject.layer;
         go.isStatic = sourceGb.gameObject.isStatic;
 
@@ -470,63 +432,102 @@ static partial class GPEdit
         {
             s_gbExtrudeNew.SetSeamLink(sourceGb, linkChildCorners, linkParentCorners);
             sourceGb.AddSeamChild(s_gbExtrudeNew);
+            KeepSplitInBoolean(sourceGb, s_gbExtrudeNew);
+            s_gbExtrudeBase = (Vector3[])s_gbExtrudeNew.Corners.Clone();
             EditorUtility.SetDirty(s_gbExtrudeNew);
         }
 
-        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        s_gbExtrudeStartDist = GPEditShared.ProjectRayOntoLine(ray, s_gbExtrudeCenter, s_gbExtrudeNormal);
         s_gbDrag = GbDrag.Extrude;
     }
 
     static void ApplyGreyboxExtrude(Vector2 mousePos)
     {
         if (s_gbExtrudeNew == null) return;
-        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        float dist = GPEditShared.ProjectRayOntoLine(ray, s_gbExtrudeCenter, s_gbExtrudeNormal);
-        float height = Mathf.Max(dist - s_gbExtrudeStartDist, 0.001f);
-        var corners = s_gbExtrudeNew.Corners;
-        for (int i = 0; i < 8; i++)
-            if ((i & 2) != 0)
-                corners[i] = new Vector3(corners[i].x, height, corners[i].z);
+        Vector3 worldDelta = s_gbCoordinates.Update(mousePos);
+        float forward = Vector3.Dot(worldDelta, s_gbExtrudeNormal);
+        if (forward < 0.001f) worldDelta += s_gbExtrudeNormal * (0.001f - forward);
+        Vector3 localDelta = s_gbExtrudeNew.transform.InverseTransformVector(worldDelta);
+        OffsetExtrudedFace(s_gbExtrudeBase, localDelta, s_gbExtrudeNew.Corners);
         s_gbExtrudeNew.RebuildMesh();
+        GreyBooleanOrchestrator.ReBakeFrom(s_gbExtrudeNew);
         EditorUtility.SetDirty(s_gbExtrudeNew.gameObject);
     }
 
     // ─── Draw ───────────────────────────────────────────────────
 
-    static void DrawGreybox(Greybox gb, int hoverFace, int hoverEdge)
+    static void OffsetExtrudedFace(Vector3[] baseCorners, Vector3 localDelta, Vector3[] corners)
     {
-        // Outline: all 12 edges. Edges that border only hidden faces draw dimmer but stay
-        // visible and grabbable; the hovered edge is brighter/thicker.
+        for (int i = 0; i < 8; i++)
+            if ((i & 2) == 0)
+            {
+                corners[i] = baseCorners[i];
+                corners[i | 2] = baseCorners[i] + localDelta;
+            }
+    }
+
+    static void DrawGreybox(Greybox gb, int hoverFace, int hoverEdge, int operandIndex = -1)
+    {
+        int seamFaces = GreyboxSeamFaceMask(gb);
+        Color tint = operandIndex <= 0 ? Color.white
+            : Color.HSVToRGB(Mathf.Repeat(0.55f + (operandIndex - 1) * 0.618034f, 1f), 0.4f, 1f);
+        float outlineWidth = operandIndex >= 0 && gb.GetComponentInParent<GreyBooleanResult>() != null && (hoverFace >= 0 || hoverEdge >= 0) ? 1.6f : 0f;
+
+        if (s_gbDrag == GbDrag.None && hoverFace >= 0)
+        {
+            var faceCorners = GPEditShared.FaceCornerIndices[hoverFace];
+            Handles.color = GPEditShared.CreateFace;
+            Handles.DrawAAConvexPolygon(s_gbWc[faceCorners[0]], s_gbWc[faceCorners[1]],
+                s_gbWc[faceCorners[2]], s_gbWc[faceCorners[3]]);
+        }
+        if (s_gbDrag == GbDrag.None && hoverEdge >= 0)
+            DrawGreyboxSplitPreview(gb, hoverEdge, Event.current.mousePosition);
+
+        Vector3 camFwd = Camera.current != null ? Camera.current.transform.forward : Vector3.forward;
+        int frontFaces = 0;
+        for (int face = 0; face < 6; face++)
+            if ((seamFaces & (1 << face)) == 0 && Vector3.Dot(GreyboxFaceNormal(gb, face), camFwd) < 0f)
+                frontFaces |= 1 << face;
+
+        // Fully internal welded edges are omitted; visible subdivision edges remain editable.
         for (int ei = 0; ei < 12; ei++)
         {
+            if (!IsExternalGreyboxEdge(gb, ei, seamFaces)) continue;
             int[] ec = GPEditShared.EdgeCornerIndices[ei];
-            if (ei == hoverEdge)
-            {
-                Handles.color = GPEditShared.OutlineHover;
-                Handles.DrawLine(s_gbWc[ec[0]], s_gbWc[ec[1]], 4f);
-            }
+            var adjacent = GPEditShared.EdgeFaceAdjacency[ei];
+            bool front = (frontFaces & ((1 << adjacent[0]) | (1 << adjacent[1]))) != 0;
+            Color color = ei == hoverEdge ? GPEditShared.OutlineHover : GPEditShared.Outline * tint;
+            if (!front) color.a *= GPEditShared.BackfaceAlpha;
+            if (ei != hoverEdge && !IsOutlineEdge(gb, ei)) color.a *= 0.35f;
+            Handles.color = color;
+            Handles.DrawLine(s_gbWc[ec[0]], s_gbWc[ec[1]], ei == hoverEdge ? 4f : outlineWidth);
+        }
+
+        if (hoverFace >= 0 || hoverEdge >= 0)
+        {
+            if (s_gbDrag != GbDrag.None && gb == s_gbTarget)
+                s_gbCoordinates.Draw(s_gbCoordinates.anchor + s_gbCoordinates.delta);
+            else if (hoverFace >= 0)
+                DrawCoordinates(GreyboxFaceCenter(hoverFace), GreyboxFaceCoordinates(gb, hoverFace, Tools.pivotRotation == PivotRotation.Local));
             else
             {
-                Color c = GPEditShared.Outline;
-                if (!IsOutlineEdge(gb, ei)) c.a *= 0.35f;
-                Handles.color = c;
-                Handles.DrawLine(s_gbWc[ec[0]], s_gbWc[ec[1]]);
+                var corners = GPEditShared.EdgeCornerIndices[hoverEdge];
+                Vector3 point = GPEditShared.ClosestPointOnSegmentToScreenPos(s_gbWc[corners[0]], s_gbWc[corners[1]], Event.current.mousePosition);
+                DrawCoordinates(point, GreyboxEdgeCoordinates(gb, hoverEdge, Tools.pivotRotation == PivotRotation.Local));
             }
         }
 
-        // Face handles (all six, so hidden faces can be toggled back on).
+        // Hidden welded faces have no handles; other hidden faces can still be toggled back on.
         if (Camera.current == null) return;
-        Vector3 camFwd = Camera.current.transform.forward;
         for (int face = 0; face < 6; face++)
         {
+            if ((seamFaces & (1 << face)) != 0) continue;
             Vector3 center  = GreyboxFaceCenter(face);
             bool front      = Vector3.Dot(GreyboxFaceNormal(gb, face), camFwd) < 0f;
-            bool active     = gb.ActiveFaces[face];
-            Color col = face == hoverFace ? GPEditShared.HandleHover
-                      : active            ? GPEditShared.HandleActive
+            bool active     = gb.IsFaceVisible(face);
+            Color col = face == hoverFace ? (s_gbDrag == GbDrag.Extrude ? GPEditShared.Create : GPEditShared.HandleHover)
+                      : active            ? GPEditShared.HandleActive * tint
                       :                     GPEditShared.HandleInactive;
-            col.a *= front ? 1f : 0.35f;
+            col.a *= front ? 1f : GPEditShared.BackfaceAlpha;
             GPEditShared.DrawDot(center, col, 0.05f * (front ? 1.1f : 0.85f));
         }
     }

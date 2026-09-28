@@ -29,8 +29,10 @@ class GPWindowOverlay : Overlay
         "Base width of the road's box cross-section, in local units.");
     static readonly GUIContent k_Height = new GUIContent("Base Height",
         "Base height (thickness) of the road's box cross-section, in local units.");
+    static readonly GUIContent k_SplineSmoothing = new GUIContent("Spline Smooth",
+        "Smooth the road path through every vertex without narrowing it. 0 = authored Beziers; 1 = natural cubic.");
     static readonly GUIContent k_Boolean = new GUIContent("Operator",
-        "Greybox to subtract from this one. A baked Boolean Result child holds Subject minus Operator.");
+        "Primitive, linked group, or Boolean result to subtract. The Boolean Result parent contains both inputs.");
     static readonly GUIContent k_Edit = new GUIContent("Edit",
         "Toggle Grey Primitive Edit Mode for all Grey Primitives this session (Alt+~).");
 
@@ -82,10 +84,10 @@ class GPWindowOverlay : Overlay
 
         DrawEditToggle();
 
-        EditorGUILayout.LabelField("Object Properties", s_header);
+        EditorGUILayout.LabelField(Selection.count > 1 ? "Active Object Properties" : "Object Properties", s_header);
         DrawProperties(gp);
 
-        if (gp is Greybox || gp is GreyBooleanResult)
+        if (gp is Greybox || gp is GreyBooleanResult || gp is GreyboxCompound)
         {
             EditorGUILayout.LabelField("Boolean", s_header);
             DrawBooleanFunctions(gp);
@@ -126,6 +128,11 @@ class GPWindowOverlay : Overlay
                 if (EditorGUI.EndChangeCheck())
                     Apply(road, "Greyroad Size", () => { road.BaseWidth = width; road.BaseHeight = height; });
 
+                EditorGUI.BeginChangeCheck();
+                float smoothing = EditorGUILayout.Slider(k_SplineSmoothing, road.SplineSmoothing, 0f, 1f);
+                if (EditorGUI.EndChangeCheck())
+                    Apply(road, "Greyroad Spline Smoothing", () => road.SplineSmoothing = smoothing);
+
                 DrawRoadFaces(road);
                 break;
         }
@@ -154,23 +161,12 @@ class GPWindowOverlay : Overlay
 
     static void DrawBooleanFunctions(GreyPrimitive gp)
     {
-        var so = new SerializedObject(gp);
+        var subject = GreyBooleanOrchestrator.EditSubject(gp);
+        var so = new SerializedObject(subject);
         so.Update();
-        var prop = so.FindProperty("_booleanOperator");
-        if (prop == null) return;
-
-        using (new EditorGUILayout.HorizontalScope())
-        {
-            EditorGUI.BeginChangeCheck();
-            EditorGUILayout.PropertyField(prop, k_Boolean);
-            bool changed = EditorGUI.EndChangeCheck();
-            so.ApplyModifiedProperties();
-            if (changed) GreyPrimitiveEditor.RebuildPrimitiveAndDependents(gp);
-
-            bool picking = GreyBooleanPicker.IsPicking && GreyBooleanPicker.PickingSubject == gp;
-            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f)))
-                GreyBooleanPicker.Begin(gp);
-        }
+        bool changed = GreyPrimitiveEditor.DrawBooleanInput(so, subject, k_Boolean);
+        so.ApplyModifiedProperties();
+        if (changed) GreyPrimitiveEditor.RebuildPrimitiveAndDependents(subject);
 
         // Select A / B reach into a Boolean Result's nested inputs so its constituents are easy to grab
         // through the result. They make sense only on the result itself — a Greybox that carries an

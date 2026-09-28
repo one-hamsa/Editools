@@ -86,13 +86,13 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     // ─── Boolean ─────────────────────────────────────────────────
     // Optional CSG subtraction. When set, this primitive is the Subject, the reference is the
-    // Operator, and a baked 'Boolean Result' child holds Subject−Operator (see GreyBooleanResult /
+    // Operator, and a baked 'Boolean Result' parent holds Subject−Operator (see GreyBooleanResult /
     // GreyBooleanOrchestrator). Lives on the base so any grey type — including a GreyBooleanResult —
     // can be a Subject and be chained/booleaned further.
 
     [SerializeField]
     [Tooltip("Optional Operator to subtract from this object. Drag any Grey object here (or use Pick). " +
-             "When set, this object and the Operator stop rendering and a child 'Boolean Result' mesh " +
+             "When set, this object and the Operator stop rendering and a parent 'Boolean Result' mesh " +
              "is baked as Subject minus Operator, inheriting this object's material, shadow/static " +
              "settings, and (for a Greybox) per-face visibility. Clear it to restore normal rendering.")]
     GreyPrimitive _booleanOperator;
@@ -107,6 +107,12 @@ public abstract class GreyPrimitive : MonoBehaviour
     Material _booleanCutMaterial;
 
     public Material BooleanCutMaterial => _booleanCutMaterial;
+
+    [SerializeField, HideInInspector]
+    [Tooltip("The compound or Boolean that owns this geometry input. Organizational folders do not own geometry.")]
+    GreyPrimitive _geometryOwner;
+
+    public GreyPrimitive GeometryOwner { get => _geometryOwner; set => _geometryOwner = value; }
 
     // ─── Mesh ───────────────────────────────────────────────────
 

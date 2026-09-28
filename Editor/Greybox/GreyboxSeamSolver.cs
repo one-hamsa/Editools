@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Pool;
 
 /// <summary>
 /// Keeps linked greybox seams welded under ANY edit. A child created by QuickTransform's RMB
@@ -25,6 +26,7 @@ static class GreyboxSeamSolver
     {
         SceneView.duringSceneGui += OnSceneGui;
         Selection.selectionChanged += OnSelectionChanged;
+        OnSelectionChanged();
     }
 
     // ─── Transform-driven conform (push-based, tool-agnostic) ───────
@@ -35,10 +37,56 @@ static class GreyboxSeamSolver
     static readonly Dictionary<GreyPrimitive, Vector3> s_scaleAtGrab = new Dictionary<GreyPrimitive, Vector3>();
     static int s_lastHot;
 
+    static bool s_expandingSelection;
+    static bool s_selectionExpansionScheduled;
+
     static void OnSelectionChanged()
     {
         s_lastMatrix.Clear();
         s_scaleAtGrab.Clear();
+        RequestLinkedSelectionExpansion();
+    }
+
+    internal static void RequestLinkedSelectionExpansion()
+    {
+        if (!GPEdit.Enabled || s_expandingSelection || s_selectionExpansionScheduled) return;
+        s_selectionExpansionScheduled = true;
+        EditorApplication.delayCall += ExpandLinkedSelection;
+    }
+
+    static void ExpandLinkedSelection()
+    {
+        s_selectionExpansionScheduled = false;
+        if (!GPEdit.Enabled) return;
+        // Apply after the originating selection operation, using its final selection.
+        using var objectsScope = ListPool<Object>.Get(out var objects);
+        using var boxesScope = ListPool<Greybox>.Get(out var boxes);
+        using var visitedScope = HashSetPool<int>.Get(out var visited);
+        objects.AddRange(Selection.objects);
+        foreach (var go in Selection.gameObjects)
+            if (!EditorUtility.IsPersistent(go) && go.TryGetComponent<Greybox>(out var box)
+                && visited.Add(box.GetInstanceID())) boxes.Add(box);
+        for (int i = 0; i < boxes.Count; i++)
+        {
+            using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+            boxes[i].GetSeams(seams);
+            foreach (var seam in seams)
+                if (!EditorUtility.IsPersistent(seam.other) && visited.Add(seam.other.GetInstanceID()))
+                {
+                    boxes.Add(seam.other);
+                    if (!objects.Contains(seam.other.gameObject)) objects.Add(seam.other.gameObject);
+                }
+        }
+        if (objects.Count != Selection.objects.Length)
+        {
+            var active = Selection.activeObject;
+            int activeIndex = objects.IndexOf(active);
+            if (activeIndex > 0) (objects[0], objects[activeIndex]) = (objects[activeIndex], objects[0]);
+            s_expandingSelection = true;
+            try { Selection.objects = objects.ToArray(); }
+            finally { s_expandingSelection = false; }
+            SceneView.RepaintAll();
+        }
     }
 
     static void OnSceneGui(SceneView sv)
@@ -179,23 +227,14 @@ static class GreyboxSeamSolver
         {
             Greybox box = stack.Pop();
 
-            // Upward: the box this one is welded to.
-            if (box.IsLinkAlive && visited.Add(box.LinkedParent))
-            {
-                box.LinkedParent.RebuildMesh();
-                EditorUtility.SetDirty(box.LinkedParent);
-                stack.Push(box.LinkedParent);
-            }
-
-            // Downward: boxes welded to this one (stale reverse-index entries filtered out).
-            List<Greybox> children = box.SeamChildren;
-            if (children == null) continue;
-            foreach (Greybox child in children)
-                if (child != null && child.IsLinkAlive && child.LinkedParent == box && visited.Add(child))
+            using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+            box.GetSeams(seams);
+            foreach (var seam in seams)
+                if (visited.Add(seam.other))
                 {
-                    child.RebuildMesh();
-                    EditorUtility.SetDirty(child);
-                    stack.Push(child);
+                    seam.other.RebuildMesh();
+                    EditorUtility.SetDirty(seam.other);
+                    stack.Push(seam.other);
                 }
         }
     }
@@ -216,45 +255,20 @@ static class GreyboxSeamSolver
     {
         Vector3 world = box.transform.TransformPoint(box.Corners[movedCorner]);
 
-        // Upward: this box is a linked child — drive the paired corner on its parent.
-        if (box.IsLinkAlive)
-        {
-            int[] cc = box.LinkChildCorners;
-            int[] pc = box.LinkParentCorners;
-            Greybox p = box.LinkedParent;
+        using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+        box.GetSeams(seams);
+        foreach (var seam in seams)
             for (int k = 0; k < 4; k++)
-                if (cc[k] == movedCorner && s_visited.Add((p, pc[k])))
+                if (seam.corners[k] == movedCorner && s_visited.Add((seam.other, seam.otherCorners[k])))
                 {
-                    RegisterUndo(p);
-                    p.Corners[pc[k]] = p.transform.InverseTransformPoint(world);
-                    p.RebuildMesh();
-                    EditorUtility.SetDirty(p);
-                    Propagate(p, pc[k]);
-                    break;
+                    var partner = seam.other;
+                    int corner = seam.otherCorners[k];
+                    RegisterUndo(partner);
+                    partner.Corners[corner] = partner.transform.InverseTransformPoint(world);
+                    partner.RebuildMesh();
+                    EditorUtility.SetDirty(partner);
+                    Propagate(partner, corner);
                 }
-        }
-
-        // Downward: boxes welded to this box (reverse index). Multiple children may share a corner,
-        // so the outer scan completes (only the inner pairing loop breaks). Stale entries — a child
-        // re-linked elsewhere or destroyed — are filtered by the parent-reference check.
-        List<Greybox> children = box.SeamChildren;
-        if (children == null) return;
-        foreach (Greybox child in children)
-        {
-            if (child == null || child.LinkedParent != box || !child.IsLinkAlive) continue;
-            int[] cc = child.LinkChildCorners;
-            int[] pc = child.LinkParentCorners;
-            for (int k = 0; k < 4; k++)
-                if (pc[k] == movedCorner && s_visited.Add((child, cc[k])))
-                {
-                    RegisterUndo(child);
-                    child.Corners[cc[k]] = child.transform.InverseTransformPoint(world);
-                    child.RebuildMesh();
-                    EditorUtility.SetDirty(child);
-                    Propagate(child, cc[k]);
-                    break;
-                }
-        }
     }
 
     // ─── Manual linking (inspector "Link" field) ───────────────────
@@ -285,11 +299,20 @@ static class GreyboxSeamSolver
     public static void LinkBoxes(Greybox child, Greybox parent)
     {
         if (child == null || parent == null || child == parent) return;
+        if (!GreyboxLinkHierarchy.CanLink(child, parent)) return;
 
-        // Reject a weld that would make the link chain cyclic (parent already upstream of child).
-        for (Greybox a = parent; a != null; a = a.LinkedParent)
-            if (a == child) { Debug.LogWarning("[Greybox] Link would create a seam cycle — ignored."); return; }
-
+        Undo.IncrementCurrentGroup();
+        int undoGroup = Undo.GetCurrentGroup();
+        Undo.SetCurrentGroupName("Link Greyboxes");
+        using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
+        child.GetSeams(seams);
+        foreach (var seam in seams)
+            if (seam.other == parent)
+            {
+                GreyboxLinkHierarchy.Organize(parent, "Link Greyboxes");
+                Undo.CollapseUndoOperations(undoGroup);
+                return;
+            }
         FindBestFacePair(child, parent, out int fChild, out int fParent);
         int[] cFace   = FaceCornerIndices[fChild];
         int[] pPaired = MatchCorners(child, cFace, parent, FaceCornerIndices[fParent]);
@@ -297,7 +320,6 @@ static class GreyboxSeamSolver
         Undo.RegisterCompleteObjectUndo(child, "Link Greybox Seam");
         Undo.RegisterCompleteObjectUndo(parent, "Link Greybox Seam");
 
-        if (child.IsLinkAlive) child.Unlink();   // one parent per box — replace any prior weld
 
         // Snap: the child's seam corners move onto the matched parent corners (parent is the anchor).
         for (int k = 0; k < 4; k++)
@@ -309,8 +331,7 @@ static class GreyboxSeamSolver
         child.ActiveFaces[fChild]   = false;     // hide the now-coincident seam on both boxes
         parent.ActiveFaces[fParent] = false;
 
-        child.SetSeamLink(parent, (int[])cFace.Clone(), pPaired);
-        parent.AddSeamChild(child);
+        child.AddSeamLink(parent, (int[])cFace.Clone(), pPaired);
         child.RebuildMesh();
         parent.RebuildMesh();
         EditorUtility.SetDirty(child);
@@ -321,6 +342,8 @@ static class GreyboxSeamSolver
         BeginUndoScope("Link Greybox Seam");
         for (int k = 0; k < 4; k++)
             SyncCorner(child, cFace[k]);
+        GreyboxLinkHierarchy.Organize(parent, "Link Greyboxes");
+        Undo.CollapseUndoOperations(undoGroup);
     }
 
     /// <summary>Pick the face pair most likely meant to join: closest centers, most anti-parallel normals.</summary>

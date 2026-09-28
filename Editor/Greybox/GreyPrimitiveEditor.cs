@@ -8,7 +8,7 @@ public class GreyPrimitiveEditor : Editor
     static readonly GUIContent s_booleanLabel = new GUIContent(
         "Boolean",
         "Optional Operator to subtract from this object. Drag a Grey object here, or use Pick to " +
-        "click one in the scene. Creates a baked 'Boolean Result' child (Subject minus Operator).");
+        "click one in the scene. Creates a Boolean Result parent containing both complete inputs (Subject minus Operator).");
 
     static readonly GUIContent s_cutMaterialLabel = new GUIContent(
         "Cut Material",
@@ -76,7 +76,7 @@ public class GreyPrimitiveEditor : Editor
     // Re-origin a Greybox at its bounding-box center: shift every corner by -center in local space and
     // push the transform by +center in world space, so the geometry doesn't visibly move. Seam-welded
     // partners need no resync — nothing changes in world space.
-    static void RecenterGreyboxPivot(Greybox gb)
+    internal static void RecenterGreyboxPivot(Greybox gb, bool rebuild = true)
     {
         var corners = gb.Corners;
         Vector3 min = corners[0], max = corners[0];
@@ -89,14 +89,24 @@ public class GreyPrimitiveEditor : Editor
         if (center.sqrMagnitude < 1e-12f) return; // already centered
 
         Undo.RegisterCompleteObjectUndo(gb, "Recenter Greybox Pivot");
-        Undo.RecordObject(gb.transform, "Recenter Greybox Pivot");
+        Undo.RegisterCompleteObjectUndo(gb.transform, "Recenter Greybox Pivot");
+
+        for (int i = 0; i < gb.transform.childCount; i++)
+        {
+            var child = gb.transform.GetChild(i);
+            Undo.RegisterCompleteObjectUndo(child, "Recenter Greybox Pivot");
+            child.localPosition -= center;
+        }
 
         gb.transform.position += gb.transform.TransformVector(center);
         for (int i = 0; i < corners.Length; i++)
             corners[i] -= center;
 
-        gb.RebuildMesh();
-        GreyBooleanOrchestrator.Sync(gb);
+        if (rebuild)
+        {
+            gb.RebuildMesh();
+            GreyBooleanOrchestrator.ReBakeFrom(gb);
+        }
         EditorUtility.SetDirty(gb);
     }
 
@@ -104,34 +114,58 @@ public class GreyPrimitiveEditor : Editor
     // keeping Greypipe/Greyroad inspectors clean. Drawn with a Pick button beside it.
     void DrawBooleanRow()
     {
-        if (!(target is Greybox) && !(target is GreyBooleanResult)) return;
+        if (!(target is Greybox) && !(target is GreyBooleanResult) && !(target is GreyboxCompound)) return;
 
-        var prop = serializedObject.FindProperty("_booleanOperator");
-        if (prop == null) return;
+        var subject = GreyBooleanOrchestrator.EditSubject((GreyPrimitive)target);
+        var settings = subject == target ? serializedObject : new SerializedObject(subject);
+        if (settings != serializedObject) settings.Update();
+        var prop = settings.FindProperty("_booleanOperator");
+        EditorGUI.BeginChangeCheck();
+        DrawBooleanInput(settings, subject, s_booleanLabel);
+        if (prop.objectReferenceValue != null)
+            EditorGUILayout.PropertyField(settings.FindProperty("_booleanCutMaterial"), s_cutMaterialLabel);
+        bool changed = EditorGUI.EndChangeCheck();
+        if (settings != serializedObject && changed)
+        {
+            settings.ApplyModifiedProperties();
+            GreyBooleanOrchestrator.Sync(subject);
+        }
+    }
 
+    internal static bool DrawBooleanInput(SerializedObject settings, GreyPrimitive subject, GUIContent label)
+    {
+        var prop = settings.FindProperty("_booleanOperator");
+        EditorGUI.BeginChangeCheck();
         using (new EditorGUILayout.HorizontalScope())
         {
-            EditorGUILayout.PropertyField(prop, s_booleanLabel);
-
-            bool picking = GreyBooleanPicker.IsPicking
-                           && GreyBooleanPicker.PickingSubject == (GreyPrimitive)target;
-            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f)))
-                GreyBooleanPicker.Begin((GreyPrimitive)target);
+            var current = prop.objectReferenceValue as GreyPrimitive;
+            EditorGUI.showMixedValue = prop.hasMultipleDifferentValues;
+            EditorGUI.BeginChangeCheck();
+            var selected = EditorGUILayout.ObjectField(label, current != null ? current.gameObject : null,
+                typeof(GameObject), true) as GameObject;
+            if (EditorGUI.EndChangeCheck())
+            {
+                var picked = GreyBooleanOrchestrator.ResolveObject(selected);
+                if (selected == null || picked != null) prop.objectReferenceValue = picked;
+            }
+            EditorGUI.showMixedValue = false;
+            bool picking = GreyBooleanPicker.IsPicking && GreyBooleanPicker.PickingSubject == subject;
+            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f))) GreyBooleanPicker.Begin(subject);
         }
-
-        // The cut-material slot appears only once an Operator is set.
-        if (prop.objectReferenceValue != null)
-        {
-            var matProp = serializedObject.FindProperty("_booleanCutMaterial");
-            if (matProp != null)
-                EditorGUILayout.PropertyField(matProp, s_cutMaterialLabel);
-        }
+        return EditorGUI.EndChangeCheck();
     }
 
     void RebuildAndSyncTargets()
     {
         foreach (var t in targets)
-            if (t is GreyPrimitive p) { p.RebuildMesh(); GreyBooleanOrchestrator.Sync(p); }
+            if (t is GreyPrimitive p)
+            {
+                if (p is Greybox gb && GreyPrimitiveSettings.AutoUpdatePivot)
+                    RecenterGreyboxPivot(gb, rebuild: false);
+                p.RebuildMesh();
+                GreyBooleanOrchestrator.Sync(p);
+                GreyBooleanOrchestrator.ReBakeFrom(p);
+            }
     }
 
     // Rebuild a single primitive together with everything derived from it — its own boolean,

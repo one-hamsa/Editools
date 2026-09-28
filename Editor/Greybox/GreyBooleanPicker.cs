@@ -42,7 +42,7 @@ static class GreyBooleanPicker
 
         var subject = s_subject;
         var go = Selection.activeGameObject;
-        var picked = go != null ? go.GetComponentInParent<GreyPrimitive>() : null;
+        var picked = GreyBooleanOrchestrator.ResolveObject(go);
         if (picked == null || picked == subject) return;
 
         AssignOperator(subject, picked);
@@ -75,7 +75,7 @@ static class GreyBooleanPicker
         {
             var subject = s_subject;
             var go = HandleUtility.PickGameObject(e.mousePosition, false);
-            var picked = go != null ? go.GetComponentInParent<GreyPrimitive>() : null;
+            var picked = GreyBooleanOrchestrator.ResolveObject(go);
 
             if (picked != null && picked != subject)
                 AssignOperator(subject, picked);

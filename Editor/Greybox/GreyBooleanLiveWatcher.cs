@@ -2,12 +2,13 @@
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Pool;
 
 /// <summary>
 /// Re-bakes Boolean results live as the user moves or edits a Subject or Operator in the scene view.
 /// Push-based and lazily subscribed: <see cref="GreyPrimitiveEditor"/> acquires it while a grey
 /// object is selected and releases it otherwise — so there is no [InitializeOnLoad] and no idle
-/// per-frame work. It only inspects the current selection and compares a cheap state signature
+/// per-frame work. It inspects the selection and its Boolean operands and compares a cheap state signature
 /// (world matrix + Greybox corners/faces) to the last seen value, mirroring how GreyboxSeamSolver
 /// watches transforms. Mesh-only (no undo/structural work) so a drag stays smooth.
 /// </summary>
@@ -45,22 +46,35 @@ static class GreyBooleanLiveWatcher
         var sel = Selection.transforms;
         if (sel == null || sel.Length == 0) return;
 
+        using var visitedScope = HashSetPool<int>.Get(out var visited);
         foreach (var t in sel)
         {
             if (t == null) continue;
             var prim = t.GetComponent<GreyPrimitive>();
-            if (prim == null) continue;
-
-            int key = prim.GetInstanceID();
-            long sig = Signature(prim);
-            bool known = s_lastSig.TryGetValue(key, out long prev);
-            s_lastSig[key] = sig;
-            if (!known || prev == sig) continue; // first sighting (baseline) or unchanged
-
-            // The moved/edited primitive feeds a result (its parent wrapper) — re-bake up the chain.
-            GreyBooleanOrchestrator.ReBakeFrom(prim);
-            sv.Repaint();
+            WatchPrimitive(prim, sv, visited);
         }
+    }
+
+    static void WatchPrimitive(GreyPrimitive prim, SceneView sv, HashSet<int> visited)
+    {
+        // Non-primitive selections and temporarily missing Boolean inputs have nothing to watch.
+        if (prim == null || !visited.Add(prim.GetInstanceID())) return;
+        if (prim is GreyBooleanResult result)
+        {
+            WatchPrimitive(result.Subject, sv, visited);
+            WatchPrimitive(result.Operator, sv, visited);
+        }
+        else if (prim is GreyboxCompound compound)
+            foreach (var part in compound.Parts) WatchPrimitive(part, sv, visited);
+
+        int key = prim.GetInstanceID();
+        long sig = Signature(prim);
+        bool known = s_lastSig.TryGetValue(key, out long prev);
+        s_lastSig[key] = sig;
+        if (!known || prev == sig) return;
+
+        GreyBooleanOrchestrator.ReBakeFrom(prim);
+        sv.Repaint();
     }
 
     static long Signature(GreyPrimitive prim)
@@ -75,9 +89,8 @@ static class GreyBooleanLiveWatcher
             var c = gb.Corners;
             for (int i = 0; i < c.Length; i++)
                 h = h * 31 + c[i].GetHashCode();
-            var f = gb.ActiveFaces;
-            for (int i = 0; i < f.Length; i++)
-                h = h * 31 + (f[i] ? 1 : 0);
+            for (int i = 0; i < 6; i++)
+                h = h * 31 + (gb.IsFaceVisible(i) ? 1 : 0);
         }
         return h;
     }

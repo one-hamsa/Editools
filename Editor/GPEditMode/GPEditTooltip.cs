@@ -13,50 +13,33 @@ static partial class GPEdit
 
     static readonly (string input, string output)[] k_GreyboxHints =
     {
-        ("Edge LMB",           "move"),
-        ("Edge LMB+Shift",     "axis lock"),
-        ("Face LMB",           "move (local axis)"),
-        ("Face LMB+Shift",     "move (normal)"),
-        ("Face LMB+Ctrl",      "skew"),
-        ("Face LMB+Ctrl+Shift","skew axis lock"),
-        ("Face MMB",           "hide / show"),
-        ("Face RMB",           "extrude"),
-        ("Face RMB+Shift",     "extrude linked"),
+        ("LMB", "move"),
+        ("Ctrl", "alternative coordinates"),
+        ("Shift", "axis lock"),
+        ("MMB", "click face to hide / show"),
+        ("RMB", "drag face to extrude linked / click edge to split"),
+        ("RMB + Alt", "drag face to extrude unlinked"),
     };
 
     static readonly (string input, string output)[] k_PipeHints =
     {
-        ("Vertex LMB",        "move"),
-        ("Vertex LMB+Shift",  "move orth"),
-        ("End LMB+Ctrl",      "move alone"),
-        ("Vertex LMB+Ctrl+Shift","axis, alone"),
-        ("End RMB",           "extrude"),
-        ("Vertex MMB",        "delete"),
-        ("Handle LMB",        "move"),
-        ("Handle MMB",        "reset"),
-        ("Spline RMB",        "insert vertex"),
+        ("LMB", "move"),
+        ("Ctrl", "alternative coordinates"),
+        ("Shift", "axis lock"),
+        ("LMB + Alt", "reshape spline from endpoint"),
+        ("MMB", "click to delete vertex / reset handle"),
+        ("RMB", "drag endpoint to extend / click spline to insert"),
     };
 
-    static readonly (string input, string output)[] k_RoadHints =
-    {
-        ("Vertex LMB",        "move"),
-        ("Vertex LMB+Shift",  "move orth"),
-        ("End LMB+Ctrl",      "move alone"),
-        ("Vertex LMB+Ctrl+Shift","axis, alone"),
-        ("End RMB",           "extrude"),
-        ("Vertex MMB",        "delete"),
-        ("Handle LMB",        "move"),
-        ("Handle MMB",        "reset"),
-        ("Banking LMB",       "bank"),
-        ("Banking MMB",       "reset"),
-        ("Spline RMB",        "insert vertex"),
-    };
+    static readonly (string input, string output)[] k_RoadHints = k_PipeHints;
 
     static partial void DrawTooltip(SceneView sv, GreyPrimitive gp)
     {
         (string, string)[] hints = gp switch
         {
             Greybox  => k_GreyboxHints,
+            GreyBooleanResult => k_GreyboxHints,
+            GreyboxCompound => k_GreyboxHints,
             Greypipe => k_PipeHints,
             Greyroad => k_RoadHints,
             _        => null,
@@ -79,11 +62,14 @@ static partial class GPEdit
         float totalH = hints.Length * lineH;
         float startY = sv.position.height - 30f - totalH;
 
-        EditorGUI.DrawRect(new Rect(x - 4f, startY - 3f, 260f, totalH + 6f), new Color(0f, 0f, 0f, 0.55f));
+        float width = 260f;
+        foreach (var hint in hints)
+            width = Mathf.Max(width, s_ttStyle.CalcSize(new GUIContent(hint.Item1 + " - " + hint.Item2)).x + 8f);
+        EditorGUI.DrawRect(new Rect(x - 4f, startY - 3f, width, totalH + 6f), new Color(0f, 0f, 0f, 0.55f));
 
         for (int i = 0; i < hints.Length; i++)
         {
-            var r = new Rect(x, startY + i * lineH, 252f, lineH);
+            var r = new Rect(x, startY + i * lineH, width - 8f, lineH);
             GUI.Label(r, $"{hints[i].Item1}  —  {hints[i].Item2}", s_ttStyle);
         }
 

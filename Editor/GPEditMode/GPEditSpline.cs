@@ -2,22 +2,7 @@
 using UnityEditor;
 using UnityEngine;
 
-/// <summary>
-/// Spline behaviors for Edit Mode, shared by Greypipe and Greyroad (Greyroad adds banking
-/// handles). The two types are driven through a thin editor-side <see cref="GPSpline"/> adapter
-/// so the interaction logic lives once.
-///
-///   Vertex:  LMB drag = move in the main-axis plane · Shift+LMB = move orthogonally
-///            Ctrl (on an end vertex) = move it alone, leaving the rest of the spline put
-///            Ctrl+Shift+LMB = move it alone along the neighbor axis — toward the single
-///                       neighbor for an end vertex, the average of both neighbor directions
-///                       for an interior one
-///            RMB (on an end vertex)  = extrude / extend a new vertex
-///            MMB = delete the vertex
-///   Handle:  LMB drag = move (no Ctrl) · MMB = reset the handle
-///   Banking (Greyroad only): LMB drag = bank around the tangent · MMB = reset to 0°
-///   Spline:  RMB = insert a vertex at the click point
-/// </summary>
+/// <summary>Shared spline controls: Ctrl changes coordinates, Shift locks an axis, Alt reshapes from an endpoint.</summary>
 static partial class GPEdit
 {
     enum SpDrag { None, VertexMove, Bezier, Banking, Extend }
@@ -30,12 +15,7 @@ static partial class GPEdit
 
     static int      s_spVertex;
     static int      s_spSide;
-    static bool     s_spOrtho;
-    static Vector3  s_spPlanePoint;
-    static Vector3  s_spPlaneNormal;
-    static Vector3  s_spHitStart;
-    static Vector3  s_spMoveAxis;
-    static Vector2  s_spPressPos;
+    static CoordinateDrag s_spCoordinates;
 
     static Vector3  s_spStartLocalPos;
     static Vector3  s_spBezierStartEndpoint;
@@ -43,7 +23,6 @@ static partial class GPEdit
     static float    s_spBankingStartAngle;
     static Vector3  s_spBankingTangent;
     static Vector3  s_spBankingPoint;
-    static Vector2  s_spBankingStartMouse;
 
     static int      s_spExtendEdge;
     static Vector3[] s_spReshape;
@@ -89,15 +68,14 @@ static partial class GPEdit
             hasPreview = true;
         }
 
-        // Alt is the Scene View navigation modifier (orbit/pan/zoom) — never start an edit while
-        // it's held, or an Alt-drag to navigate would grab a vertex/handle instead.
-        if (e.type == EventType.MouseDown && !e.alt && (e.button == 0 || e.button == 1 || e.button == 2))
-            BeginSpline(e, sp, hoverVertex, hoverBezier, hoverBezierSide, hoverBank, hoverBankSide);
+        bool altEndpoint = e.button == 0 && (hoverVertex == 0 || hoverVertex == sp.Count - 1);
+        if (e.type == EventType.MouseDown && (!e.alt || altEndpoint) && (e.button == 0 || e.button == 1 || e.button == 2))
+            BeginSpline(sv, e, sp, hoverVertex, hoverBezier, hoverBezierSide, hoverBank, hoverBankSide);
 
         if (e.type == EventType.Repaint)
             DrawSpline(sp, hoverVertex, hoverBezier, hoverBezierSide, hoverBank, hoverBankSide, hasPreview, previewPos);
 
-        if (e.type == EventType.MouseMove)
+        if (e.type == EventType.MouseMove || e.type == EventType.KeyDown || e.type == EventType.KeyUp)
             sv.Repaint();
     }
 
@@ -120,15 +98,11 @@ static partial class GPEdit
     {
         vertex = -1; side = 0;
         float bestDist = GPEditShared.HandlePx;
-        float scale = sp.Transform.lossyScale.z;
         for (int i = 0; i < sp.Count; i++)
         {
-            Vector3 vw = sp.GetWorldVertexPos(i);
-            Vector3 dir = sp.GetHandleDirWorld(i);
-            float len = sp.GetHandleLength(i) * scale;
             for (int sgn = -1; sgn <= 1; sgn += 2)
             {
-                Vector2 s = HandleUtility.WorldToGUIPoint(vw + dir * len * sgn);
+                Vector2 s = HandleUtility.WorldToGUIPoint(sp.GetHandleWorldPosition(i, sgn));
                 float dist = Vector2.Distance(mousePos, s);
                 if (dist < bestDist) { bestDist = dist; vertex = i; side = sgn; }
             }
@@ -183,7 +157,7 @@ static partial class GPEdit
 
     // ─── Begin ──────────────────────────────────────────────────
 
-    static void BeginSpline(Event e, GPSpline sp, int vertex, int bezier, int bezierSide, int bank, int bankSide)
+    static void BeginSpline(SceneView sv, Event e, GPSpline sp, int vertex, int bezier, int bezierSide, int bank, int bankSide)
     {
         bool isEnd(int i) => i == 0 || i == sp.Count - 1;
 
@@ -191,17 +165,17 @@ static partial class GPEdit
         {
             switch (e.button)
             {
-                case 0: StartSplineVertexMove(sp, vertex, e.mousePosition, e.shift, e.control); break;
-                case 1: if (isEnd(vertex)) StartSplineExtend(sp, vertex, e.mousePosition); else { e.Use(); return; } break;
-                case 2: DeleteSplineVertex(sp, vertex); e.Use(); return;
+                case 0: StartSplineVertexMove(sp, vertex, e.mousePosition, e.alt); break;
+                case 1: if (isEnd(vertex)) StartSplineExtend(sp, vertex, e.mousePosition); else return; break;
+                case 2: BeginPrimitiveClick(sv, e, (GreyPrimitive)sp.Obj, ClickAction.DeleteVertex, vertex, vertexCount: sp.Count); return;
             }
         }
         else if (bezier >= 0)
         {
             switch (e.button)
             {
-                case 0: StartSplineBezier(sp, bezier, bezierSide, e.mousePosition, e.shift); break;
-                case 2: ResetSplineHandle(sp, bezier); e.Use(); return;
+                case 0: StartSplineBezier(sp, bezier, bezierSide, e.mousePosition); break;
+                case 2: BeginPrimitiveClick(sv, e, (GreyPrimitive)sp.Obj, ClickAction.ResetHandle, bezier, vertexCount: sp.Count); return;
                 default: return;
             }
         }
@@ -210,82 +184,85 @@ static partial class GPEdit
             switch (e.button)
             {
                 case 0: StartSplineBanking(sp, bank, bankSide, e.mousePosition); break;
-                case 2: ResetSplineBanking(sp, bank); e.Use(); return;
+                case 2: BeginPrimitiveClick(sv, e, (GreyPrimitive)sp.Obj, ClickAction.ResetBanking, bank, vertexCount: sp.Count); return;
                 default: return;
             }
         }
         else if (e.button == 1)
         {
             if (HitSplineSegment(sp, e.mousePosition, out int seg, out float t))
-            {
-                InsertSplineVertex(sp, seg, t);
-                e.Use();
-            }
+                BeginPrimitiveClick(sv, e, (GreyPrimitive)sp.Obj, ClickAction.InsertVertex, seg, t, sp.Count);
             return;
         }
         else return;
 
         if (s_spDrag == SpDrag.None) return;
-        s_sp = sp;
+        s_sp = CreateSplineBinding((GreyPrimitive)sp.Obj);
         s_spButton = e.button;
-        s_spPressPos = e.mousePosition;
         s_spControl = GUIUtility.GetControlID(FocusType.Passive);
         HandleUtility.AddDefaultControl(s_spControl);
         GUIUtility.hotControl = s_spControl;
         e.Use();
     }
 
-    static void StartSplineVertexMove(GPSpline sp, int vertex, Vector2 mousePos, bool shift, bool ctrl)
+    // Independent binding keeps drawing other selected splines from retargeting an action.
+    static GPSpline CreateSplineBinding(GreyPrimitive primitive)
+    {
+        if (primitive is Greypipe pipe)
+        {
+            var binding = new GPSplinePipe();
+            binding.Set(pipe);
+            return binding;
+        }
+        if (primitive is Greyroad road)
+        {
+            var binding = new GPSplineRoad();
+            binding.Set(road);
+            return binding;
+        }
+        return null; // Other primitive types have no spline controls.
+    }
+
+    static bool CommitSplineClick(PrimitiveClick click)
+    {
+        var sp = CreateSplineBinding(click.target);
+        // Topology may change while the button is held; stale indices must not edit another vertex.
+        if (sp == null || sp.Count != click.vertexCount || click.element < 0
+            || click.element >= (click.action == ClickAction.InsertVertex ? sp.SegmentCount : sp.Count)) return false;
+        switch (click.action)
+        {
+            case ClickAction.InsertVertex: InsertSplineVertex(sp, click.element, click.fraction); break;
+            case ClickAction.DeleteVertex: DeleteSplineVertex(sp, click.element); break;
+            case ClickAction.ResetHandle: ResetSplineHandle(sp, click.element); break;
+            case ClickAction.ResetBanking:
+                if (!sp.HasBanking) return false;
+                ResetSplineBanking(sp, click.element);
+                break;
+            default: return false;
+        }
+        return true;
+    }
+
+    static void StartSplineVertexMove(GPSpline sp, int vertex, Vector2 mousePos, bool reshape)
     {
         BeginSplineUndo(sp, "Move Vertex");
         s_spDrag = SpDrag.VertexMove;
         s_spVertex = vertex;
-        // Ctrl moves the vertex alone; adding Shift also confines it to the neighbor axis,
-        // which supersedes the orthogonal-axis drag Shift means on its own.
-        s_spMoveAxis = ctrl && shift ? NeighborAxisWorld(sp, vertex) : Vector3.zero;
-        s_spOrtho = shift && !ctrl;
         s_spStartLocalPos = sp.GetLocalVertexPos(vertex);
-
-        s_spPlanePoint = sp.GetWorldVertexPos(vertex);
-        s_spPlaneNormal = sp.MovePlaneNormal;
-        GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out s_spHitStart);
-
+        s_spCoordinates.Begin(sp.GetWorldVertexPos(vertex), mousePos, SplineCoordinates(sp, vertex, false), SplineCoordinates(sp, vertex, true));
         bool isEnd = vertex == 0 || vertex == sp.Count - 1;
-        s_spDoReshape = isEnd && sp.Count > 2 && !ctrl;
+        s_spDoReshape = isEnd && sp.Count > 2 && reshape;
         s_spReshape = s_spDoReshape ? CaptureReshape(sp) : null;
     }
 
-    /// <summary>
-    /// The line a Ctrl+Shift-drag confines a vertex to: toward its single neighbor for an end
-    /// vertex, the average of both neighbor directions for an interior one. Zero when it cannot be
-    /// resolved (fewer than two vertices, coincident neighbors, or a 180° fold-back) — the drag
-    /// then falls back to the unconstrained plane move.
-    /// </summary>
-    static Vector3 NeighborAxisWorld(GPSpline sp, int vertex)
-    {
-        if (sp.Count < 2) return Vector3.zero;
-        Vector3 p = sp.GetWorldVertexPos(vertex);
-        Vector3 axis;
-        if (vertex == 0)                 axis = sp.GetWorldVertexPos(1) - p;
-        else if (vertex == sp.Count - 1) axis = p - sp.GetWorldVertexPos(vertex - 1);
-        else                             axis = (p - sp.GetWorldVertexPos(vertex - 1)).normalized
-                                              + (sp.GetWorldVertexPos(vertex + 1) - p).normalized;
-        return axis.sqrMagnitude < 1e-6f ? Vector3.zero : axis.normalized;
-    }
-
-    static void StartSplineBezier(GPSpline sp, int vertex, int side, Vector2 mousePos, bool shift)
+    static void StartSplineBezier(GPSpline sp, int vertex, int side, Vector2 mousePos)
     {
         BeginSplineUndo(sp, "Move Handle");
         s_spDrag = SpDrag.Bezier;
         s_spVertex = vertex;
         s_spSide = side;
-        s_spOrtho = shift;
-        float scale = sp.Transform.lossyScale.z;
-        Vector3 vw = sp.GetWorldVertexPos(vertex);
-        s_spBezierStartEndpoint = vw + sp.GetHandleDirWorld(vertex) * (sp.GetHandleLength(vertex) * scale) * side;
-        s_spPlanePoint = s_spBezierStartEndpoint;
-        s_spPlaneNormal = sp.MovePlaneNormal;
-        GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out s_spHitStart);
+        s_spBezierStartEndpoint = sp.GetHandleWorldPosition(vertex, side);
+        s_spCoordinates.Begin(s_spBezierStartEndpoint, mousePos, SplineCoordinates(sp, vertex, false), SplineCoordinates(sp, vertex, true));
     }
 
     static void StartSplineBanking(GPSpline sp, int vertex, int side, Vector2 mousePos)
@@ -295,11 +272,11 @@ static partial class GPEdit
         s_spVertex = vertex;
         s_spSide = side;
         s_spBankingStartAngle = sp.GetBankingAngle(vertex);
-        s_spBankingStartMouse = mousePos;
         s_spBankingPoint = sp.GetWorldVertexPos(vertex);
+        s_spBezierStartEndpoint = sp.GetBankingHandleWorld(vertex, side);
         sp.ComputeBankingAxis(vertex, out Vector3 up, out Vector3 right);
-        s_spBankingTangent = Vector3.Cross(right, up).normalized;
-        if (s_spBankingTangent.sqrMagnitude < 0.0001f) s_spBankingTangent = sp.MainAxisWorld;
+        s_spBankingTangent = Vector3.Cross(sp.Transform.InverseTransformVector(right), sp.Transform.InverseTransformVector(up)).normalized;
+        s_spCoordinates.Begin(s_spBezierStartEndpoint, mousePos, SplineCoordinates(sp, vertex, false), SplineCoordinates(sp, vertex, true));
     }
 
     static void StartSplineExtend(GPSpline sp, int edge, Vector2 mousePos)
@@ -313,13 +290,13 @@ static partial class GPEdit
         s_spDrag = SpDrag.Extend;
         s_spExtendEdge = edge;
         Vector3 edgeWorld = sp.GetWorldVertexPos(edge);
+        var global = SplineCoordinates(sp, edge, false);
+        var local = SplineCoordinates(sp, edge, true);
         sp.ExtendFromEdge(edge, sp.GetLocalVertexPos(edge));
         s_spVertex = edge == 0 ? 0 : sp.Count - 1;
         s_spStartLocalPos = sp.GetLocalVertexPos(s_spVertex);
 
-        s_spPlanePoint = edgeWorld;
-        s_spPlaneNormal = sp.MovePlaneNormal;
-        GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out s_spHitStart);
+        s_spCoordinates.Begin(edgeWorld, mousePos, global, local);
     }
 
     static void BeginSplineUndo(GPSpline sp, string name)
@@ -331,7 +308,7 @@ static partial class GPEdit
         Undo.SetCurrentGroupName(name);
     }
 
-    // ─── Immediate actions ──────────────────────────────────────
+    // ─── Click actions ──────────────────────────────────────
 
     static void DeleteSplineVertex(GPSpline sp, int vertex)
     {
@@ -353,10 +330,8 @@ static partial class GPEdit
     {
         Undo.IncrementCurrentGroup();
         int g = Undo.GetCurrentGroup();
-        Undo.RegisterCompleteObjectUndo(sp.Transform, "Insert Vertex");
         Undo.RegisterCompleteObjectUndo(sp.Obj, "Insert Vertex");
         sp.InsertVertex(seg, t);
-        sp.RecenterPivot();
         sp.Rebuild();
         EditorUtility.SetDirty(sp.Obj);
         Undo.SetCurrentGroupName("Insert Vertex");
@@ -397,7 +372,8 @@ static partial class GPEdit
         // keeps the drag updating off-window and lets the release register wherever it happens.
         EventType type = e.type == EventType.Ignore ? e.rawType : e.type;
 
-        if (type == EventType.MouseDrag && e.button == s_spButton)
+        if ((type == EventType.MouseDrag && e.button == s_spButton)
+            || type == EventType.KeyDown || type == EventType.KeyUp)
         {
             ApplySplineDrag(e.mousePosition);
             s_sp.Rebuild();
@@ -416,54 +392,10 @@ static partial class GPEdit
 
         if (e.type == EventType.Repaint)
         {
-            if (s_spDrag == SpDrag.VertexMove || s_spDrag == SpDrag.Bezier || s_spDrag == SpDrag.Extend)
-                DrawSplineDragGizmo(s_spPlanePoint, s_spPlaneNormal, s_spOrtho, s_spMoveAxis);
-            DrawSpline(s_sp, s_spVertex, -1, 0, -1, 0, false, default);
+            DrawSpline(s_sp, s_spDrag == SpDrag.VertexMove || s_spDrag == SpDrag.Extend ? s_spVertex : -1,
+                s_spDrag == SpDrag.Bezier ? s_spVertex : -1, s_spSide,
+                s_spDrag == SpDrag.Banking ? s_spVertex : -1, s_spSide, false, default);
         }
-    }
-
-    /// <summary>
-    /// While dragging: an axis-locked (Ctrl+Shift) drag shows only its axis arrows. Otherwise the
-    /// move plane (yellow quad), plus arrows along the orthogonal axis when Shift is held — so the
-    /// user sees both options.
-    /// </summary>
-    static void DrawSplineDragGizmo(Vector3 point, Vector3 normal, bool ortho, Vector3 lockAxis)
-    {
-        if (lockAxis.sqrMagnitude > 0f)
-        {
-            DrawDragAxis(point, lockAxis, HandleUtility.GetHandleSize(point));
-            return;
-        }
-        if (normal.sqrMagnitude < 1e-4f) return;
-        normal = normal.normalized;
-        float size = HandleUtility.GetHandleSize(point);
-
-        // Move plane (always).
-        Vector3 a = Vector3.Cross(normal, Vector3.up);
-        if (a.sqrMagnitude < 1e-3f) a = Vector3.Cross(normal, Vector3.right);
-        a.Normalize();
-        Vector3 b = Vector3.Cross(normal, a).normalized;
-        float s = size * 1.1f;
-        var quad = new[]
-        {
-            point + (a + b) * s, point + (a - b) * s, point + (-a - b) * s, point + (-a + b) * s,
-        };
-        Color outline = GPEditShared.OutlineHover; outline.a = 0.6f;
-        Handles.DrawSolidRectangleWithOutline(quad, GPEditShared.DragPlane, outline);
-
-        // Orthogonal arrows (Shift) — added on top of the plane.
-        if (ortho) DrawDragAxis(point, normal, size);
-    }
-
-    /// <summary>Double-headed arrow marking the line a constrained drag moves along.</summary>
-    static void DrawDragAxis(Vector3 point, Vector3 axis, float size)
-    {
-        Handles.color = GPEditShared.OutlineHover;
-        float len = size * 0.9f;
-        Handles.DrawLine(point, point + axis * len, 3f);
-        Handles.ConeHandleCap(0, point + axis * len, Quaternion.LookRotation(axis), size * 0.12f, EventType.Repaint);
-        Handles.DrawLine(point, point - axis * len, 3f);
-        Handles.ConeHandleCap(0, point - axis * len, Quaternion.LookRotation(-axis), size * 0.12f, EventType.Repaint);
     }
 
     static void ApplySplineDrag(Vector2 mousePos)
@@ -477,28 +409,9 @@ static partial class GPEdit
         }
     }
 
-    static Vector3 PlaneDelta(Vector2 mousePos)
-    {
-        if (s_spMoveAxis.sqrMagnitude > 0f) return AxisDelta(mousePos, s_spMoveAxis);
-        if (s_spOrtho) return AxisDelta(mousePos, s_spPlaneNormal);
-        if (!GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out Vector3 hit))
-            return Vector3.zero;
-        return hit - s_spHitStart;
-    }
-
-    /// <summary>Drag delta confined to a line through the drag anchor. <paramref name="axis"/> must be normalized.</summary>
-    static Vector3 AxisDelta(Vector2 mousePos, Vector3 axis)
-    {
-        Ray ray = HandleUtility.GUIPointToWorldRay(mousePos);
-        float cur = GPEditShared.ProjectRayOntoLine(ray, s_spPlanePoint, axis);
-        float start = GPEditShared.ProjectRayOntoLine(
-            HandleUtility.GUIPointToWorldRay(s_spPressPos), s_spPlanePoint, axis);
-        return axis * (cur - start);
-    }
-
     static void ApplySplineVertexMove(Vector2 mousePos)
     {
-        Vector3 delta = PlaneDelta(mousePos);
+        Vector3 delta = s_spCoordinates.Update(mousePos);
         var xform = s_sp.Transform;
         Vector3 newLocal = xform.InverseTransformPoint(xform.TransformPoint(s_spStartLocalPos) + delta);
         s_sp.SetLocalVertexPos(s_spVertex, newLocal);
@@ -507,44 +420,40 @@ static partial class GPEdit
 
     static void ApplySplineBezier(Vector2 mousePos)
     {
-        Vector3 delta = PlaneDelta(mousePos);
+        Vector3 delta = s_spCoordinates.Update(mousePos);
         Vector3 vw = s_sp.GetWorldVertexPos(s_spVertex);
         Vector3 worldDir = (s_spBezierStartEndpoint + delta) - vw;
         if (s_spSide < 0) worldDir = -worldDir;
         float worldLen = worldDir.magnitude;
         if (worldLen < 0.0001f) return;
 
-        s_sp.SetHandleDirLocal(s_spVertex, s_sp.Transform.InverseTransformDirection(worldDir.normalized));
-        float scale = Mathf.Abs(s_sp.Transform.lossyScale.z);
-        if (scale < 0.0001f) scale = 1f;
-        s_sp.SetHandleLength(s_spVertex, Mathf.Max(0.001f, worldLen / scale));
+        Vector3 localHandle = s_sp.Transform.InverseTransformVector(worldDir);
+        s_sp.SetHandleDirLocal(s_spVertex, localHandle.normalized);
+        s_sp.SetHandleLength(s_spVertex, Mathf.Max(0.001f, localHandle.magnitude));
     }
 
     static void ApplySplineBanking(Vector2 mousePos)
     {
-        if (!GPEditShared.RaycastPlane(mousePos, s_spBankingPoint, s_spBankingTangent, out Vector3 hit)) return;
-        if (!GPEditShared.RaycastPlane(s_spBankingStartMouse, s_spBankingPoint, s_spBankingTangent, out Vector3 startHit)) return;
-        Vector3 fromVec = startHit - s_spBankingPoint;
-        Vector3 toVec   = hit - s_spBankingPoint;
-        if (fromVec.sqrMagnitude < 0.0001f || toVec.sqrMagnitude < 0.0001f) return;
-        float deltaDeg = Vector3.SignedAngle(fromVec, toVec, s_spBankingTangent);
-        s_sp.SetBankingAngle(s_spVertex, s_spBankingStartAngle + deltaDeg * Mathf.Deg2Rad);
+        Vector3 desired = s_spBezierStartEndpoint + s_spCoordinates.Update(mousePos);
+        Vector3 from = s_sp.Transform.InverseTransformVector(s_spBezierStartEndpoint - s_spBankingPoint);
+        Vector3 to = s_sp.Transform.InverseTransformVector(desired - s_spBankingPoint);
+        from = Vector3.ProjectOnPlane(from, s_spBankingTangent);
+        to = Vector3.ProjectOnPlane(to, s_spBankingTangent);
+        if (from.sqrMagnitude < 0.000001f || to.sqrMagnitude < 0.000001f) return;
+        float angle = Vector3.SignedAngle(from, to, s_spBankingTangent);
+        s_sp.SetBankingAngle(s_spVertex, s_spBankingStartAngle + angle * Mathf.Deg2Rad);
     }
 
     static void ApplySplineExtend(Vector2 mousePos)
     {
-        if (!GPEditShared.RaycastPlane(mousePos, s_spPlanePoint, s_spPlaneNormal, out Vector3 hit)) return;
         var xform = s_sp.Transform;
-        Vector3 newWorld = xform.TransformPoint(s_spStartLocalPos) + (hit - s_spHitStart);
+        Vector3 newWorld = xform.TransformPoint(s_spStartLocalPos) + s_spCoordinates.Update(mousePos);
         Vector3 newLocal = xform.InverseTransformPoint(newWorld);
         s_sp.SetLocalVertexPos(s_spVertex, newLocal);
 
-        Vector3 toNew = newLocal - s_spStartLocalPos;
-        if (toNew.sqrMagnitude > 0.001f)
+        if ((newLocal - s_spStartLocalPos).sqrMagnitude > 0.001f)
         {
-            Vector3 dir = s_spExtendEdge == 0 ? -toNew.normalized : toNew.normalized;
-            s_sp.SetHandleDirLocal(s_spVertex, dir);
-            s_sp.SetHandleLength(s_spVertex, Mathf.Max(0.01f, toNew.magnitude / 3f));
+            s_sp.ResetHandle(s_spVertex);
         }
     }
 
@@ -569,7 +478,6 @@ static partial class GPEdit
     {
         s_spDrag = SpDrag.None;
         s_sp = null;
-        s_spMoveAxis = Vector3.zero;
         s_spReshape = null;
         s_spDoReshape = false;
     }
@@ -647,22 +555,20 @@ static partial class GPEdit
             GPEditShared.DrawDot(previewPos, GPEditShared.NewVertex, 0.06f);
 
         Transform self = sp.Transform;
-        float scale = self.lossyScale.z;
         for (int i = 0; i < sp.Count; i++)
         {
             Vector3 vw = sp.GetWorldVertexPos(i);
             float hs = HandleUtility.GetHandleSize(vw) * 0.08f;
             bool isEnd = i == 0 || i == sp.Count - 1;
 
-            Color vColor = i == hoverVertex ? GPEditShared.VertexHover : GPEditShared.Vertex;
+            Color vColor = i == hoverVertex
+                ? (s_spDrag == SpDrag.Extend ? GPEditShared.Create : GPEditShared.VertexHover) : GPEditShared.Vertex;
             Handles.color = GPEditShared.IsWorldPointOccluded(vw, self) ? GPEditShared.Occluded(vColor) : vColor;
             if (isEnd) Handles.CubeHandleCap(0, vw, Quaternion.identity, hs * 2f, EventType.Repaint);
-            else       Handles.SphereHandleCap(0, vw, Quaternion.identity, hs * 2f, EventType.Repaint);
+            else       Handles.CubeHandleCap(0, vw, Quaternion.identity, hs * 1.2f, EventType.Repaint);
 
             // Bezier handle
-            Vector3 dir = sp.GetHandleDirWorld(i);
-            float len = sp.GetHandleLength(i) * scale;
-            Vector3 a = vw + dir * len, b = vw - dir * len;
+            Vector3 a = sp.GetHandleWorldPosition(i, +1), b = sp.GetHandleWorldPosition(i, -1);
             bool occA = GPEditShared.IsWorldPointOccluded(a, self);
             bool occB = GPEditShared.IsWorldPointOccluded(b, self);
             // Line color follows both endpoints — faded only when the whole handle is hidden.
@@ -686,6 +592,16 @@ static partial class GPEdit
                 DrawBankingDot(ba, i, +1, hoverBank, hoverBankSide, bdot, occBa);
                 DrawBankingDot(bb, i, -1, hoverBank, hoverBankSide, bdot, occBb);
             }
+        }
+        int hovered = hoverVertex >= 0 ? hoverVertex : hoverBezier >= 0 ? hoverBezier : hoverBank;
+        if (hovered >= 0)
+        {
+            Vector3 point = hoverVertex >= 0 ? sp.GetWorldVertexPos(hovered)
+                : hoverBezier >= 0 ? sp.GetHandleWorldPosition(hovered, hoverBezierSide)
+                : sp.GetBankingHandleWorld(hovered, hoverBankSide);
+            if (s_spDrag != SpDrag.None && s_sp != null && s_sp.Obj == sp.Obj)
+                s_spCoordinates.Draw(point);
+            else DrawCoordinates(point, SplineCoordinates(sp, hovered, Tools.pivotRotation == PivotRotation.Local));
         }
     }
 
@@ -716,7 +632,7 @@ abstract class GPSpline
     public abstract int Count { get; }
     public abstract int SegmentCount { get; }
     public abstract Vector3 MainAxisWorld { get; }
-    /// <summary>The axis a Shift+LMB (orthogonal) drag moves along, and the normal of the plain LMB drag plane.</summary>
+    /// <summary>Normal of the pipe main plane used by Local coordinates.</summary>
     public abstract Vector3 MovePlaneNormal { get; }
     public abstract Color SplineColor { get; }
 
@@ -727,6 +643,11 @@ abstract class GPSpline
     public abstract void SetHandleDirLocal(int i, Vector3 dir);
     public abstract float GetHandleLength(int i);
     public abstract void SetHandleLength(int i, float len);
+    public Vector3 GetHandleWorldPosition(int i, int side)
+    {
+        Vector3 localDir = Transform.InverseTransformDirection(GetHandleDirWorld(i));
+        return GetWorldVertexPos(i) + Transform.TransformVector(localDir * (GetHandleLength(i) * side));
+    }
     public abstract void ResetHandle(int i);
 
     public abstract void InsertVertex(int seg, float t);
@@ -771,12 +692,11 @@ sealed class GPSplinePipe : GPSpline
     public override Vector3 GetWorldVertexPos(int i) => _p.GetWorldVertexPosition(i);
     public override Vector3 GetLocalVertexPos(int i) => _p.Vertices[i].position;
     public override void SetLocalVertexPos(int i, Vector3 local)
-    { var v = _p.Vertices[i]; v.position = local; _p.Vertices[i] = v; }
+    { _p.SetVertexPosition(i, local); }
     public override Vector3 GetHandleDirWorld(int i) => _p.GetVertexHandleDirWorld(i);
     public override void SetHandleDirLocal(int i, Vector3 dir) => _p.SetVertexHandleDirLocal(i, dir);
     public override float GetHandleLength(int i) => _p.Vertices[i].handleLength;
-    public override void SetHandleLength(int i, float len)
-    { var v = _p.Vertices[i]; v.handleLength = len; _p.Vertices[i] = v; }
+    public override void SetHandleLength(int i, float len) => _p.SetVertexHandleLength(i, len);
     public override void ResetHandle(int i) => _p.ResetVertexHandle(i);
 
     public override void InsertVertex(int seg, float t) => _p.InsertVertex(seg, t);
@@ -804,7 +724,7 @@ sealed class GPSplineRoad : GPSpline
     public override int Count => _r.Vertices.Count;
     public override int SegmentCount => _r.SegmentCount;
     public override Vector3 MainAxisWorld => _r.MainAxisWorld;
-    // Road: orthogonal axis is always world up (Shift+LMB = vertical, LMB = horizontal XZ plane).
+    // Global road coordinates use world XZ/up; Local coordinates use the vertex tangent and bank.
     public override Vector3 MovePlaneNormal => Vector3.up;
     public override Color SplineColor => new Color(0.4f, 1f, 0.7f, 0.9f);
 
@@ -815,8 +735,7 @@ sealed class GPSplineRoad : GPSpline
     public override Vector3 GetHandleDirWorld(int i) => _r.GetVertexHandleDirWorld(i);
     public override void SetHandleDirLocal(int i, Vector3 dir) => _r.SetVertexHandleDirLocal(i, dir);
     public override float GetHandleLength(int i) => _r.Vertices[i].handleLength;
-    public override void SetHandleLength(int i, float len)
-    { var v = _r.Vertices[i]; v.handleLength = len; _r.Vertices[i] = v; }
+    public override void SetHandleLength(int i, float len) => _r.SetVertexHandleLength(i, len);
     public override void ResetHandle(int i) => _r.ResetVertexHandle(i);
 
     public override void InsertVertex(int seg, float t) => _r.InsertVertex(seg, t);

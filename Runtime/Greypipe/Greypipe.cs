@@ -13,10 +13,10 @@ public class Greypipe : GreyPrimitive
         public Vector3 position;
 
         [Tooltip("Bezier handle rotation expressed relative to the spline's Main Axis frame. " +
-                 "Identity = handle aligned with the Main Axis. Symmetric on both sides.")]
+                 "Identity = handle aligned with the Main Axis. Both handles share this direction.")]
         public Quaternion handleRotation;
 
-        [Tooltip("Length of each bezier handle (symmetric on both sides), in local units.")]
+        [Tooltip("Length of both symmetric Bezier handles in local units.")]
         public float handleLength;
 
         [Tooltip("Local girth multiplier relative to the pipe's base girth. 1 = default.")]
@@ -169,15 +169,27 @@ public class Greypipe : GreyPrimitive
 
     // ─── Handle helpers ─────────────────────────────────────────
 
-    /// <summary>Resets a vertex's handle to align with the Main Axis (identity relative rotation).</summary>
+    /// <summary>Fit the symmetric handle to the neighbouring vertices.</summary>
     public void ResetVertexHandle(int index)
     {
+        Vector3 point = _vertices[index].position;
+        Vector3 before = index > 0 ? _vertices[index - 1].position : point;
+        Vector3 after = index + 1 < _vertices.Count ? _vertices[index + 1].position : point;
+        GreySplineMath.AdaptiveHandle(before, point, after, out Vector3 direction,
+            out float length);
+        SetVertexHandleDirLocal(index, direction);
         var v = _vertices[index];
-        v.handleRotation = Quaternion.identity;
+        v.handleLength = length;
         _vertices[index] = v;
     }
 
-    /// <summary>Sets a vertex's handle rotation from a local-space forward direction.</summary>
+    public void SetVertexHandleLength(int index, float length)
+    {
+        var v = _vertices[index];
+        v.handleLength = length;
+        _vertices[index] = v;
+    }
+
     public void SetVertexHandleDirLocal(int index, Vector3 localDir)
     {
         if (localDir.sqrMagnitude < 0.0001f) return;
@@ -186,6 +198,26 @@ public class Greypipe : GreyPrimitive
         var v = _vertices[index];
         v.handleRotation = Quaternion.LookRotation(relDir, Vector3.up);
         _vertices[index] = v;
+    }
+
+    public void SetVertexPosition(int index, Vector3 position)
+    {
+        Quaternion previousFrame = MainAxisFrameLocal;
+        var v = _vertices[index];
+        v.position = position;
+        _vertices[index] = v;
+        PreserveHandleDirections(previousFrame);
+    }
+
+    void PreserveHandleDirections(Quaternion previousFrame)
+    {
+        Quaternion correction = Quaternion.Inverse(MainAxisFrameLocal) * previousFrame;
+        for (int i = 0; i < _vertices.Count; i++)
+        {
+            var v = _vertices[i];
+            v.handleRotation = correction * v.handleRotation;
+            _vertices[i] = v;
+        }
     }
 
     // ─── Edge-driven reshape ────────────────────────────────────
@@ -265,7 +297,7 @@ public class Greypipe : GreyPrimitive
         for (int i = 0; i < _vertices.Count; i++)
         {
             worldPositions[i]  = transform.TransformPoint(_vertices[i].position);
-            worldHandleDirs[i] = GetVertexHandleDirWorld(i);
+            worldHandleDirs[i] = transform.TransformVector(GetVertexHandleDirLocal(i));
         }
 
         Vector3 newWorldPivot = Vector3.zero;
@@ -299,11 +331,13 @@ public class Greypipe : GreyPrimitive
         Quaternion frameInv = Quaternion.Inverse(MainAxisFrameLocal);
         for (int i = 0; i < _vertices.Count; i++)
         {
-            Vector3 localDir = transform.InverseTransformDirection(worldHandleDirs[i]).normalized;
+            Vector3 localHandle = transform.InverseTransformVector(worldHandleDirs[i]);
+            Vector3 localDir = localHandle.normalized;
             if (localDir.sqrMagnitude < 0.0001f) continue;
             Vector3 relDir = frameInv * localDir;
             if (relDir.sqrMagnitude < 0.0001f) continue;
             var v = _vertices[i];
+            v.handleLength *= localHandle.magnitude;
             v.handleRotation = Quaternion.LookRotation(relDir, Vector3.up);
             _vertices[i] = v;
         }
@@ -314,42 +348,27 @@ public class Greypipe : GreyPrimitive
     public void InsertVertex(int segmentIndex, float t)
     {
         if (segmentIndex < 0 || segmentIndex >= _vertices.Count - 1) return;
+        if (t <= 0.0001f || t >= 0.9999f) return; // An endpoint already has a vertex.
 
         var a = _vertices[segmentIndex];
         var b = _vertices[segmentIndex + 1];
-
         GetSegmentControlPoints(segmentIndex, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+        GreySplineMath.FitInsertedHandle(p0, p1, p2, p3, t,
+            out Vector3 position, out Vector3 direction, out float length);
+        Vector3 localDirection = Quaternion.Inverse(MainAxisFrameLocal) * direction;
 
-        Vector3 pos = EvaluateBezier(p0, p1, p2, p3, t);
-        Vector3 tan = EvaluateBezierTangent(p0, p1, p2, p3, t).normalized;
-
-        float girth = Mathf.Lerp(a.girthMultiplier, b.girthMultiplier, t);
-
-        // Handle length: half of the average distance to the two neighbors
-        float distA = Vector3.Distance(pos, a.position);
-        float distB = Vector3.Distance(pos, b.position);
-        float hLen  = (distA + distB) * 0.25f;
-
-        // Handle rotation: tangent direction, expressed relative to Main Axis frame
-        Quaternion frameInv = Quaternion.Inverse(MainAxisFrameLocal);
-        Vector3 relTan = frameInv * tan;
-        Quaternion handleRot = relTan.sqrMagnitude > 0.0001f
-            ? Quaternion.LookRotation(relTan, Vector3.up)
-            : Quaternion.identity;
-
-        var newVert = new SplineVertex
+        _vertices.Insert(segmentIndex + 1, new SplineVertex
         {
-            position        = pos,
-            handleRotation  = handleRot,
-            handleLength    = hLen,
-            girthMultiplier = girth,
-        };
-
-        _vertices.Insert(segmentIndex + 1, newVert);
+            position = position,
+            handleRotation = Quaternion.LookRotation(localDirection.normalized, Vector3.up),
+            handleLength = length,
+            girthMultiplier = Mathf.Lerp(a.girthMultiplier, b.girthMultiplier, t),
+        });
     }
 
     public void ExtendFromEdge(int edgeIndex, Vector3 localPosition)
     {
+        Quaternion previousFrame = MainAxisFrameLocal;
         var edge = _vertices[edgeIndex];
         float dist = Vector3.Distance(localPosition, edge.position);
         float handleLen = Mathf.Max(0.01f, dist / 3f);
@@ -383,13 +402,16 @@ public class Greypipe : GreyPrimitive
             insertedIdx = _vertices.Count - 1;
         }
 
+        PreserveHandleDirections(previousFrame);
         SetVertexHandleDirLocal(insertedIdx, handleDir);
     }
 
     public bool RemoveVertex(int index)
     {
         if (_vertices.Count <= 2) return false;
+        Quaternion previousFrame = MainAxisFrameLocal;
         _vertices.RemoveAt(index);
+        PreserveHandleDirections(previousFrame);
         return true;
     }
 
@@ -736,12 +758,12 @@ public class Greypipe : GreyPrimitive
 
     /// <summary>
     /// Creates a straight pipe along local Z with the given total length, centered at the origin.
-    /// Handle length defaults to half the pipe length so the bezier is smooth from the start.
+    /// Handle lengths are one third of the span for a uniform straight segment.
     /// </summary>
     public static List<SplineVertex> CreateDefaultVertices(float length)
     {
         float half = Mathf.Max(0.001f, length) * 0.5f;
-        float hLen = half;
+        float hLen = half * (2f / 3f);
         return new List<SplineVertex>
         {
             new SplineVertex

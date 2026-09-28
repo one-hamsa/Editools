@@ -50,7 +50,8 @@ public class GreyboxManager : MonoBehaviour
              "transition between handles. 0 = stiff (each transition eases to a flat stop at " +
              "every handle), 1 = fully relaxed flow through handles. Never overshoots, and the " +
              "value is always exact at each handle. Stacks (multiplies) with each road's local " +
-             "Edge Smoothing.")]
+             "Edge Smoothing. Cross-sections remain perpendicular to the path; use the road's " +
+             "Spline Smoothing to change the curve itself.")]
     float _greyroadEdgeSmoothing = 1f;
 
     public float VertexDensity => _subdivisionEnabled ? Mathf.Max(0f, _vertexDensity) : 0f;

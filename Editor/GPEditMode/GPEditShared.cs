@@ -14,23 +14,30 @@ static class GPEditShared
 {
     // ─── Hover thresholds (screen px) ───────────────────────────
 
+    public const float BackfaceAlpha = 0.35f;
+
     public const float HoverPx  = 10f;  // edges / spline / vertices
     public const float HandlePx = 18f;  // face-center dot handles
 
     // ─── Edit gizmo colors ──────────────────────────────────────
 
     public static readonly Color Outline       = new Color(1f, 1f, 1f, 0.6f);
-    public static readonly Color OutlineHover   = new Color(1f, 0.8f, 0.2f, 0.95f);
+    // Action color contract: LMB manipulation is blue; RMB creation is green.
+    public static readonly Color Manipulate     = new Color(0.3f, 0.7f, 1f, 1f);
+    public static readonly Color Create         = new Color(0.4f, 1f, 0.5f, 0.95f);
+    public static readonly Color CreateFace     = new Color(0.4f, 1f, 0.5f, 0.045f);
+    public static readonly Color CreateLoop     = new Color(0.4f, 1f, 0.5f, 0.14f);
+    public static readonly Color OutlineHover   = Manipulate;
     public static readonly Color HandleActive   = new Color(1f, 1f, 1f, 0.8f);
     public static readonly Color HandleInactive = new Color(1f, 0.3f, 0.3f, 0.7f);
-    public static readonly Color HandleHover    = new Color(0.3f, 0.7f, 1f, 1f);
+    public static readonly Color HandleHover    = Manipulate;
     public static readonly Color Spline         = new Color(0.4f, 0.85f, 1f, 0.9f);
     public static readonly Color Vertex         = new Color(1f, 1f, 1f, 0.85f);
-    public static readonly Color VertexHover    = new Color(0.3f, 0.7f, 1f, 1f);
+    public static readonly Color VertexHover    = Manipulate;
     public static readonly Color Bezier         = new Color(1f, 0.7f, 0.2f, 0.9f);
     public static readonly Color Banking        = new Color(0.7f, 0.4f, 1f, 0.95f);
-    public static readonly Color DragPlane      = new Color(1f, 0.9f, 0.3f, 0.12f);
-    public static readonly Color NewVertex      = new Color(0.4f, 1f, 0.5f, 0.95f);
+    public static readonly Color DragPlane      = new Color(0.3f, 0.7f, 1f, 0.12f);
+    public static readonly Color NewVertex      = Create;
 
     /// <summary>Occluded variant of an edit gizmo color: same hue, faded so geometry-hidden
     /// handles read as "behind something" instead of vanishing.</summary>
@@ -182,13 +189,23 @@ static class GPEditShared
     /// The segment is clipped to the camera near plane so the result stays on its visible part.</summary>
     public static Vector3 ClosestPointOnSegmentToScreenPos(Vector3 segA, Vector3 segB, Vector2 screenPos)
     {
-        ClipSegmentToCameraFront(ref segA, ref segB);
+        if (!ClipSegmentToCameraFront(ref segA, ref segB)) return segA;
         Vector2 sa = HandleUtility.WorldToGUIPoint(segA);
         Vector2 sb = HandleUtility.WorldToGUIPoint(segB);
         Vector2 ab = sb - sa;
         float lenSq = ab.sqrMagnitude;
         if (lenSq < 0.0001f) return (segA + segB) * 0.5f;
         float t = Mathf.Clamp01(Vector2.Dot(screenPos - sa, ab) / lenSq);
+        Camera camera = Camera.current;
+        if (camera == null && SceneView.lastActiveSceneView != null) camera = SceneView.lastActiveSceneView.camera;
+        if (camera != null && !camera.orthographic)
+        {
+            Vector3 position = camera.transform.position, forward = camera.transform.forward;
+            float depthA = Vector3.Dot(segA - position, forward);
+            float depthB = Vector3.Dot(segB - position, forward);
+            // Perspective projection does not preserve fractions along a world-space edge.
+            t = t * depthA / ((1f - t) * depthB + t * depthA);
+        }
         return Vector3.Lerp(segA, segB, t);
     }
 

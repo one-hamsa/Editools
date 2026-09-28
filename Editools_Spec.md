@@ -425,17 +425,125 @@ Primitive editing; **QuickTransform handles only whole-object transforms**, and 
 Edit Mode consumes an event only when the cursor is over one of its sub-elements, otherwise the
 event falls through to QuickTransform.
 
-**Toggle:** `Alt+~` while the Scene View is focused and a single Grey Primitive is selected
+**Toggle:** `Alt+~` while the Scene View is focused and one or more Grey Primitives are selected
 (`ShortcutManager`, rebindable in Edit ▸ Shortcuts). State is `SessionState`-backed — it persists
 across selection changes for the editor session and resets on restart.
 
 **Control grammar (shared across all three types):**
-`LMB` = manipulate · `Shift` = alternative action · `MMB` = remove/reset · `RMB` = add/create · `Ctrl` = isolate
+`LMB` = move; `Ctrl` = alternative coordinates; `Shift` = dominant-axis lock;
+`MMB` = remove/reset; `RMB` = add/create; `Alt` = special action.
+
+Across all Grey Primitives, RMB/MMB click actions run only on release of the pressed button.
+This includes box edge splitting and face hide/show, road/pipe vertex insertion and deletion,
+Bezier resets, and road banking resets. Any drag cancels the pending click and leaves Scene View
+camera navigation available. Changing selection, leaving Edit Mode, losing focus, or using Undo
+also cancels it. Actions that require dragging, including face extrusion and spline endpoint
+extension, retain their drag behavior. Future RMB/MMB click actions must use this same handling.
+The click stays bound to the pressed primitive and control, even when other selected objects
+are drawn or hovered before release.
+
+Hovering a movable control shows small blue coordinate arrows for its current LMB directions.
+Greybox edge arrows sit at the cursor's projected point on the edge. Arrows replace the old
+spline movement rectangles and up-axis gizmos. During a planar drag, Shift emphasizes the
+chosen axis and strongly fades the other. Axis choice follows screen-space movement with
+hysteresis, including non-perpendicular coordinate axes. Ctrl and Local/Global changes rebase
+the drag without moving the geometry at the moment of switching.
+
+The Scene View Local/Global setting chooses the coordinate frame:
+
+| Control | Global | Local | Ctrl |
+|---|---|---|---|
+| Box face | Original signed object axis for that face | Current face normal | Move in the corresponding face plane |
+| Box edge | Original two object axes across the edge | Current adjacent face normals | Move along the third axis |
+| Road vertex/handle | World XZ plane | Vertex Bezier tangent and banking axis | Move along the plane normal |
+| Pipe vertex/handle | World XZ plane | Existing pipe main plane | Move along the plane normal |
+
+Spline endpoints move independently by default. Alt+LMB on an endpoint reshapes the interior
+vertices with it. Banking handles follow the chosen coordinates and derive the banking angle
+from the dragged position. MMB resets handles; inner vertices are smaller cubes than endpoints.
+RMB on a box face creates a linked extrusion; Alt+RMB creates an independent unlinked box.
+Extrusion follows the face's forward axis in the selected Local/Global frame, preserving all
+four base corners even on non-planar faces. Unlinked extrusions sit outside the linked/Boolean
+group. Alt retains Scene View navigation away from these specific special-action controls.
+
+Road **Spline Smoothing** (0-1, default 0.5) blends the authored Bezier path toward a
+smooth natural cubic through every vertex. It is available in the Inspector and as
+**Spline Smooth** in the Scene View panel. At 0 the authored curve is exact; at 1 the
+path has continuous first and second derivatives. Intermediate values retain a shared
+tangent direction at each join. Stored Bezier handles remain symmetric and unchanged;
+only the evaluated path changes. Preview, picking, insertion, banking axes and mesh
+sampling use this same path. Insertion changes only the new vertex's authored data.
+Cross-sections stay perpendicular to the evaluated tangent and bank around it, keeping
+`Base Width * widthMultiplier` across the road. Smoothing never narrows a turn to hide
+overlap. Explicit per-vertex width/height changes retain overshoot-free interpolation;
+Edge Smoothing now applies only to those values and banking. A turn tighter than the
+road's half-width can still overlap its inside edge; move the vertices or change the path.
+
+**Action colors (required for future controls):** LMB manipulation highlights are blue.
+RMB creation highlights and previews are green. Use `GPEditShared.Manipulate` and
+`GPEditShared.Create`, with their translucent preview variants. A control offering both
+actions uses a blue handle or edge plus a separate green creation preview. Base object
+tints, inactive-face red, and unhovered Bezier/banking colors retain their own meanings.
+Face hover previews extrusion with a very transparent green surface; edge hover previews
+the RMB split loop with a faint green wire. Active RMB drags stay green.
+
+All selected primitives expose their controls concurrently, including recursive Boolean
+operands. Only the nearest eligible control handles input, and an active drag remains bound
+to its original object. The properties panel edits the active primitive.
+In Edit Mode, selecting a seam-linked greybox expands the selection to its entire connected
+group. Entering Edit Mode also expands the current selection. Outside Edit Mode, selection
+does not expand automatically.
+Linking, linked extrusion and subdivision consolidate the connected greyboxes under one
+exclusive parent. Reuse a folder containing only that group; merging groups removes empty
+redundant folders, including nested folders. Group recognition follows nested organizational
+folders; members are flattened into an existing suitable parent and emptied folders are removed
+from the inside out. Linked extrusion uses that parent immediately. Parents with components or
+unrelated children are retained. Linking an
+already linked box adds a weld without replacing its existing connections. Unlinking separates
+the remaining connected groups unless they belong to an explicit Boolean input. Hierarchy changes share the action's Undo step and preserve
+world-space geometry, including under rotated nonuniform scales.
+Scene/prefab-stage boundaries, prefab instance internals, different Greybox Managers and
+separate Boolean inputs cannot be merged. Reparenting that would shear attached content is
+also rejected. The action reports the constraint before linking.
+Existing Boolean compounds remain semantic owners of their parts.
+Back-facing edges use the same 35% alpha multiplier as back-facing face handles; silhouette
+edges remain full strength.
+An RMB click released on a greybox edge creates two welded boxes at the pressed edge fraction.
+The cut continues across crossed seam faces, preserving the neighbouring welds; internal split
+faces are hidden.
+Only fully internal welded edges are hidden. Edges dividing visible surfaces remain drawn
+and editable, including flat coplanar subdivisions.
+Deleting a linked neighbour reveals the surviving shared face automatically. Undo restores
+the hidden seam. A face stays hidden while another live neighbour still shares it.
+The original parent/child seam format remains supported alongside multiple face welds,
+which allow a subdivided group to stay connected around loops.
+
+Boolean geometry has explicit ownership: a primitive, a `GreyboxCompound` union of inputs,
+or a `GreyBooleanResult` subtraction. Weld connectivity and organizational folders do not
+replace input membership. Creating either Boolean input from a linked box includes the whole
+connected group and reuses its existing exclusive folder. Picking or dragging that folder
+also resolves its linked group. A consumed input is hidden recursively, including colliders;
+a standalone compound displays its editable members, without a duplicate combined surface.
+
+Linked extrusion, splitting and linking an outside box/group add geometry to the existing
+input. Unlinking removes welds but retains Boolean membership. Connecting opposite inputs,
+sharing geometry between both sides, or creating a dependency cycle is rejected before any
+hierarchy change. Nested operations replace their input's membership entry; clearing one
+restores that entry without discarding outer operations. Released cutters leave the consuming
+tree. Empty redundant folders are removed, while unrelated children are preserved.
+
+Groups accept primitives and nested Boolean results. CSG uses exact source solids, including
+closed box faces even when their rendered seam is hidden, and retains nested subject cut
+materials. Edits rebuild dependent geometry from the inside out. Deletion and Undo refresh
+membership-dependent geometry without requiring selection; an empty input produces no mesh.
+The Inspector and Scene View Boolean field on a group member edit the group's operation.
+Existing box-only compound references and legacy hierarchy ownership remain readable.
 
 **Files:**
 - `GPEdit.cs` — toggle state, hotkey, and the `duringSceneGui` dispatch by primitive type
 - `GPEditGreybox.cs` — Greybox sub-element editing: face toggle, edge deform, face normal/skew, extrude
 - `GPEditSpline.cs` — Greypipe/Greyroad spline editing via a shared `GPSpline` adapter: vertex move, bezier handles, banking, extend-from-end, insert/delete vertex
+- `GPEditCoordinates.cs` - coordinate frames, common drag/axis-lock behavior and hover arrows
 - `GPEditShared.cs` — shared hover math, colors, and lookup tables; deliberately independent of QuickTransform
 - `GPEditTooltip.cs` — Scene View tooltip listing the actions for the selected primitive type
 - `GPWindowOverlay.cs` — floating Scene View panel; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe), so there is no `[InitializeOnLoad]` side effect
