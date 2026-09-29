@@ -80,17 +80,25 @@ class GPWindowOverlay : Overlay
         if (s_header == null)
             s_header = new GUIStyle(EditorStyles.boldLabel) { margin = new RectOffset(0, 0, 6, 2) };
 
-        EditorGUIUtility.labelWidth = 96f;
-
-        DrawEditToggle();
-
-        EditorGUILayout.LabelField(Selection.count > 1 ? "Active Object Properties" : "Object Properties", s_header);
-        DrawProperties(gp);
-
-        if (gp is Greybox || gp is GreyBooleanResult || gp is GreyboxCompound)
+        float previousLabelWidth = EditorGUIUtility.labelWidth;
+        try
         {
-            EditorGUILayout.LabelField("Boolean", s_header);
-            DrawBooleanFunctions(gp);
+            EditorGUIUtility.labelWidth = 96f;
+
+            DrawEditToggle();
+
+            EditorGUILayout.LabelField(Selection.count > 1 ? "Active Object Properties" : "Object Properties", s_header);
+            DrawProperties(gp);
+
+            if (gp is Greybox || gp is GreyBooleanResult || gp is GreyboxCompound)
+            {
+                EditorGUILayout.LabelField("Boolean", s_header);
+                DrawBooleanFunctions(gp);
+            }
+        }
+        finally
+        {
+            EditorGUIUtility.labelWidth = previousLabelWidth;
         }
     }
 

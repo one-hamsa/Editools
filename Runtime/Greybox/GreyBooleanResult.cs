@@ -541,8 +541,10 @@ public class GreyBooleanResult : GreyPrimitive
                 var c11 = new Vector2(a1, b1);
                 var c01 = new Vector2(a0, b1);
 
+                // Corners on a hole rim do not establish that the cell interior is solid.
                 bool fullyInside = InsideGrid(i, j, us, vs, frags, inside) && InsideGrid(i + 1, j, us, vs, frags, inside)
                                 && InsideGrid(i + 1, j + 1, us, vs, frags, inside) && InsideGrid(i, j + 1, us, vs, frags, inside)
+                                && InsideAny(new Vector2((a0 + a1) * 0.5f, (b0 + b1) * 0.5f), frags)
                                 && !CutCrossesCell(columnEdges, a0, a1, b0, b1);
 
                 if (fullyInside)
@@ -776,33 +778,22 @@ public class GreyBooleanResult : GreyPrimitive
     {
         foreach (var e in edges)
         {
-            if ((e.p.x < a0 && e.q.x < a0) || (e.p.x > a1 && e.q.x > a1)
-                || (e.p.y < b0 && e.q.y < b0) || (e.p.y > b1 && e.q.y > b1)) continue;
-            // Endpoint strictly inside the cell?
-            if (StrictInside(e.p, a0, a1, b0, b1) || StrictInside(e.q, a0, a1, b0, b1)) return true;
-            // Crosses a cell edge?
-            if (SegSeg(e.p, e.q, new Vector2(a0, b0), new Vector2(a1, b0))) return true;
-            if (SegSeg(e.p, e.q, new Vector2(a1, b0), new Vector2(a1, b1))) return true;
-            if (SegSeg(e.p, e.q, new Vector2(a1, b1), new Vector2(a0, b1))) return true;
-            if (SegSeg(e.p, e.q, new Vector2(a0, b1), new Vector2(a0, b0))) return true;
+            // Include crossings that start or end on grid edges, but exclude segments along the rim.
+            double enter = 0d, exit = 1d;
+            if (ClipOpenAxis(e.p.x, e.q.x, a0, a1, ref enter, ref exit)
+                && ClipOpenAxis(e.p.y, e.q.y, b0, b1, ref enter, ref exit)) return true;
         }
         return false;
     }
 
-    static bool StrictInside(Vector2 p, float a0, float a1, float b0, float b1)
+    static bool ClipOpenAxis(double start, double end, double min, double max, ref double enter, ref double exit)
     {
-        const float e = 1e-5f;
-        return p.x > a0 + e && p.x < a1 - e && p.y > b0 + e && p.y < b1 - e;
-    }
-
-    static bool SegSeg(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4)
-    {
-        float d1 = Cross(p4 - p3, p1 - p3);
-        float d2 = Cross(p4 - p3, p2 - p3);
-        float d3 = Cross(p2 - p1, p3 - p1);
-        float d4 = Cross(p2 - p1, p4 - p1);
-        return ((d1 > 1e-7f && d2 < -1e-7f) || (d1 < -1e-7f && d2 > 1e-7f))
-            && ((d3 > 1e-7f && d4 < -1e-7f) || (d3 < -1e-7f && d4 > 1e-7f));
+        double delta = end - start;
+        if (delta == 0d) return start > min && start < max;
+        double t0 = (min - start) / delta, t1 = (max - start) / delta;
+        enter = Math.Max(enter, Math.Min(t0, t1));
+        exit = Math.Min(exit, Math.Max(t0, t1));
+        return enter < exit;
     }
 
     static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
