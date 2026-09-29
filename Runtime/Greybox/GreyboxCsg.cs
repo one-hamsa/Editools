@@ -175,6 +175,7 @@ sealed class CsgNode
         while (stack.Count > 0)
         {
             var (node, polys) = stack.Pop();
+            if (polys.Count == 0) continue;
             if (node._plane == null)
             {
                 result.AddRange(polys);
@@ -186,10 +187,10 @@ sealed class CsgNode
             for (int i = 0; i < polys.Count; i++)
                 node._plane.SplitPolygon(polys[i], front, back, front, back);
 
-            if (node._front != null) stack.Push((node._front, front));
-            else result.AddRange(front);
+            if (node._front != null && front.Count > 0) stack.Push((node._front, front));
+            else if (node._front == null) result.AddRange(front);
 
-            if (node._back != null) stack.Push((node._back, back));
+            if (node._back != null && back.Count > 0) stack.Push((node._back, back));
             // no back child -> back polygons are inside the solid and dropped
         }
         return result;

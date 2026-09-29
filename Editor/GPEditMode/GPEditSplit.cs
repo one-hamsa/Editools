@@ -146,6 +146,7 @@ static partial class GPEdit
         GreyPrimitive.BeginDeferredPersist();
         try
         {
+            GreyBooleanOrchestrator.EnsureManagedInput(box);
             foreach (var split in splits) Undo.RegisterCompleteObjectUndo(split.box, label);
             foreach (var seam in seams)
             {
@@ -210,8 +211,6 @@ static partial class GPEdit
         var st = source.transform;
         var go = GreyPrimitiveSettings.PlacePrimitive<Greybox>(source.name + " Split", st.position, st.rotation,
             st.parent, meshCollider: source.GetComponent<MeshCollider>() != null, select: false);
-        if (st.parent == null && go.scene != source.gameObject.scene)
-            UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(go, source.gameObject.scene);
         go.transform.localPosition = st.localPosition;
         go.transform.localRotation = st.localRotation;
         go.transform.localScale = st.localScale;

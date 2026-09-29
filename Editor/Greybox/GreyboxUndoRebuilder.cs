@@ -24,7 +24,7 @@ static class GreyboxUndoRebuilder
     // batch, so at the moment an undo/redo finishes these hold exactly that operation's targets.
     static readonly HashSet<GreyPrimitive>  s_changedPrims    = new HashSet<GreyPrimitive>();
     static readonly HashSet<Transform>      s_scaledRoots     = new HashSet<Transform>();
-    static readonly HashSet<GreyboxManager> s_changedManagers = new HashSet<GreyboxManager>();
+    static readonly HashSet<GreyPrimitiveManager> s_changedManagers = new HashSet<GreyPrimitiveManager>();
 
     // Last-known state, so a transform / manager change can be classified as "actually scale" or
     // "actually density" rather than any property edit. Keyed by instance id; populated lazily.
@@ -65,7 +65,7 @@ static class GreyboxUndoRebuilder
                 case GreyPrimitive prim:                       // a primitive's own fields changed
                     s_changedPrims.Add(prim);
                     break;
-                case GreyboxManager mgr:                       // a manager's fields changed
+                case GreyPrimitiveManager mgr:                       // a manager's fields changed
                     RecordManagerIfDensityChanged(mgr);
                     break;
                 case Transform tr:                             // a transform changed — scale only
@@ -93,9 +93,9 @@ static class GreyboxUndoRebuilder
         if (changed) s_scaledRoots.Add(tr);
     }
 
-    // Mirror GreyboxManagerEditor: only a change to a density-affecting field should re-push to
+    // Mirror GreyPrimitiveManagerEditor: only a change to a density-affecting field should re-push to
     // children, so compare the same signature it uses instead of reacting to any manager edit.
-    static void RecordManagerIfDensityChanged(GreyboxManager mgr)
+    static void RecordManagerIfDensityChanged(GreyPrimitiveManager mgr)
     {
         if (mgr == null) return;
         int id = mgr.GetInstanceID();

@@ -1,7 +1,9 @@
 #if UNITY_EDITOR
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
 
 static class GreyPrimitiveSettings
 {
@@ -75,9 +77,11 @@ static class GreyPrimitiveSettings
         bool? meshCollider = null, bool? castShadows = null, bool select = true)
         where T : GreyPrimitive
     {
+        int undoGroup = Undo.GetCurrentGroup();
+        parent = ResolveParent(parent);
         var go = new GameObject(name);
-        if (parent != null)
-            go.transform.SetParent(parent, false);
+        SceneManager.MoveGameObjectToScene(go, parent.gameObject.scene);
+        go.transform.SetParent(parent, false);
         Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
 
         go.AddComponent<T>();
@@ -97,7 +101,60 @@ static class GreyPrimitiveSettings
         go.layer    = DefaultLayer;
 
         if (select) Selection.activeObject = go;
+        Undo.CollapseUndoOperations(undoGroup);
         return go;
+    }
+
+    internal static Transform ResolveParent(Transform parent, Scene scene = default, Transform excludedRoot = null)
+    {
+        if (parent != null && parent.GetComponentInParent<GreyPrimitiveManager>(true) != null)
+            return parent;
+
+        var stage = parent != null ? PrefabStageUtility.GetPrefabStage(parent.gameObject)
+            : PrefabStageUtility.GetCurrentPrefabStage();
+        if (parent != null) scene = parent.gameObject.scene;
+        else if (!scene.IsValid())
+            scene = stage != null ? stage.scene
+                : Selection.activeGameObject != null ? Selection.activeGameObject.scene : SceneManager.GetActiveScene();
+        if (!scene.IsValid()) scene = SceneManager.GetActiveScene();
+        if (stage != null && stage.scene != scene) stage = null;
+
+        Transform closest = null;
+        int closestDistance = int.MaxValue;
+        var roots = stage != null ? new[] { stage.prefabContentsRoot } : scene.GetRootGameObjects();
+        foreach (var root in roots)
+            foreach (var manager in root.GetComponentsInChildren<GreyPrimitiveManager>(true))
+            {
+                if (excludedRoot != null && manager.transform.IsChildOf(excludedRoot)) continue;
+                if (manager.Primary) return manager.transform;
+                int distance = HierarchyDistance(parent, manager.transform);
+                if (distance >= closestDistance) continue;
+                closest = manager.transform;
+                closestDistance = distance;
+            }
+        if (closest != null) return closest;
+
+        var geometry = new GameObject("Geometry");
+        SceneManager.MoveGameObjectToScene(geometry, scene);
+        if (stage != null) geometry.transform.SetParent(stage.prefabContentsRoot.transform, false);
+        geometry.transform.position = Vector3.zero;
+        geometry.transform.rotation = Quaternion.identity;
+        Undo.RegisterCreatedObjectUndo(geometry, "Create Geometry");
+        Undo.AddComponent<GreyPrimitiveManager>(geometry);
+        return geometry.transform;
+    }
+
+    static int HierarchyDistance(Transform from, Transform to)
+    {
+        int up = 0;
+        for (var ancestor = from; ancestor != null; ancestor = ancestor.parent, up++)
+        {
+            int down = 0;
+            for (var candidate = to; candidate != null; candidate = candidate.parent, down++)
+                if (candidate == ancestor) return up + down;
+        }
+        for (var candidate = to; candidate != null; candidate = candidate.parent) up++;
+        return up;
     }
 
     // ─── Shared settings GUI (used by both GreyboxSettingsPopup and GreypipeSettingsPopup) ──

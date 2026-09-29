@@ -37,7 +37,7 @@ static class GreyboxLinkHierarchy
         return Validate(boxes);
     }
 
-    internal static bool Validate(List<Greybox> boxes)
+    internal static bool Validate(List<Greybox> boxes, bool requireMovement = true)
     {
         var scene = boxes[0].gameObject.scene;
         GreyPrimitive booleanScope = null;
@@ -46,29 +46,30 @@ static class GreyboxLinkHierarchy
             var scope = GreyBooleanOrchestrator.OperandScope(member);
             if (scope != null && GreyGeometry.Owner(scope) != null) { booleanScope = scope; break; }
         }
-        var manager = boxes[0].GetComponentInParent<GreyboxManager>();
+        var manager = boxes[0].GetComponentInParent<GreyPrimitiveManager>();
         foreach (var box in boxes)
         {
             string reason = null;
             var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetPrefabStage(box.gameObject);
             if (EditorUtility.IsPersistent(box) || !scene.IsValid() || box.gameObject.scene != scene)
                 reason = "Linked boxes must be in the same scene or prefab stage.";
-            else if (stage != null && stage.prefabContentsRoot == box.gameObject)
+            else if (requireMovement && stage != null && stage.prefabContentsRoot == box.gameObject)
                 reason = "A prefab contents root cannot be moved into a linked group. Put its boxes below the root first.";
-            else if (PrefabUtility.IsPartOfNonAssetPrefabInstance(box)
+            else if (requireMovement && PrefabUtility.IsPartOfNonAssetPrefabInstance(box)
                 && !PrefabUtility.IsOutermostPrefabInstanceRoot(box.gameObject))
                 reason = "Open the prefab to link its internal boxes, or unpack it first.";
             else if (GreyBooleanOrchestrator.OperandScope(box) is GreyPrimitive scope
                 && GreyGeometry.Owner(scope) != null && scope != booleanScope)
                 reason = "Boxes belonging to different Boolean inputs cannot share a linked group.";
-            else if (box.GetComponentInParent<GreyboxManager>() != manager)
-                reason = "Linked boxes must use the same Greybox Manager.";
+            else if (box.GetComponentInParent<GreyPrimitiveManager>() != manager)
+                reason = "Linked boxes must use the same Grey Primitive Manager.";
             if (reason == null) continue;
             Debug.LogWarning("[Greybox] " + reason, box);
             if (SceneView.lastActiveSceneView != null)
                 SceneView.lastActiveSceneView.ShowNotification(new GUIContent(reason));
             return false;
         }
+        if (!requireMovement) return true;
         var destination = booleanScope != null ? booleanScope.transform : FindDestination(boxes);
         if (destination == null) destination = CommonParent(boxes);
         foreach (var box in boxes)
@@ -83,7 +84,7 @@ static class GreyboxLinkHierarchy
         return true;
     }
 
-    static bool CanPreserveAttachments(Greybox box, Transform destination, List<Greybox> boxes)
+    internal static bool CanPreserveAttachments(Greybox box, Transform destination, List<Greybox> boxes)
     {
         if (box.transform.parent == destination || !HasAttachedContent(box, boxes)) return true;
         Vector3 x = box.transform.TransformVector(Vector3.right);

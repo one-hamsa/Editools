@@ -56,22 +56,19 @@ static class GreyBooleanOrchestrator
             return;
         }
 
-        // A reference to a leaf of an already consumed input means its complete visible result.
         var opOwner = GreyGeometry.Owner(op);
-        if (opOwner != null && opOwner != result)
-        {
-            // Editing an existing input must not promote its cutter to the common outer result.
-            while (opOwner is GreyboxCompound)
-            {
-                op = opOwner;
-                opOwner = GreyGeometry.Owner(op);
-            }
-            if (opOwner != null && opOwner != result) op = GreyGeometry.Root(op);
-        }
-        if (!CanOperate(EditSubject(prim), op) || !CanPrepare(prim) || !CanPrepare(op)) return;
+        bool sharedOperator = opOwner != null && opOwner != result;
+        using var consumersScope = ListPool<GreyPrimitive>.Get(out var consumers);
+        CollectConsumers(op, consumers);
+        foreach (var consumer in consumers)
+            if (consumer != result) sharedOperator = true;
+        bool keepOperatorHierarchy = sharedOperator
+            || (op.transform.parent != null
+                && op.transform.parent.GetComponentInParent<GreyBooleanResult>(true) != null);
+        if (!CanOperate(EditSubject(prim), op) || !CanPrepare(prim) || !CanPrepare(op, false)) return;
         int undoGroup = Undo.GetCurrentGroup();
         var subject = ResolveLinkedInput(prim);
-        op = ResolveLinkedInput(op);
+        if (!keepOperatorHierarchy) op = ResolveLinkedInput(op, true);
         if (subject != prim)
         {
             SetBoolean(subject, op, prim.BooleanCutMaterial);
@@ -81,17 +78,18 @@ static class GreyBooleanOrchestrator
         result = FindResultFor(subject);
         bool created = result == null;
         if (created) result = CreateResultWrapper(subject);
-        else if (result.Operator != null && result.Operator != op)
-            Release(result.Operator, GreyGeometry.Root(result).transform.parent);
-
+        var previousOperator = result.Operator;
         Undo.RegisterCompleteObjectUndo(result, k_Label);
         result.Configure(subject, op);
+        if (previousOperator != null && previousOperator != op)
+            Release(previousOperator, result, GreyGeometry.Root(result).transform.parent);
         SetOwner(subject, result);
-        SetOwner(op, result);
-        MoveInput(op, result.transform);
+        if (!sharedOperator) SetOwner(op, result);
+        if (!keepOperatorHierarchy) MoveInput(op, result.transform);
         CopySettings(subject, result, created);
         Register(result);
-        RebuildTree(GreyGeometry.Root(result));
+        RebuildTree(result);
+        ReBakeFrom(result);
         if (created) Selection.activeObject = result.gameObject;
         Undo.CollapseUndoOperations(undoGroup);
     }
@@ -142,12 +140,20 @@ static class GreyBooleanOrchestrator
         }
     }
 
-    static bool CanPrepare(GreyPrimitive input)
+    static bool CanMove(GreyPrimitive input)
     {
         var stage = UnityEditor.SceneManagement.PrefabStageUtility.GetPrefabStage(input.gameObject);
-        if ((stage != null && stage.prefabContentsRoot == input.gameObject)
-            || (PrefabUtility.IsPartOfNonAssetPrefabInstance(input)
-                && !PrefabUtility.IsOutermostPrefabInstanceRoot(input.gameObject)))
+        return !EditorUtility.IsPersistent(input)
+            && (input.hideFlags & HideFlags.NotEditable) == 0
+            && (input.gameObject.hideFlags & HideFlags.NotEditable) == 0
+            && (stage == null || stage.prefabContentsRoot != input.gameObject)
+            && (!PrefabUtility.IsPartOfNonAssetPrefabInstance(input)
+                || PrefabUtility.IsOutermostPrefabInstanceRoot(input.gameObject));
+    }
+
+    static bool CanPrepare(GreyPrimitive input, bool requireMovement = true)
+    {
+        if (requireMovement && !CanMove(input))
         {
             Debug.LogWarning("[GreyBoolean] Open the prefab to edit its internal inputs; keep geometry below the prefab contents root.", input);
             return false;
@@ -155,16 +161,27 @@ static class GreyBooleanOrchestrator
         if (!(input is Greybox box)) return true;
         using var scope = ListPool<Greybox>.Get(out var boxes);
         GreyboxLinkHierarchy.Collect(box, boxes);
-        return boxes.Count < 2 || GreyboxLinkHierarchy.Validate(boxes);
+        return boxes.Count < 2 || GreyboxLinkHierarchy.Validate(boxes, requireMovement);
     }
 
-    static GreyPrimitive ResolveLinkedInput(GreyPrimitive input)
+    static GreyPrimitive ResolveLinkedInput(GreyPrimitive input, bool preserveHierarchy = false)
     {
         if (!(input is Greybox box)) return input;
         using var scope = ListPool<Greybox>.Get(out var boxes);
         GreyboxLinkHierarchy.Collect(box, boxes);
         if (boxes.Count < 2 && !(GreyGeometry.Owner(box) is GreyboxCompound)) return input;
-        return EnsureLinkedGroup(boxes);
+        if (preserveHierarchy)
+        {
+            preserveHierarchy = false;
+            var destination = GreyboxLinkHierarchy.GroupParent(boxes);
+            foreach (var member in boxes)
+                if (!CanMove(member) || !GreyboxLinkHierarchy.CanPreserveAttachments(member, destination, boxes))
+                {
+                    preserveHierarchy = true;
+                    break;
+                }
+        }
+        return EnsureLinkedGroup(boxes, preserveHierarchy);
     }
 
     internal static GreyPrimitive OperandScope(Greybox box)
@@ -175,8 +192,27 @@ static class GreyBooleanOrchestrator
         return owner is GreyBooleanResult || node is GreyboxCompound ? node : null;
     }
 
+    internal static void EnsureManagedInput(GreyPrimitive input)
+    {
+        var root = GreyGeometry.Root(input);
+        if (root.GetComponentInParent<GreyPrimitiveManager>(true) != null) return;
+        var parent = GreyPrimitiveSettings.ResolveParent(root.transform.parent, root.gameObject.scene, root.transform);
+        if (input is Greybox box)
+        {
+            using var scope = ListPool<Greybox>.Get(out var boxes);
+            GreyboxLinkHierarchy.Collect(box, boxes);
+            foreach (var member in boxes)
+            {
+                var memberRoot = GreyGeometry.Root(member);
+                if (memberRoot.GetComponentInParent<GreyPrimitiveManager>(true) == null)
+                    MoveInput(memberRoot, parent);
+            }
+        }
+        else MoveInput(root, parent);
+    }
+
     // Promote a linked component into one explicit input, reusing its organizational folder.
-    internal static GreyboxCompound EnsureLinkedGroup(List<Greybox> boxes)
+    internal static GreyboxCompound EnsureLinkedGroup(List<Greybox> boxes, bool preserveHierarchy = false)
     {
         using var foldersScope = ListPool<Transform>.Get(out var folders);
         GreyboxLinkHierarchy.CollectFolders(boxes, folders);
@@ -191,7 +227,7 @@ static class GreyBooleanOrchestrator
         {
             var source = scope != null ? scope : boxes[0];
             var owner = GreyGeometry.Owner(source);
-            Transform folder = owner == null ? GreyboxLinkHierarchy.GroupParent(boxes) : null;
+            Transform folder = owner == null && !preserveHierarchy ? GreyboxLinkHierarchy.GroupParent(boxes) : null;
             GameObject go;
             if (folder != null) go = folder.gameObject;
             else
@@ -204,6 +240,9 @@ static class GreyBooleanOrchestrator
                 go.transform.localScale = source.transform.localScale;
                 Undo.RegisterCreatedObjectUndo(go, k_Label);
             }
+            var managedParent = GreyPrimitiveSettings.ResolveParent(go.transform.parent, go.scene, go.transform);
+            if (go.transform.parent != managedParent)
+                Undo.SetTransformParent(go.transform, managedParent, k_Label);
             compound = Undo.AddComponent<GreyboxCompound>(go);
             compound.SubdivisionMultiplier = source.SubdivisionMultiplier;
             compound.PlanarUv = source.PlanarUv;
@@ -232,7 +271,7 @@ static class GreyBooleanOrchestrator
             }
             if (!compound.Parts.Contains(box)) compound.Parts.Add(box);
             SetOwner(box, compound);
-            GreyboxLinkHierarchy.MoveBox(box, compound.transform, k_Label);
+            if (!preserveHierarchy) GreyboxLinkHierarchy.MoveBox(box, compound.transform, k_Label);
         }
         foreach (var old in oldGroups)
             if (old.Parts.Count == 0 && old.transform.childCount == 0 && GreyGeometry.Owner(old) == null)
@@ -255,6 +294,7 @@ static class GreyBooleanOrchestrator
 
     static GreyBooleanResult CreateResultWrapper(GreyPrimitive subject)
     {
+        EnsureManagedInput(subject);
         var owner = GreyGeometry.Owner(subject);
         var st = subject.transform;
         var go = new GameObject("Boolean Result");
@@ -306,6 +346,7 @@ static class GreyBooleanOrchestrator
         Undo.RecordObject(input, k_Label);
         input.GeometryOwner = owner;
         EditorUtility.SetDirty(input);
+        PrefabUtility.RecordPrefabInstancePropertyModifications(input);
     }
 
     static void SetBoolean(GreyPrimitive subject, GreyPrimitive op, Material material)
@@ -328,24 +369,37 @@ static class GreyBooleanOrchestrator
             if (owner != null) ReplaceInput(owner, result, subject);
             else SetOwner(subject, null);
         }
-        // Released cutters are independent, outside every consuming Boolean/compound.
+        Undo.RegisterCompleteObjectUndo(result, k_Label);
+        result.Configure(subject, null);
         var root = owner != null ? GreyGeometry.Root(owner) : result;
-        Release(op, root != null ? root.transform.parent : host);
+        Release(op, result, root != null ? root.transform.parent : host);
+        if (op != null && op.transform.IsChildOf(result.transform)) MoveInput(op, host);
         // Preserve unrelated children rather than deleting them with the wrapper.
         while (result.transform.childCount > 0)
             Undo.SetTransformParent(result.transform.GetChild(0), host, k_Label);
         Undo.DestroyObjectImmediate(result.gameObject);
-        if (subject != null) RebuildTree(GreyGeometry.Root(subject));
+        ReBakeFrom(op);
+        if (subject != null)
+        {
+            RebuildTree(GreyGeometry.Root(subject));
+            ReBakeFrom(subject);
+        }
     }
 
     static void MoveInput(GreyPrimitive input, Transform parent)
     {
-        if (input.transform.parent == parent) return;
+        if (input.transform.parent == parent || !CanMove(input)) return;
         var boxes = input.GetComponentsInChildren<Greybox>(true);
         var corners = new Vector3[boxes.Length][];
         for (int i = 0; i < boxes.Length; i++) corners[i] = boxes[i].GetWorldCorners();
         bool active = input.gameObject.activeInHierarchy;
-        Undo.SetTransformParent(input.transform, parent, k_Label);
+        try { Undo.SetTransformParent(input.transform, parent, k_Label); }
+        catch (System.Exception exception)
+        {
+            Debug.LogError("[GreyBoolean] Could not move the input; continuing with its existing hierarchy.", input);
+            Debug.LogException(exception, input);
+        }
+        if (input.transform.parent != parent) return;
         if (!active && input.gameObject.activeInHierarchy)
         {
             Undo.RecordObject(input.gameObject, k_Label);
@@ -363,11 +417,16 @@ static class GreyBooleanOrchestrator
         PrefabUtility.RecordPrefabInstancePropertyModifications(input.transform);
     }
 
-    static void Release(GreyPrimitive input, Transform host)
+    static void Release(GreyPrimitive input, GreyBooleanResult releasing, Transform host)
     {
         if (input == null) return;
-        SetOwner(input, null);
-        MoveInput(input, host);
+        using var consumersScope = ListPool<GreyPrimitive>.Get(out var consumers);
+        CollectConsumers(input, consumers);
+        if (input.GeometryOwner == releasing)
+        {
+            SetOwner(input, consumers.Count > 0 ? consumers[0] : null);
+            if (consumers.Count == 0) MoveInput(input, host);
+        }
         if (input is GreyboxCompound || input is GreyBooleanResult) RebuildTree(input);
         using var scope = HashSetPool<int>.Get(out var visited);
         RefreshVisibility(input, false, visited);
@@ -376,20 +435,42 @@ static class GreyBooleanOrchestrator
     public static void ReBakeFrom(GreyPrimitive moved)
     {
         if (moved == null) return;
-        var root = GreyGeometry.Root(moved);
-        if (!(root is GreyboxCompound || root is GreyBooleanResult)) return;
-        using var scope = HashSetPool<int>.Get(out var visited);
-        var owner = GreyGeometry.Owner(moved);
-        while (owner != null && visited.Add(owner.GetInstanceID()))
+        using var scope = ListPool<GreyPrimitive>.Get(out var changed);
+        CollectConsumers(moved, changed);
+        RebuildChanged(changed);
+    }
+
+    internal static void CollectConsumers(GreyPrimitive input, List<GreyPrimitive> consumers)
+    {
+        var owner = GreyGeometry.Owner(input);
+        if (owner != null && !s_nodes.ContainsKey(owner.GetInstanceID())) consumers.Add(owner);
+        foreach (var candidate in s_nodes.Values)
+            if (candidate != null && GreyGeometry.Owns(candidate, input)) consumers.Add(candidate);
+    }
+
+    // Rebuild each affected node once, after its inputs, even when multiple inputs moved together.
+    internal static void RebuildChanged(List<GreyPrimitive> changed)
+    {
+        using var dirtyScope = HashSetPool<int>.Get(out var dirty);
+        using var rootsScope = ListPool<GreyPrimitive>.Get(out var roots);
+        using var pendingScope = ListPool<GreyPrimitive>.Get(out var pending);
+        pending.AddRange(changed);
+        for (int i = 0; i < pending.Count; i++)
         {
-            owner.RebuildMesh();
-            if (owner is GreyBooleanResult result) ApplyResultMaterials(result);
-            Register(owner);
-            s_structure[owner.GetInstanceID()] = StructureSignature(owner);
-            owner = GreyGeometry.Owner(owner);
+            var current = pending[i];
+            if (current == null || !dirty.Add(current.GetInstanceID())) continue;
+            int count = pending.Count;
+            CollectConsumers(current, pending);
+            if (pending.Count == count) roots.Add(current);
         }
-        visited.Clear();
-        RefreshVisibility(root, false, visited);
+        using var visitedScope = HashSetPool<int>.Get(out var visited);
+        using var activeScope = HashSetPool<int>.Get(out var active);
+        foreach (var root in roots)
+        {
+            if (!RebuildNode(root, visited, active, dirty)) continue;
+            using var visibilityScope = HashSetPool<int>.Get(out var visible);
+            RefreshVisibility(root, false, visible);
+        }
     }
 
     internal static void RebuildTree(GreyPrimitive root)
@@ -401,7 +482,7 @@ static class GreyBooleanOrchestrator
         RefreshVisibility(root, false, visited);
     }
 
-    static bool RebuildNode(GreyPrimitive node, HashSet<int> visited, HashSet<int> active)
+    static bool RebuildNode(GreyPrimitive node, HashSet<int> visited, HashSet<int> active, HashSet<int> dirty = null)
     {
         if (node == null) return true; // Deleted inputs contribute an empty solid.
         int id = node.GetInstanceID();
@@ -409,15 +490,19 @@ static class GreyBooleanOrchestrator
         if (!active.Add(id)) { Debug.LogError("[GreyBoolean] Geometry inputs contain a cycle.", node); return false; }
         if (node is GreyBooleanResult result)
         {
-            if (!RebuildNode(result.Subject, visited, active) || !RebuildNode(result.Operator, visited, active)) return false;
-            result.RebuildMesh();
-            ApplyResultMaterials(result);
+            if (!RebuildNode(result.Subject, visited, active, dirty) || !RebuildNode(result.Operator, visited, active, dirty)) return false;
+            if (dirty == null || dirty.Contains(id))
+            {
+                result.RebuildMesh();
+                ApplyResultMaterials(result);
+            }
         }
         else if (node is GreyboxCompound compound)
         {
-            foreach (var part in compound.Parts) if (!RebuildNode(part, visited, active)) return false;
-            compound.RebuildMesh();
+            foreach (var part in compound.Parts) if (!RebuildNode(part, visited, active, dirty)) return false;
+            if (dirty == null || dirty.Contains(id)) compound.RebuildMesh();
         }
+        else if (dirty != null && dirty.Contains(id)) node.RebuildMesh();
         active.Remove(id);
         visited.Add(id);
         Register(node);
@@ -428,6 +513,7 @@ static class GreyBooleanOrchestrator
     static void RefreshVisibility(GreyPrimitive node, bool consumed, HashSet<int> visited)
     {
         if (node == null || !visited.Add(node.GetInstanceID())) return;
+        consumed |= IsConsumed(node);
         SetEnabled(node, !consumed && !(node is GreyboxCompound));
         if (node is GreyBooleanResult result)
         {
@@ -438,6 +524,21 @@ static class GreyBooleanOrchestrator
             foreach (var part in compound.Parts) RefreshVisibility(part, consumed, visited);
     }
 
+    static bool IsConsumed(GreyPrimitive input)
+    {
+        using var scope = ListPool<GreyPrimitive>.Get(out var consumers);
+        using var visitedScope = HashSetPool<int>.Get(out var visited);
+        CollectConsumers(input, consumers);
+        for (int i = 0; i < consumers.Count; i++)
+        {
+            var consumer = consumers[i];
+            if (!visited.Add(consumer.GetInstanceID())) continue;
+            if (consumer is GreyBooleanResult) return true;
+            CollectConsumers(consumer, consumers);
+        }
+        return false;
+    }
+
     static void SetEnabled(GreyPrimitive node, bool enabled)
     {
         var renderer = node.GetComponent<MeshRenderer>();
@@ -446,6 +547,7 @@ static class GreyBooleanOrchestrator
             Undo.RecordObject(renderer, k_Label);
             renderer.enabled = enabled;
             EditorUtility.SetDirty(renderer);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(renderer);
         }
         var collider = node.GetComponent<MeshCollider>();
         if (collider != null && collider.enabled != enabled)
@@ -453,6 +555,7 @@ static class GreyBooleanOrchestrator
             Undo.RecordObject(collider, k_Label);
             collider.enabled = enabled;
             EditorUtility.SetDirty(collider);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(collider);
         }
     }
 
@@ -483,18 +586,13 @@ static class GreyBooleanOrchestrator
     {
         using var nodesScope = ListPool<GreyPrimitive>.Get(out var nodes);
         using var removedScope = ListPool<int>.Get(out var removed);
-        using var rootsScope = HashSetPool<int>.Get(out var roots);
         foreach (var pair in s_nodes)
         {
             if (pair.Value == null) { removed.Add(pair.Key); continue; }
             if (s_structure[pair.Key] != StructureSignature(pair.Value)) nodes.Add(pair.Value);
         }
         foreach (int id in removed) { s_nodes.Remove(id); s_structure.Remove(id); }
-        foreach (var node in nodes)
-        {
-            var root = GreyGeometry.Root(node);
-            if (root != null && roots.Add(root.GetInstanceID())) RebuildTree(root);
-        }
+        RebuildChanged(nodes);
     }
 
     static void CopySettings(GreyPrimitive subject, GreyBooleanResult result, bool created)

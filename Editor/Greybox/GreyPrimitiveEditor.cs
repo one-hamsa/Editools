@@ -8,7 +8,7 @@ public class GreyPrimitiveEditor : Editor
     static readonly GUIContent s_booleanLabel = new GUIContent(
         "Boolean",
         "Optional Operator to subtract from this object. Drag a Grey object here, or use Pick to " +
-        "click one in the scene. Creates a Boolean Result parent containing both complete inputs (Subject minus Operator).");
+        "click one in the scene. Subtracts the Operator from the Subject. Already-used Operators stay in their hierarchy and can be shared.");
 
     static readonly GUIContent s_cutMaterialLabel = new GUIContent(
         "Cut Material",

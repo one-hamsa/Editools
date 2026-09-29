@@ -693,13 +693,13 @@ public class Greypipe : GreyPrimitive
 
     float GetManagerLengthMultiplier()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreypipeLengthSubdivMultiplier : 1f;
     }
 
     float GetManagerGirthMultiplier()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreypipeGirthSubdivMultiplier : 1f;
     }
 

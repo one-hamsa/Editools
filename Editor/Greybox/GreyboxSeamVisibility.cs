@@ -39,12 +39,14 @@ static class GreyboxSeamVisibility
     static void RegisterRoot(GameObject root)
     {
         if (root == null) return;
+        foreach (var manager in root.GetComponentsInChildren<GreyPrimitiveManager>(true)) GreyPrimitiveManagerEditor.Register(manager);
         foreach (var box in root.GetComponentsInChildren<Greybox>(true)) Register(box);
         foreach (var primitive in root.GetComponentsInChildren<GreyPrimitive>(true)) GreyBooleanOrchestrator.Register(primitive);
     }
 
     static void RegisterLoadedBoxes()
     {
+        foreach (var manager in Resources.FindObjectsOfTypeAll<GreyPrimitiveManager>()) GreyPrimitiveManagerEditor.Register(manager);
         foreach (var box in Resources.FindObjectsOfTypeAll<Greybox>()) Register(box);
         foreach (var primitive in Resources.FindObjectsOfTypeAll<GreyPrimitive>()) GreyBooleanOrchestrator.Register(primitive);
         ScheduleRefresh();
@@ -81,6 +83,7 @@ static class GreyboxSeamVisibility
                 case ObjectChangeKind.ChangeGameObjectOrComponentProperties:
                     stream.GetChangeGameObjectOrComponentPropertiesEvent(i, out var properties);
                     Register(EditorUtility.InstanceIDToObject(properties.instanceId) as Greybox);
+                    GreyPrimitiveManagerEditor.Register(EditorUtility.InstanceIDToObject(properties.instanceId) as GreyPrimitiveManager);
                     break;
             }
         }
@@ -98,6 +101,7 @@ static class GreyboxSeamVisibility
     {
         s_scheduled = false;
         if (EditorApplication.isPlayingOrWillChangePlaymode) return;
+        GreyPrimitiveManagerEditor.NormalizePrimaryManagers();
         using var boxesScope = ListPool<Greybox>.Get(out var boxes);
         using var changedScope = ListPool<Greybox>.Get(out var changed);
         boxes.AddRange(s_faces.Keys);

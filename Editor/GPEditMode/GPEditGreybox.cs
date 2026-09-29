@@ -358,6 +358,7 @@ static partial class GPEdit
         s_gbUndoGroup = Undo.GetCurrentGroup();
         GreyPrimitive.BeginDeferredPersist();
 
+        if (linked) GreyBooleanOrchestrator.EnsureManagedInput(sourceGb);
         Vector3[] wc = sourceGb.GetWorldCorners();
         int[] ci = GPEditShared.FaceCornerIndices[face];
         Vector3 c0 = wc[ci[0]], c1 = wc[ci[1]], c2 = wc[ci[2]], c3 = wc[ci[3]];
@@ -383,9 +384,8 @@ static partial class GPEdit
         EditorUtility.SetDirty(sourceGb);
 
         Transform parent = linked ? GreyboxLinkHierarchy.LinkedExtrusionParent(sourceGb) : GreyboxLinkHierarchy.UnlinkedExtrusionParent(sourceGb);
+        parent = GreyPrimitiveSettings.ResolveParent(parent, sourceGb.gameObject.scene);
         var go = GreyboxSettings.PlaceGreybox(s_gbExtrudeCenter, extrudeRot, parent, select: false);
-        if (parent == null && go.scene != sourceGb.gameObject.scene)
-            UnityEngine.SceneManagement.SceneManager.MoveGameObjectToScene(go, sourceGb.gameObject.scene);
         go.transform.localScale = Vector3.one;
         s_gbExtrudeNew = go.GetComponent<Greybox>();
 

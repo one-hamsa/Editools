@@ -214,7 +214,7 @@ Enters a modal snap mode for placing objects on surfaces.
 2. Mouse tracking begins — cursor raycasts against all scene `MeshFilter` geometry
 3. Uses Möller–Trumbore triangle intersection (not Physics raycasts) for precision
 4. Object preview follows the mouse, aligned to surface normal
-5. Left-click confirms placement
+5. Press LMB to place; hold and drag left/right to rotate around the placed Y axis (Z with Align Z enabled). Hold Ctrl during rotation to snap to 15-degree increments; release LMB to finish
 6. Right-click cancels (performs `Undo.PerformUndo` to revert)
 
 ### 6. SelectMaterial (Editor, `I+Click`)
@@ -368,6 +368,12 @@ Live FPS overlay in the top-left corner of each Scene View.
 
 Deformable box primitive for level blockout. Created via `GameObject > 3D Object > Greybox`.
 
+All new Grey Primitives are placed below a Grey Primitive Manager. Creation keeps a designated
+parent already below a manager; otherwise it uses the scene's Primary manager, falling back to
+the nearest manager by hierarchy distance in the same scene or prefab stage. Checking Primary
+clears the previous Primary in that scene. If no manager exists, creation adds `Geometry` at world origin with a
+manager. The manager and primitive share the creation Undo step.
+
 **Runtime component (`Greybox.cs`):**
 - Stores `Vector3[8] _corners` in local space — the 8 deformable corners of the box
 - Corner encoding: `bit0=+X, bit1=+Y, bit2=+Z` (matches QuickTransform's box convention)
@@ -407,7 +413,7 @@ Deformable box primitive for level blockout. Created via `GameObject > 3D Object
 - Flat quad sibling of Greybox: unit 1×1 quad in the local XZ plane, **pivot at center**, surface
   normal = local +Y; size comes from the transform scale (creation default in Editools Settings ▸
   Greyquad, `Editools_Greyquad_DefaultSize[XZ]`)
-- Subdivides by the same rules as Greybox: `GreyboxManager.VertexDensity × SubdivisionMultiplier`
+- Subdivides by the same rules as Greybox: `GreyPrimitiveManager.VertexDensity × SubdivisionMultiplier`
   applied to the world-space edge lengths per axis
 - **Never casts shadows and never gets a MeshCollider** — hardcoded at creation via
   `PlacePrimitive` overrides, regardless of the shared prefs; material, static flag, and layer
@@ -502,7 +508,7 @@ unrelated children are retained. Linking an
 already linked box adds a weld without replacing its existing connections. Unlinking separates
 the remaining connected groups unless they belong to an explicit Boolean input. Hierarchy changes share the action's Undo step and preserve
 world-space geometry, including under rotated nonuniform scales.
-Scene/prefab-stage boundaries, prefab instance internals, different Greybox Managers and
+Scene/prefab-stage boundaries, prefab instance internals, different Grey Primitive Managers and
 separate Boolean inputs cannot be merged. Reparenting that would shear attached content is
 also rejected. The action reports the constraint before linking.
 Existing Boolean compounds remain semantic owners of their parts.

@@ -88,7 +88,7 @@ public class Greyroad : GreyPrimitive
     [SerializeField]
     [Range(0f, 1f)]
     [Tooltip("Smooths banking and deliberately authored width/height changes between vertices, without overshoot. " +
-             "Constant width values stay constant. Multiplies with the Greybox Manager's Greyroad Edge Smoothing. " +
+             "Constant width values stay constant. Multiplies with the Grey Primitive Manager's Greyroad Edge Smoothing. " +
              "Use Spline Smoothing to smooth the road's path.")]
     float _edgeSmoothing = 1f;
 
@@ -858,19 +858,19 @@ public class Greyroad : GreyPrimitive
 
     float GetManagerLengthMultiplier()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreyroadLengthSubdivMultiplier : 1f;
     }
 
     float GetManagerWidthMultiplier()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreyroadWidthSubdivMultiplier : 1f;
     }
 
     float GetManagerSideMultiplier()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreyroadSideSubdivMultiplier : 1f;
     }
 
@@ -881,7 +881,7 @@ public class Greyroad : GreyPrimitive
 
     float GetManagerEdgeSmoothing()
     {
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         return manager != null ? manager.GreyroadEdgeSmoothing : 1f;
     }
 

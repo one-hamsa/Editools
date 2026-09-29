@@ -40,7 +40,7 @@ public enum PlanarUvProjection
 public abstract class GreyPrimitive : MonoBehaviour
 {
     [SerializeField]
-    [Tooltip("Coefficient applied to the GreyboxManager's vertex density. " +
+    [Tooltip("Coefficient applied to the GreyPrimitiveManager's vertex density. " +
              "1 = use manager density as-is. 0 = disable subdivision on this primitive.")]
     float _subdivisionMultiplier = 1f;
 
@@ -284,7 +284,7 @@ public abstract class GreyPrimitive : MonoBehaviour
         if (_suppressSubdivision) return 0f;
         float multiplier = Mathf.Max(0f, _subdivisionMultiplier);
         if (multiplier == 0f) return 0f;
-        var manager = GetComponentInParent<GreyboxManager>();
+        var manager = GetComponentInParent<GreyPrimitiveManager>();
         float density = manager != null ? manager.VertexDensity : 0f;
         return density * multiplier;
     }
@@ -405,6 +405,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     // reimport ("Importing…" bar) that interrupts the drag. Touched primitives queue here and bake
     // + persist once when the tool ends the scope.
     static bool s_deferPersist;
+    public static bool IsPersistenceDeferred => s_deferPersist;
     static readonly System.Collections.Generic.HashSet<GreyPrimitive> s_deferredPersist =
         new System.Collections.Generic.HashSet<GreyPrimitive>();
 

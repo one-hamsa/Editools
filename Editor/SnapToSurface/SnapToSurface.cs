@@ -13,6 +13,12 @@ public class SnapToSurface : EditorWindow
     private static Quaternion originalRotation;
     private static HashSet<GameObject> ignoredObjects = new HashSet<GameObject>();
     private static GameObject lastHitSurfaceObject;
+    private const float RotationDegreesPerPoint = 0.5f;
+    private static int s_rotationControl;
+    private static Vector2 s_rotationMouseStart;
+    private static Quaternion s_rotationStart;
+    private static Vector3 s_rotationAxis;
+    private static float s_rotationAngle;
 
     /// <summary>True while an object is being placed (Snap To Surface, or the snap that follows a
     /// Ctrl+G create). Grey Primitive Edit Mode reads this to stop intercepting the scene LMB, so the
@@ -371,25 +377,53 @@ public class SnapToSurface : EditorWindow
         if (e == null)
             return;
 
-        // Shift and Ctrl/Cmd cancel placement. They're the modifiers for scene chords
-        // the user reaches for mid-snap (Alt+Shift+A activate/deactivate, Ctrl+Alt+A
-        // toggle-active), so holding either drops out of snap rather than fighting
-        // them — mirroring the blockingMods gate in ActivateSnapMode. Left un-consumed
-        // so the chord still fires.
+        // Ctrl cancels placement before the click and snaps angles during rotation.
         if (s_suppressModifierCancel) {
             if (!e.shift && !e.control && !e.command)
                 s_suppressModifierCancel = false;
-        } else if (e.shift || e.control || e.command) {
+        } else if (e.shift || (e.control && s_rotationControl == 0) || e.command) {
             ExitSnapMode(false);
             return;
         }
 
-        // Only handle mouse events
-        if (e.type == EventType.MouseDown) {
-            if (e.button == 0) // Left click - confirm
-            {
+        int controlId = GUIUtility.GetControlID("SnapToSurface".GetHashCode(), FocusType.Passive);
+        if (e.type == EventType.Layout)
+            HandleUtility.AddDefaultControl(controlId);
+
+        if (s_rotationControl != 0) {
+            bool rotationDrag = e.type == EventType.MouseDrag && e.button == 0;
+            bool controlChanged = (e.type == EventType.KeyDown || e.type == EventType.KeyUp)
+                && (e.keyCode == KeyCode.LeftControl || e.keyCode == KeyCode.RightControl);
+            if (rotationDrag || controlChanged) {
+                if (rotationDrag)
+                    s_rotationAngle = (e.mousePosition.x - s_rotationMouseStart.x) * RotationDegreesPerPoint;
+                bool snapAngle = controlChanged ? e.type == EventType.KeyDown : e.control;
+                ApplyDragRotation(snapAngle);
+                e.Use();
+                sceneView.Repaint();
+                return;
+            }
+
+            if (e.rawType == EventType.MouseUp && e.button == 0) {
+                ApplyDragRotation(e.control);
                 e.Use();
                 ExitSnapMode(true);
+                return;
+            }
+        }
+
+        if (e.type == EventType.MouseDown) {
+            if (e.button == 0 && s_rotationControl == 0)
+            {
+                if (!s_placementFrozen)
+                    UpdateObjectPosition(e.mousePosition);
+                s_rotationMouseStart = e.mousePosition;
+                s_rotationStart = selectedObject.transform.rotation;
+                s_rotationAngle = 0f;
+                s_rotationAxis = AlignZToSurface ? selectedObject.transform.forward : selectedObject.transform.up;
+                s_rotationControl = controlId;
+                GUIUtility.hotControl = controlId;
+                e.Use();
                 return;
             } else if (e.button == 1) // Right click - cancel
               {
@@ -400,11 +434,17 @@ public class SnapToSurface : EditorWindow
         }
 
         // Update position on mouse move
-        if (e.type == EventType.MouseMove && !s_placementFrozen) {
+        if (e.type == EventType.MouseMove && !s_placementFrozen && s_rotationControl == 0) {
             UpdateObjectPosition(e.mousePosition);
             e.Use();
             sceneView.Repaint();
         }
+    }
+
+    private static void ApplyDragRotation(bool snapAngle) {
+        float angle = snapAngle ? Mathf.Round(s_rotationAngle / 15f) * 15f : s_rotationAngle;
+        selectedObject.transform.rotation = Quaternion.AngleAxis(angle, s_rotationAxis) * s_rotationStart;
+        EditorUtility.SetDirty(selectedObject);
     }
 
     private static void UpdateObjectPosition(Vector2 mousePosition) {
@@ -455,7 +495,7 @@ public class SnapToSurface : EditorWindow
     /// points, never the offset direction.
     /// </summary>
     private static void ApplyPlacement() {
-        if (!isSnapping || selectedObject == null || !s_hasLastHit)
+        if (!isSnapping || selectedObject == null || !s_hasLastHit || s_rotationControl != 0)
             return;
 
         Vector3 normal = s_lastHitNormal;
@@ -512,6 +552,9 @@ public class SnapToSurface : EditorWindow
     }
 
     private static void CleanupSnapMode() {
+        if (s_rotationControl != 0 && GUIUtility.hotControl == s_rotationControl)
+            GUIUtility.hotControl = 0;
+        s_rotationControl = 0;
         isSnapping = false;
         s_placementFrozen = false;
         s_suppressModifierCancel = false;

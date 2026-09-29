@@ -4,7 +4,7 @@ using UnityEngine;
 /// Flat quad primitive for level blockout. A unit 1x1 quad in the local XZ plane,
 /// centered on the pivot, facing local +Y. Size comes from the transform scale.
 ///
-/// Adaptive subdivision follows the Greybox rules: a GreyboxManager anywhere above
+/// Adaptive subdivision follows the Greybox rules: a GreyPrimitiveManager anywhere above
 /// in the hierarchy supplies a vertex density (verts/meter), multiplied by this
 /// primitive's SubdivisionMultiplier, and the quad is gridded per axis using its
 /// world-space edge lengths.

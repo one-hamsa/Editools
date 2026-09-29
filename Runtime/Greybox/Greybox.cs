@@ -12,7 +12,7 @@ using UnityEngine;
 ///
 /// Default shape: 1x1x1 unit cube, Y range [0,1], XZ range [-0.5, 0.5].
 ///
-/// Adaptive subdivision: a GreyboxManager anywhere above in the hierarchy
+/// Adaptive subdivision: a GreyPrimitiveManager anywhere above in the hierarchy
 /// supplies a vertex density (verts/meter). The mesh is subdivided per local
 /// axis to approach that density, using the world-space bounding-box extents.
 /// Edit-time: rebuilt whenever scale or manager density changes.

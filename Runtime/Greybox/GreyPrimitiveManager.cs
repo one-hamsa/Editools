@@ -8,8 +8,15 @@ using UnityEngine;
 /// inspector's change-check, and from its undo handler only when an undo/redo actually changed one of
 /// this manager's values (detected via <see cref="ComputeDensitySignature"/>).
 /// </summary>
-public class GreyboxManager : MonoBehaviour
+[UnityEngine.Scripting.APIUpdating.MovedFrom(true, sourceNamespace: "", sourceAssembly: null, sourceClassName: "GreyboxManager")]
+public class GreyPrimitiveManager : MonoBehaviour
 {
+    [SerializeField]
+    [Tooltip("Default parent for new Grey Primitives outside a manager. Only one manager per scene can be Primary.")]
+    bool _primary;
+
+    public bool Primary => _primary;
+
     [SerializeField]
     [Tooltip("Enable or disable adaptive subdivision for all grey primitives in this hierarchy.")]
     bool _subdivisionEnabled = true;

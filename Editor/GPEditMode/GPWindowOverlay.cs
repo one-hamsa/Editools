@@ -22,7 +22,7 @@ class GPWindowOverlay : Overlay
     static GUIStyle s_header;
 
     static readonly GUIContent k_Subdiv = new GUIContent("Subdiv Mult",
-        "Per-primitive coefficient on the Greybox Manager's vertex density. 1 = use as-is, 0 = no subdivision.");
+        "Per-primitive coefficient on the Grey Primitive Manager's vertex density. 1 = use as-is, 0 = no subdivision.");
     static readonly GUIContent k_Girth = new GUIContent("Base Girth",
         "Base radius of the pipe's circular cross-section, in local units.");
     static readonly GUIContent k_Width = new GUIContent("Base Width",

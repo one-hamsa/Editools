@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.Pool;
 
 /// <summary>
 /// Owns the baked mesh for a Boolean (Subject − Operator) and is the PARENT of both: the Subject and
@@ -13,7 +14,7 @@ using UnityEngine.Rendering;
 /// edge-connected group of CSG fragments) is meshed as a QUAD GRID built IN ITS SOURCE FACE'S OWN
 /// edge directions (recovered from the per-fragment face tag) so the grid stays aligned even on
 /// skewed/parallelogram faces — and the cut edge is clipped exactly (clean, not stair-stepped). Grid
-/// density matches <see cref="GreyboxManager"/>. The boolean is computed only in the editor (the
+/// density matches <see cref="GreyPrimitiveManager"/>. The boolean is computed only in the editor (the
 /// result is serialized), so no CSG runs in a player build.
 /// </summary>
 public class GreyBooleanResult : GreyPrimitive
@@ -515,9 +516,22 @@ public class GreyBooleanResult : GreyPrimitive
         var vs = Infill(UniqueSorted(vCoords), target, worldPerV);
         if (us.Count < 2 || vs.Count < 2) return;
 
-        var gridVert = new Dictionary<long, int>();
+        using var gridLease = DictionaryPool<long, int>.Get(out var gridVert);
+        // Adjacent cells share corner tests; retain only the current and next grid columns.
+        using var insideLease = ListPool<byte>.Get(out var inside);
+        for (int k = 0; k < vs.Count * 2; k++) inside.Add(0);
+        using var edgeLease = ListPool<(Vector2 p, Vector2 q)>.Get(out var columnEdges);
+        using var cellLease = ListPool<Vector2>.Get(out var cell);
+        using var clipLeaseA = ListPool<Vector2>.Get(out var clipBufferA);
+        using var clipLeaseB = ListPool<Vector2>.Get(out var clipBufferB);
         for (int i = 0; i < us.Count - 1; i++)
         {
+            int nextColumn = ((i + 1) & 1) * vs.Count;
+            for (int k = 0; k < vs.Count; k++) inside[nextColumn + k] = 0;
+            columnEdges.Clear();
+            foreach (var edge in cutEdges)
+                if (!((edge.p.x < us[i] && edge.q.x < us[i])
+                    || (edge.p.x > us[i + 1] && edge.q.x > us[i + 1]))) columnEdges.Add(edge);
             for (int j = 0; j < vs.Count - 1; j++)
             {
                 float a0 = us[i], a1 = us[i + 1], b0 = vs[j], b1 = vs[j + 1];
@@ -527,9 +541,9 @@ public class GreyBooleanResult : GreyPrimitive
                 var c11 = new Vector2(a1, b1);
                 var c01 = new Vector2(a0, b1);
 
-                bool fullyInside = InsideAny(c00, frags) && InsideAny(c10, frags)
-                                && InsideAny(c11, frags) && InsideAny(c01, frags)
-                                && !CutCrossesCell(cutEdges, a0, a1, b0, b1);
+                bool fullyInside = InsideGrid(i, j, us, vs, frags, inside) && InsideGrid(i + 1, j, us, vs, frags, inside)
+                                && InsideGrid(i + 1, j + 1, us, vs, frags, inside) && InsideGrid(i, j + 1, us, vs, frags, inside)
+                                && !CutCrossesCell(columnEdges, a0, a1, b0, b1);
 
                 if (fullyInside)
                 {
@@ -551,10 +565,11 @@ public class GreyBooleanResult : GreyPrimitive
                 }
 
                 // Boundary cell: clip the cell against each fragment and emit the pieces (clean cut).
-                var cell = new List<Vector2> { c00, c10, c11, c01 };
+                cell.Clear();
+                cell.Add(c00); cell.Add(c10); cell.Add(c11); cell.Add(c01);
                 foreach (var frag in frags)
                 {
-                    var clipped = ClipConvex(cell, frag);
+                    var clipped = ClipConvex(cell, frag, clipBufferA, clipBufferB);
                     if (clipped.Count < 3) continue;
                     EmitFan(clipped, origin, uDir, vDir, normal, uvScale, flip, verts, normals, uvs, tris);
                 }
@@ -728,6 +743,14 @@ public class GreyBooleanResult : GreyPrimitive
         return poly;
     }
 
+    static bool InsideGrid(int i, int j, List<float> us, List<float> vs, List<Vector2[]> frags, List<byte> cache)
+    {
+        int index = (i & 1) * vs.Count + j;
+        if (cache[index] == 0)
+            cache[index] = InsideAny(new Vector2(us[i], vs[j]), frags) ? (byte)2 : (byte)1;
+        return cache[index] == 2;
+    }
+
     static bool InsideAny(Vector2 p, List<Vector2[]> frags)
     {
         foreach (var f in frags) if (PointInConvex(p, f)) return true;
@@ -753,6 +776,8 @@ public class GreyBooleanResult : GreyPrimitive
     {
         foreach (var e in edges)
         {
+            if ((e.p.x < a0 && e.q.x < a0) || (e.p.x > a1 && e.q.x > a1)
+                || (e.p.y < b0 && e.q.y < b0) || (e.p.y > b1 && e.q.y > b1)) continue;
             // Endpoint strictly inside the cell?
             if (StrictInside(e.p, a0, a1, b0, b1) || StrictInside(e.q, a0, a1, b0, b1)) return true;
             // Crosses a cell edge?
@@ -783,22 +808,25 @@ public class GreyBooleanResult : GreyPrimitive
     static float Cross(Vector2 a, Vector2 b) => a.x * b.y - a.y * b.x;
 
     // Sutherland–Hodgman: clip convex 'subject' by convex CCW 'clip'.
-    static List<Vector2> ClipConvex(List<Vector2> subject, Vector2[] clip)
+    static List<Vector2> ClipConvex(List<Vector2> subject, Vector2[] clip, List<Vector2> bufferA, List<Vector2> bufferB)
     {
-        var output = new List<Vector2>(subject);
+        var output = bufferA;
+        output.Clear();
+        output.AddRange(subject);
         int cn = clip.Length;
         for (int c = 0; c < cn && output.Count > 0; c++)
         {
             Vector2 A = clip[c], B = clip[(c + 1) % cn];
             Vector2 edge = B - A;
             var input = output;
-            output = new List<Vector2>(input.Count + 1);
+            output = ReferenceEquals(input, bufferA) ? bufferB : bufferA;
+            output.Clear();
+            Vector2 prev = input[input.Count - 1];
+            bool prevIn = Cross(edge, prev - A) >= -1e-7f;
             for (int i = 0; i < input.Count; i++)
             {
                 Vector2 cur = input[i];
-                Vector2 prev = input[(i - 1 + input.Count) % input.Count];
                 bool curIn = Cross(edge, cur - A) >= -1e-7f;
-                bool prevIn = Cross(edge, prev - A) >= -1e-7f;
                 if (curIn)
                 {
                     if (!prevIn) output.Add(LineIntersect(prev, cur, A, B));
@@ -808,6 +836,8 @@ public class GreyBooleanResult : GreyPrimitive
                 {
                     output.Add(LineIntersect(prev, cur, A, B));
                 }
+                prev = cur;
+                prevIn = curIn;
             }
         }
         return output;
