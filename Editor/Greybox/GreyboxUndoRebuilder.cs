@@ -57,7 +57,7 @@ static class GreyboxUndoRebuilder
                 continue;
 
             stream.GetChangeGameObjectOrComponentPropertiesEvent(i, out var data);
-            var obj = EditorUtility.InstanceIDToObject(data.instanceId);
+            var obj = EditorUtility.EntityIdToObject(data.instanceId);
             if (obj == null) continue;
 
             switch (obj)

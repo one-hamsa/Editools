@@ -574,7 +574,6 @@ public class EditoolsOverlay : ToolbarOverlay
 			_displayRoot.RegisterCallback<WheelEvent>(e =>
 			{
 				e.StopPropagation();
-				e.PreventDefault();
 			});
 
 			_displayRoot.RegisterCallback<PointerDownEvent>(e =>

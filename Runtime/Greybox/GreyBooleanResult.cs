@@ -727,7 +727,7 @@ public class GreyBooleanResult : GreyPrimitive
         int idx = verts.Count;
         verts.Add(p);
         normals.Add(normal);
-        uvs.Add(PlanarUv(p, normal, uvScale));
+        uvs.Add(BoxProjectUv(p, normal, uvScale));
         return idx;
     }
 
@@ -895,7 +895,7 @@ public class GreyBooleanResult : GreyPrimitive
         if (ra != rb) parent[ra] = rb;
     }
 
-    static Vector2 PlanarUv(Vector3 p, Vector3 n, float scale)
+    static Vector2 BoxProjectUv(Vector3 p, Vector3 n, float scale)
     {
         float ax = Mathf.Abs(n.x), ay = Mathf.Abs(n.y), az = Mathf.Abs(n.z);
         Vector2 uv;

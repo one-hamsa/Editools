@@ -47,7 +47,7 @@ public static class HierarchyHeatmap
     private static bool projectReflectionSetup = false;
 
     // Resolved-object caches. Walking markedHierarchyItems / recentHierarchySelections
-    // and calling EditorUtility.InstanceIDToObject for every entry on every row redraw
+    // and calling EditorUtility.EntityIdToObject for every entry on every row redraw
     // (hundreds of rows * 5-10 entries) is what makes this expensive. We rebuild
     // these caches lazily when the source lists change, then per-row code just
     // walks the cached Transforms/strings.
@@ -122,7 +122,7 @@ public static class HierarchyHeatmap
         if (s_markedHierarchyTransforms.Length != markedHierarchyItems.Count)
             s_markedHierarchyTransforms = new Transform[markedHierarchyItems.Count];
         for (int i = 0; i < markedHierarchyItems.Count; i++) {
-            var go = EditorUtility.InstanceIDToObject(markedHierarchyItems[i]) as GameObject;
+            var go = EditorUtility.EntityIdToObject(markedHierarchyItems[i]) as GameObject;
             s_markedHierarchyTransforms[i] = go != null ? go.transform : null;
         }
         s_markedHierarchyDirty = false;
@@ -133,7 +133,7 @@ public static class HierarchyHeatmap
         if (s_recentHierarchyTransforms.Length != recentHierarchySelections.Count)
             s_recentHierarchyTransforms = new Transform[recentHierarchySelections.Count];
         for (int i = 0; i < recentHierarchySelections.Count; i++) {
-            var go = EditorUtility.InstanceIDToObject(recentHierarchySelections[i]) as GameObject;
+            var go = EditorUtility.EntityIdToObject(recentHierarchySelections[i]) as GameObject;
             s_recentHierarchyTransforms[i] = go != null ? go.transform : null;
         }
         s_recentHierarchyDirty = false;
@@ -447,7 +447,7 @@ public static class HierarchyHeatmap
 
     private static void OnHierarchyItemGUI(int instanceID, Rect selectionRect) {
         if (!EditoolsOverlay.IsActive) return;
-        GameObject go = EditorUtility.InstanceIDToObject(instanceID) as GameObject;
+        GameObject go = EditorUtility.EntityIdToObject(instanceID) as GameObject;
         if (go == null) return;
 
         if (!hierarchyReflectionSetup) {
@@ -479,7 +479,7 @@ public static class HierarchyHeatmap
         }
 
         // Check for marked children in collapsed parents. Uses the cached
-        // Transform array so we don't InstanceIDToObject per row per repaint.
+        // Transform array so we don't EntityIdToObject per row per repaint.
         if (hasChildren && !isExpanded && !isMarked) {
             EnsureMarkedHierarchyTransforms();
             var parentT = go.transform;

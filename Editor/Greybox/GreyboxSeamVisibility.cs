@@ -74,16 +74,16 @@ static class GreyboxSeamVisibility
             {
                 case ObjectChangeKind.CreateGameObjectHierarchy:
                     stream.GetCreateGameObjectHierarchyEvent(i, out var created);
-                    RegisterRoot(EditorUtility.InstanceIDToObject(created.instanceId) as GameObject);
+                    RegisterRoot(EditorUtility.EntityIdToObject(created.instanceId) as GameObject);
                     break;
                 case ObjectChangeKind.ChangeGameObjectStructure:
                     stream.GetChangeGameObjectStructureEvent(i, out var structure);
-                    RegisterRoot(EditorUtility.InstanceIDToObject(structure.instanceId) as GameObject);
+                    RegisterRoot(EditorUtility.EntityIdToObject(structure.instanceId) as GameObject);
                     break;
                 case ObjectChangeKind.ChangeGameObjectOrComponentProperties:
                     stream.GetChangeGameObjectOrComponentPropertiesEvent(i, out var properties);
-                    Register(EditorUtility.InstanceIDToObject(properties.instanceId) as Greybox);
-                    GreyPrimitiveManagerEditor.Register(EditorUtility.InstanceIDToObject(properties.instanceId) as GreyPrimitiveManager);
+                    Register(EditorUtility.EntityIdToObject(properties.instanceId) as Greybox);
+                    GreyPrimitiveManagerEditor.Register(EditorUtility.EntityIdToObject(properties.instanceId) as GreyPrimitiveManager);
                     break;
             }
         }

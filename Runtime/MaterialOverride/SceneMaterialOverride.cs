@@ -300,7 +300,7 @@ public static class SceneMaterialOverride
 	static IEnumerable<Renderer> GetCandidateRenderers()
 	{
 		if (_scopeRoots == null || _scopeRoots.Count == 0)
-			return UnityEngine.Object.FindObjectsOfType<Renderer>(false);
+			return UnityEngine.Object.FindObjectsByType<Renderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
 
 		var set = new HashSet<Renderer>();
 		foreach (var root in _scopeRoots)
