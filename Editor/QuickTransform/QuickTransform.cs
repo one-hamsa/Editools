@@ -253,6 +253,15 @@ static partial class QuickTransform
     static void OnSceneGUI(SceneView sv)
     {
         Event e = Event.current;
+        Transform[] selected = Selection.transforms;
+        if (HasDrivenTransform(selected) || HasDrivenTransform(dragTargets))
+        {
+            wHeld = eHeld = rHeld = rmbHeld = false;
+            suppressKeyUpFor = Mode.None;
+            if (phase != Phase.Idle) GUIUtility.hotControl = 0;
+            ResetState();
+            return;
+        }
 
         if (e.type == EventType.MouseLeaveWindow)
         {
@@ -298,7 +307,6 @@ static partial class QuickTransform
             if (suppress) { suppressKeyUpFor = Mode.None; return; }
         }
 
-        Transform[] selected = Selection.transforms;
         if (selected == null || selected.Length == 0)
         {
             if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
@@ -1675,6 +1683,14 @@ static partial class QuickTransform
         dragButton = 0;
         shiftHeldOnPress    = false;
         didDuplicate        = false;
+    }
+
+    static bool HasDrivenTransform(Transform[] targets)
+    {
+        if (targets == null) return false;
+        foreach (var target in targets)
+            if (target is RectTransform rect && rect != null && rect.drivenByObject != null) return true;
+        return false;
     }
 
     static bool ModeKeyReleased()
