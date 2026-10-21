@@ -5,8 +5,8 @@ using UnityEngine;
 using UnityEngine.UIElements;
 
 /// <summary>
-/// Floating, minimizable Scene View panel that appears whenever a single Grey Primitive is
-/// selected. Hosts the Edit Mode toggle, the primitive's key properties, its functions, and the
+/// Floating, minimizable Scene View panel that appears only while every selected object is a Grey
+/// Primitive of the same type (e.g. only Greyboxes). Hosts the Edit Mode toggle, the primitive's key properties, its functions, and the
 /// Edit Mode settings — so the common edits don't need the Inspector. Content is drawn with IMGUI
 /// (matching the rest of Editools) and adapts to the selected GP type.
 ///
@@ -68,7 +68,22 @@ class GPWindowOverlay : Overlay
         GPEdit.Unsubscribe();
     }
 
-    void UpdateVisibility() => displayed = GPEdit.SelectedPrimitive != null;
+    void UpdateVisibility() => displayed = IsSingleTypeSelection();
+
+    static bool IsSingleTypeSelection()
+    {
+        var selected = Selection.gameObjects;
+        if (selected.Length == 0) return false;
+
+        System.Type type = null;
+        foreach (var go in selected)
+        {
+            if (!go.TryGetComponent<GreyPrimitive>(out var gp)) return false;
+            if (type == null) type = gp.GetType();
+            else if (gp.GetType() != type) return false;
+        }
+        return true;
+    }
 
     // ─── GUI ────────────────────────────────────────────────────
 

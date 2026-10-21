@@ -352,6 +352,9 @@ public class EditoolsOverlay : ToolbarOverlay
 		RenderTexture.active = prevActive;
 		RenderTexture.ReleaseTemporary(sceneRT);
 
+		if (SceneViewVertexCounter.Enabled)
+			SceneViewVertexCounter.DrawToCapture(sceneView, tex);
+
 		// Commit
 		if (_screenshots.Count >= MaxScreenshots)
 		{
@@ -526,6 +529,9 @@ public class EditoolsOverlay : ToolbarOverlay
 		}
 
 		overlay.CheckViewportSize(sceneView);
+
+		if (overlay.displayed)
+			SceneViewVertexCounter.OnSceneGUI(sceneView);
 
 		if (overlay._activeIndex < 0 || overlay._activeIndex >= overlay._screenshots.Count)
 			return;
@@ -971,7 +977,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 17 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 19 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1031,10 +1037,24 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Alt + left-click in the Scene View to select the material of the object under the cursor " +
 		"(first material slot). The material is highlighted in the Project window.");
 
+	static readonly GUIContent k_AltDeselection = new GUIContent(
+		"Alt-Deselection",
+		"Ctrl + left-click in the Scene View only adds the object under the cursor to the selection " +
+		"(replaces Unity's Ctrl + click toggle). Alt + left-click without dragging removes it. " +
+		"Box selection and Alt + drag camera orbit are unchanged.");
+
 	static readonly GUIContent k_SelectShadowOnly = new GUIContent(
 		"Select Shadow Only",
 		"Selects all scene objects whose MeshRenderer has Cast Shadows set to Shadows Only. " +
 		"Includes inactive objects.");
+
+	static readonly GUIContent k_DistanceSelect = new GUIContent(
+		"Distance Select",
+		"Ctrl+= — adds objects near the selection to the selection and opens its settings panel. " +
+		"Distance is measured from pivot, bounding box or mesh surface to pivot, bounding box or mesh surface.\n\n" +
+		"Aggregate on: each press searches one interval from the whole current selection.\n" +
+		"Aggregate off: each press searches from the original selection, one interval further each time, " +
+		"until the selection is changed by something else.");
 
 	static readonly GUIContent k_PlaneToQuad = new GUIContent(
 		"Plane → Quad",
@@ -1047,6 +1067,15 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"FPS Counter",
 		"Shows a live FPS counter in the top-left corner of each Scene View. " +
 		"Displays average FPS and frame time in milliseconds. Tracked independently per view.");
+
+	static readonly GUIContent k_VertexCounter = new GUIContent(
+		"Vertex Counter",
+		"Shows the number of vertices sent to the GPU, under the FPS counter in each Scene View: " +
+		"whole scene, inside the Scene View frustum, and the selection (with children, ignoring the frustum).\n\n" +
+		"Counts one draw per material slot using its submesh's vertices, so hard-edge and UV-seam splits " +
+		"and multi-material redraws are included. Only Mesh and Skinned Mesh Renderers that draw are counted: " +
+		"enabled, not Shadows Only, and in the LOD the Scene View camera currently shows.\n\n" +
+		"Included in Editools scene captures.");
 
 	static readonly GUIContent k_GreyPrimitives = new GUIContent(
 		"Grey Primitives",
@@ -1121,12 +1150,20 @@ class EditoolsSettingsPopup : PopupWindowContent
 		DrawToggleRow(k_SelectMaterial, SelectMaterial.Enabled,
 			v => SelectMaterial.Enabled = v, null);
 
+		DrawToggleRow(k_AltDeselection, AltDeselection.Enabled,
+			v => AltDeselection.Enabled = v, null);
+
 		DrawSubmenuOnlyRow(k_SelectShadowOnly, _ => SelectShadowOnly());
+
+		DrawSubmenuOnlyRow(k_DistanceSelect, _ => DistanceSelect.Activate());
 
 		DrawSubmenuOnlyRow(k_PlaneToQuad, _ => PlaneToQuad.ReplaceSelectedPlanes());
 
 		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
 			v => SceneViewFpsCounter.Enabled = v, null);
+
+		DrawToggleRow(k_VertexCounter, SceneViewVertexCounter.Enabled,
+			v => SceneViewVertexCounter.Enabled = v, null);
 
 		DrawSubmenuOnlyRow(k_GreyPrimitives,
 			rect => UnityEditor.PopupWindow.Show(rect, new GreyPrimitivesSettingsPopup()));

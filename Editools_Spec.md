@@ -39,6 +39,9 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/MassRename/MassRename.cs` — F2 batch rename for multiple selected objects/assets
 - `Editor/SelectMaterial/SelectMaterial.cs` — I+click to select material under cursor
 - `Editor/SceneViewFpsCounter/SceneViewFpsCounter.cs` — per-SceneView FPS overlay
+- `Editor/SceneViewVertexCounter/SceneViewVertexCounter.cs` — per-SceneView GPU vertex count overlay (total / view / selected)
+- `Editor/DistanceSelect/DistanceSelect.cs` — Ctrl+= grow selection by distance + settings panel overlay
+- `Editor/AltDeselection/AltDeselection.cs` — Ctrl+click add-only / Alt+click remove-only Scene View selection
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -364,6 +367,39 @@ Live FPS overlay in the top-left corner of each Scene View.
 - Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `SceneViewFpsCounter_Enabled`, default false)
 - Continuously calls `sceneView.Repaint()` to keep the counter updating
 
+### 11a. SceneViewVertexCounter (Editor)
+
+GPU vertex count readout under the FPS counter in each Scene View: whole scene, Scene View frustum, and selection (with children, frustum ignored).
+
+- Counts one draw per material slot using the submesh's vertex range (`SubMeshDescriptor.vertexCount`); slots beyond the submesh count redraw the last submesh. Mesh vertex counts already include hard-edge / UV-seam splits; unused attributes (tangents, UVs) don't change the count.
+- Only Mesh / Skinned Mesh Renderers that draw: enabled, active, not `forceRenderingOff`, not Shadows Only, and in the LODGroup level the Scene View camera selects (screen relative height, `QualitySettings.lodBias` / `maximumLODLevel`). Disabled LODGroups don't filter.
+- View count also skips objects hidden by Scene Visibility. In a Prefab Stage only the prefab contents are counted.
+- Driven from `EditoolsOverlay`'s scene GUI while the overlay is displayed. Recounts lazily: hierarchy / object changes, undo, selection, prefab stage and play mode changes mark it dirty; camera changes are detected on repaint and throttled to 10 Hz.
+- `EditoolsOverlay.CaptureSceneView` calls `DrawToCapture` to burn the readout into captured screenshots.
+- Toggle via Editools Settings checkbox (`EditorPrefs`: `SceneViewVertexCounter_Enabled`, default false)
+
+### 11b. DistanceSelect (Editor)
+
+Adds GameObjects near the selection to the selection. Activated by `[Shortcut("Editools/Distance Select")]` (Ctrl+=) or the Editools Settings row; activation also shows the `DistanceSelectOverlay` panel (From / To / Interval / Aggregate, Select, Close).
+
+- Distance modes for From (selected objects) and To (candidates): Pivot, Bounding Box (own `Renderer.bounds`), Mesh (own MeshFilter / SkinnedMeshRenderer surface, skinned meshes baked). Objects missing the needed data are skipped.
+- Candidates: every active GameObject in the loaded scenes (or the open Prefab Stage) not hidden from the Hierarchy and not already selected.
+- Aggregate on: each activation searches one interval from the current selection. Off: the search runs from the original selection at `interval * step`; the step grows while the selection is still the one the last step produced, otherwise a new search starts from the current selection.
+- Mesh distance: each mesh's vertices against the other's triangles, both ways, through a per-mesh uniform triangle grid (cell size >= search distance). Surfaces crossing without a vertex near the other surface are missed. Broad phase rejects by world AABB gap first.
+- Entire Prefabs: each found object is replaced by its outermost enclosing prefab instance root that contains none of the search's source objects (origins, or the selection in aggregate mode). Model prefabs are skipped as roots. Objects with no such root are selected as they are.
+- Reset Selection (panel button): selects only the search's origin objects (the selection when the search started, in either mode) and ends the search. Enabled while a search has origins on record.
+- Settings in `EditorPrefs` (`Editools_DistanceSelect_*`); interval defaults to 0.5.
+
+### 11c. AltDeselection (Editor, `[InitializeOnLoad]`)
+
+Separates Scene View click selection into an add modifier and a remove modifier. Off by default; Editools Settings row (`EditorPrefs`: `AltDeselection_Enabled`).
+
+- `Ctrl + LMB` (no drag) — adds the first *unselected* object under the cursor (selection base, i.e. prefab root). Selected hierarchies are passed to `PickGameObject` as `ignore`, so a selected object in front does not block the click. Unity's own Ctrl+click toggle is suppressed.
+- `Alt + LMB` (no drag) — removes the first *selected* object under the cursor: picks front to back with a growing `ignore` list until a selected hierarchy is hit, then removes that object and every selected ancestor. Alt+drag orbit, box selection and Shift+click are untouched.
+- Mechanism: the click is recorded (and picked) on `MouseDown` in `duringSceneGui`; the release is handled in `beforeSceneGui`, which runs before `RectSelection`. In Unity 6 modifier+click picking is a mouse `[Shortcut]` that fires on release and sends the `SceneViewPickingEventCommand` command event to the view; the Add path `Use()`s that command, which is what stops Unity's toggle. The Remove path acts on `rawType == MouseUp` (the orbit clutch consumes the real event).
+- Click validity: cursor moved <= 6 px (Unity's click/box threshold). Camera movement is not checked — the orbit tool rotates on any Alt+drag, so a few-pixel nudge is still a click. Only Escape cancels on `KeyDown`; a held modifier auto-repeats `KeyDown`.
+- `HandleUtility.PickGameObject(..., ignore, filter)` with a `filter` is not positional (returned the last selected object regardless of cursor) — do not use it for picking among the selection.
+
 ### 12. Greybox (Runtime + Editor)
 
 Deformable box primitive for level blockout. Created via `GameObject > 3D Object > Greybox`.
@@ -496,6 +532,10 @@ the RMB split loop with a faint green wire. Active RMB drags stay green.
 All selected primitives expose their controls concurrently, including recursive Boolean
 operands. Only the nearest eligible control handles input, and an active drag remains bound
 to its original object. The properties panel edits the active primitive.
+The Grey Primitive window opens only while every selected object is a Grey Primitive of the
+same type (one or more Greyboxes, Greypipes, Greyroads, ...). It stays closed when the
+selection mixes primitive types or includes any non-primitive object, and re-evaluates on
+every selection change.
 In Edit Mode, selecting a seam-linked greybox expands the selection to its entire connected
 group. Entering Edit Mode also expands the current selection. Outside Edit Mode, selection
 does not expand automatically.
@@ -552,7 +592,7 @@ Existing box-only compound references and legacy hierarchy ownership remain read
 - `GPEditCoordinates.cs` - coordinate frames, common drag/axis-lock behavior and hover arrows
 - `GPEditShared.cs` — shared hover math, colors, and lookup tables; deliberately independent of QuickTransform
 - `GPEditTooltip.cs` — Scene View tooltip listing the actions for the selected primitive type
-- `GPWindowOverlay.cs` — floating Scene View panel; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe), so there is no `[InitializeOnLoad]` side effect
+- `GPWindowOverlay.cs` — floating Scene View panel, shown only for a single-type Grey Primitive selection; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe), so there is no `[InitializeOnLoad]` side effect
 
 **Migration note:** This system replaced QuickTransform's former Special (Q-held) mode and its
 Greybox edge/extrude special-casing. The Greypipe girth and Greyroad width quick-adjust drags
