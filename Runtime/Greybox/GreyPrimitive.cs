@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 #if UNITY_EDITOR
 using UnityEditor;
@@ -25,8 +26,10 @@ public enum PlanarUvProjection
 /// <summary>
 /// Base class for grey primitives. Owns the serialized mesh and exposes <see cref="RebuildMesh"/>;
 /// rebuilds run only when explicitly triggered — inspector change-check, scene tools, undo/redo,
-/// the "Rebuild Mesh" button, or <see cref="Reset"/>. Nothing rebuilds on load, domain reload, or
-/// any other Unity callback.
+/// the "Rebuild Mesh" button, <see cref="Reset"/>, or the split of a freshly duplicated or pasted
+/// copy off its source's scene-embedded meshes (SplitSharedSceneEmbeddedMeshes, driven by
+/// GreyboxSeamVisibility from the hierarchy-creation change event). Nothing rebuilds on load,
+/// domain reload, or any other Unity callback.
 ///
 /// Mesh persistence: a primitive on a plain scene object keeps its meshes scene-embedded (serialized
 /// into the scene file). A primitive baked inside a prefab (prefab stage, or directly on the asset)
@@ -264,7 +267,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     public void ApplyColliderMesh()
     {
         bool assetBacked = !string.IsNullOrEmpty(_meshOwnerGuid);
-        if (_colliderMesh == null || (!assetBacked && _colliderMeshOwnerId != GetInstanceID()))
+        if (_colliderMesh == null || (!assetBacked && !OwnsSceneEmbeddedMesh(_colliderMesh, _colliderMeshOwnerId)))
             RebuildMesh();
 
         var mc = GetComponent<MeshCollider>();
@@ -446,15 +449,92 @@ public abstract class GreyPrimitive : MonoBehaviour
     // A mesh is a legal live-write target only when this bake would own it anyway: an asset-contained
     // mesh only inside the container (prefab stage / asset) it's embedded in — a drag on a prefab
     // instance must fork instead of deforming the shared prefab bake in memory — and a scene-embedded
-    // mesh only when the owner id matches (a fresh duplicate still shares the source's mesh and must
-    // split off, so a drag doesn't write geometry into the original's mesh).
+    // mesh only when this primitive owns it (see OwnsSceneEmbeddedMesh).
     bool CanWriteLiveInto(Mesh mesh, int ownerId, string containerPath)
     {
         if (mesh == null) return false;
         if (AssetDatabase.Contains(mesh))
             return containerPath != null && AssetDatabase.GetAssetPath(mesh) == containerPath;
-        return ownerId == GetInstanceID();
+        return OwnsSceneEmbeddedMesh(mesh, ownerId);
     }
+
+    // Scene-embedded meshes confirmed by the reference scan in OwnsSceneEmbeddedMesh. The serialized
+    // owner ids are stale after a scene load and stay that way (rewriting them churns the scene), so
+    // these keep the scan to once per mesh per load instead of once per drag tick.
+    [System.NonSerialized] Mesh _ownedMesh;
+    [System.NonSerialized] Mesh _ownedColliderMesh;
+
+    /// <summary>
+    /// True when the scene-embedded <paramref name="mesh"/> belongs to this primitive: it created the
+    /// mesh since the scene was loaded, or no other primitive references it. A duplicated object still
+    /// shares the source's mesh and must split off before writing geometry into it. Instance ids
+    /// change on every scene load, so after a load the reference check is what keeps an unshared
+    /// mesh - a rebuild then rewrites it in place instead of replacing the Mesh object.
+    /// </summary>
+    bool OwnsSceneEmbeddedMesh(Mesh mesh, int ownerId)
+    {
+        if (ownerId == GetInstanceID()) return true;
+        if (ReferenceEquals(mesh, _ownedMesh) || ReferenceEquals(mesh, _ownedColliderMesh)) return true;
+        if (IsReferencedByOtherPrimitive(mesh)) return false;
+
+        if (ReferenceEquals(mesh, _mesh)) _ownedMesh = mesh;
+        else _ownedColliderMesh = mesh;
+        return true;
+    }
+
+    // The primitives a scene-embedded mesh can be shared with: the open prefab stage's contents, or
+    // every primitive in the loaded scenes.
+    static GreyPrimitive[] LoadedPrimitives(GameObject context)
+    {
+        var stage = PrefabStageUtility.GetPrefabStage(context);
+        return stage != null
+            ? stage.prefabContentsRoot.GetComponentsInChildren<GreyPrimitive>(includeInactive: true)
+            : FindObjectsByType<GreyPrimitive>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+    }
+
+    bool IsReferencedByOtherPrimitive(Mesh mesh)
+    {
+        foreach (var other in LoadedPrimitives(gameObject))
+            if (other != this && (other._mesh == mesh || other._colliderMesh == mesh))
+                return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Gives freshly duplicated or pasted primitives their own meshes. <paramref name="created"/> holds
+    /// every primitive of the hierarchies just created. One scan of the loaded primitives collects the
+    /// scene-embedded meshes that primitives outside that set reference; each created primitive whose
+    /// render or collider mesh is among them drops the reference and rebuilds, so the bake creates new
+    /// Mesh objects without scanning again. Sources keep their meshes. Asset-contained (prefab) bakes
+    /// are shared by design and are left alone. The prefab stage is decided once, from the first
+    /// primitive.
+    /// </summary>
+    public static void SplitSharedSceneEmbeddedMeshes(List<GreyPrimitive> created)
+    {
+        if (created.Count == 0) return;
+        using var createdScope = UnityEngine.Pool.HashSetPool<int>.Get(out var createdIds);
+        using var sharedScope = UnityEngine.Pool.HashSetPool<int>.Get(out var sharedMeshIds);
+        foreach (var primitive in created) createdIds.Add(primitive.GetInstanceID());
+        foreach (var other in LoadedPrimitives(created[0].gameObject))
+        {
+            if (createdIds.Contains(other.GetInstanceID())) continue;
+            if (other._mesh != null) sharedMeshIds.Add(other._mesh.GetInstanceID());
+            if (other._colliderMesh != null) sharedMeshIds.Add(other._colliderMesh.GetInstanceID());
+        }
+        foreach (var primitive in created)
+        {
+            bool splitMesh = IsSharedSceneEmbeddedMesh(primitive._mesh, sharedMeshIds);
+            bool splitCollider = primitive.UsesColliderMesh && IsSharedSceneEmbeddedMesh(primitive._colliderMesh, sharedMeshIds);
+            if (!splitMesh && !splitCollider) continue;
+            // A null slot makes PrepareBakeTargets create a fresh mesh without another ownership scan.
+            if (splitMesh) primitive._mesh = null;
+            if (splitCollider) primitive._colliderMesh = null;
+            primitive.RebuildMesh();
+        }
+    }
+
+    static bool IsSharedSceneEmbeddedMesh(Mesh mesh, HashSet<int> sharedMeshIds) =>
+        mesh != null && !AssetDatabase.Contains(mesh) && sharedMeshIds.Contains(mesh.GetInstanceID());
 
     // ─── Mesh persistence (editor) ───────────────────────────────
 
@@ -465,7 +545,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     /// <summary>
     /// Decides, before generation, which Mesh objects this bake writes into.
     /// Scene-owned (plain scene object, prefab instance in a scene, unpacked/detached object):
-    /// scene-embedded meshes, recreated when the instance id doesn't match (a duplicated object
+    /// scene-embedded meshes, recreated when another primitive shares them (a duplicated object
     /// splits off its own mesh) or when the current mesh is asset-contained — the first local bake
     /// on a prefab instance forks off the prefab's embedded bake this way, and the changed
     /// references serialize as regular prefab instance overrides. The prefab's own bake is never
@@ -483,7 +563,7 @@ public abstract class GreyPrimitive : MonoBehaviour
         if (_bakeContainerPath == null)
         {
             bool detach = _mesh != null && AssetDatabase.Contains(_mesh);
-            if (detach || _mesh == null || _meshOwnerId != GetInstanceID())
+            if (detach || _mesh == null || !OwnsSceneEmbeddedMesh(_mesh, _meshOwnerId))
             {
                 _mesh = new Mesh { name = $"{GetType().Name} Mesh" };
                 _meshOwnerId = GetInstanceID();
@@ -491,7 +571,7 @@ public abstract class GreyPrimitive : MonoBehaviour
             if (UsesColliderMesh)
             {
                 bool detachCollider = _colliderMesh != null && AssetDatabase.Contains(_colliderMesh);
-                if (detachCollider || _colliderMesh == null || _colliderMeshOwnerId != GetInstanceID())
+                if (detachCollider || _colliderMesh == null || !OwnsSceneEmbeddedMesh(_colliderMesh, _colliderMeshOwnerId))
                 {
                     _colliderMesh = new Mesh { name = $"{GetType().Name} Collider" };
                     _colliderMeshOwnerId = GetInstanceID();
