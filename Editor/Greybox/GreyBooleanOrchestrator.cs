@@ -9,6 +9,7 @@ using UnityEngine.SceneManagement;
 static class GreyBooleanOrchestrator
 {
     const string k_Label = "Edit Boolean";
+    const string k_ExplodeLabel = "Explode Boolean";
     static readonly Dictionary<int, GreyPrimitive> s_nodes = new Dictionary<int, GreyPrimitive>();
     static readonly Dictionary<int, long> s_structure = new Dictionary<int, long>();
     static readonly HashSet<int> s_pending = new HashSet<int>();
@@ -384,6 +385,122 @@ static class GreyBooleanOrchestrator
             RebuildTree(GreyGeometry.Root(subject));
             ReBakeFrom(subject);
         }
+    }
+
+    // Dissolves the whole geometry tree containing the input into independent, visible primitives under the
+    // root's parent. Inputs also consumed outside the tree stay with those consumers; welded groups keep a link folder.
+    internal static void Explode(GreyPrimitive input)
+    {
+        var root = GreyGeometry.Root(input);
+        if (root == null) return; // Root has already logged an ownership cycle.
+        using var nodesScope = ListPool<GreyPrimitive>.Get(out var nodes);
+        using var leavesScope = ListPool<GreyPrimitive>.Get(out var leaves);
+        using var sharedScope = ListPool<GreyPrimitive>.Get(out var shared);
+        using var pendingScope = ListPool<GreyPrimitive>.Get(out var pending);
+        using var consumersScope = ListPool<GreyPrimitive>.Get(out var consumers);
+        using var visitedScope = HashSetPool<int>.Get(out var visited);
+        bool hasResult = false;
+        pending.Add(root);
+        for (int i = 0; i < pending.Count; i++)
+        {
+            var node = pending[i];
+            if (node == null || !visited.Add(node.GetInstanceID())) continue;
+            consumers.Clear();
+            CollectConsumers(node, consumers);
+            // Inputs of one tree never overlap, so a second consumer always lies outside the tree.
+            if (consumers.Count > 1) { shared.Add(node); continue; }
+            if (node is GreyBooleanResult result)
+            {
+                hasResult = true;
+                nodes.Add(result);
+                pending.Add(result.Subject);
+                pending.Add(result.Operator);
+            }
+            else if (node is GreyboxCompound compound)
+            {
+                nodes.Add(compound);
+                pending.AddRange(compound.Parts);
+            }
+            else leaves.Add(node);
+        }
+        if (!hasResult)
+        {
+            Debug.LogWarning("[GreyBoolean] Explode needs a Boolean Result; this geometry contains none.", input);
+            return;
+        }
+        foreach (var node in nodes)
+            if (!CanMove(node))
+            {
+                Debug.LogWarning("[GreyBoolean] Open the prefab to explode its internal Booleans.", node);
+                return;
+            }
+        foreach (var leaf in leaves)
+            if (InsideNodes(leaf.transform, nodes) && !CanMove(leaf))
+            {
+                Debug.LogWarning("[GreyBoolean] Open the prefab to explode its internal Booleans.", leaf);
+                return;
+            }
+
+        Undo.IncrementCurrentGroup();
+        int undoGroup = Undo.GetCurrentGroup();
+        Undo.SetCurrentGroupName(k_ExplodeLabel);
+        var host = root.transform.parent;
+
+        using var treeScope = HashSetPool<int>.Get(out var tree);
+        foreach (var node in nodes) tree.Add(node.GetInstanceID());
+        foreach (var kept in shared)
+        {
+            consumers.Clear();
+            CollectConsumers(kept, consumers);
+            GreyPrimitive consumer = null;
+            foreach (var candidate in consumers)
+                if (!tree.Contains(candidate.GetInstanceID())) { consumer = candidate; break; }
+            if (kept.GeometryOwner == null || tree.Contains(kept.GeometryOwner.GetInstanceID())) SetOwner(kept, consumer);
+            if (InsideNodes(kept.transform, nodes)) MoveInput(kept, host);
+        }
+
+        // Move nested members first so moving an ancestor cannot change their world geometry.
+        leaves.Sort((a, b) => GreyboxLinkHierarchy.Depth(b.transform).CompareTo(GreyboxLinkHierarchy.Depth(a.transform)));
+        foreach (var leaf in leaves)
+        {
+            if (leaf.BooleanOperator != null) SetBoolean(leaf, null, leaf.BooleanCutMaterial);
+            SetOwner(leaf, null);
+            if (InsideNodes(leaf.transform, nodes)) MoveInput(leaf, host);
+            SetEnabled(leaf, true);
+        }
+
+        // Preserve unrelated children rather than deleting them with the wrappers.
+        nodes.Sort((a, b) => GreyboxLinkHierarchy.Depth(b.transform).CompareTo(GreyboxLinkHierarchy.Depth(a.transform)));
+        foreach (var node in nodes)
+        {
+            while (node.transform.childCount > 0)
+                Undo.SetTransformParent(node.transform.GetChild(0), host, k_ExplodeLabel);
+            Undo.DestroyObjectImmediate(node.gameObject);
+        }
+
+        using var organizedScope = HashSetPool<int>.Get(out var organized);
+        using var boxesScope = ListPool<Greybox>.Get(out var boxes);
+        foreach (var leaf in leaves)
+        {
+            if (!(leaf is Greybox box) || organized.Contains(box.GetInstanceID())) continue;
+            boxes.Clear();
+            GreyboxLinkHierarchy.Collect(box, boxes);
+            foreach (var member in boxes) organized.Add(member.GetInstanceID());
+            if (boxes.Count > 1) GreyboxLinkHierarchy.Organize(box, k_ExplodeLabel);
+        }
+        foreach (var kept in shared) ReBakeFrom(kept);
+
+        var selection = new Object[leaves.Count];
+        for (int i = 0; i < leaves.Count; i++) selection[i] = leaves[i].gameObject;
+        Selection.objects = selection;
+        Undo.CollapseUndoOperations(undoGroup);
+    }
+
+    static bool InsideNodes(Transform transform, List<GreyPrimitive> nodes)
+    {
+        foreach (var node in nodes)
+            if (transform.IsChildOf(node.transform)) return true;
+        return false;
     }
 
     static void MoveInput(GreyPrimitive input, Transform parent)

@@ -578,6 +578,12 @@ hierarchy change. Nested operations replace their input's membership entry; clea
 restores that entry without discarding outer operations. Released cutters leave the consuming
 tree. Empty redundant folders are removed, while unrelated children are preserved.
 
+Explode Boolean (Inspector, and the Scene View panel on a Boolean Result) dissolves the whole
+tree containing the selection in one Undo step. Every input returns to the outermost result's
+parent with its renderer and collider enabled and its operator cleared. Results and compounds
+are deleted, linked boxes keep their welds and are regrouped into a link folder, and operators
+also consumed by other Booleans stay with those Booleans.
+
 Groups accept primitives and nested Boolean results. CSG uses exact source solids, including
 closed box faces even when their rendered seam is hidden, and retains nested subject cut
 materials. Edits rebuild dependent geometry from the inside out. Deletion and Undo refresh

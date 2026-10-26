@@ -32,7 +32,8 @@ class GPWindowOverlay : Overlay
     static readonly GUIContent k_SplineSmoothing = new GUIContent("Spline Smooth",
         "Smooth the road path through every vertex without narrowing it. 0 = authored Beziers; 1 = natural cubic.");
     static readonly GUIContent k_Boolean = new GUIContent("Operator",
-        "Primitive, linked group, or Boolean result to subtract. The Boolean Result parent contains both inputs.");
+        "Grey object to subtract from this one: a primitive, a linked group or a Boolean Result. Creates a " +
+        "Boolean Result that holds both inputs. An Operator already used by another Boolean stays in place and is shared.");
     static readonly GUIContent k_Edit = new GUIContent("Edit",
         "Toggle Grey Primitive Edit Mode for all Grey Primitives this session (Alt+~).");
 
@@ -198,12 +199,18 @@ class GPWindowOverlay : Overlay
         using (new EditorGUILayout.HorizontalScope())
         {
             using (new EditorGUI.DisabledScope(result == null || result.Subject == null))
-                if (GUILayout.Button(new GUIContent("Select A", "Select this Boolean Result's Subject (the object being carved).")))
+                if (GUILayout.Button(new GUIContent("Select A", "Select this Boolean Result's Subject: the object the Operator is cut out of.")))
                     Selection.activeObject = result.Subject.gameObject;
 
             using (new EditorGUI.DisabledScope(result == null || result.Operator == null))
-                if (GUILayout.Button(new GUIContent("Select B", "Select this Boolean Result's Operator (the object being subtracted).")))
+                if (GUILayout.Button(new GUIContent("Select B", "Select this Boolean Result's Operator: the object subtracted from the Subject.")))
                     Selection.activeObject = result.Operator.gameObject;
+        }
+
+        if (result != null && GUILayout.Button(GreyPrimitiveEditor.ExplodeLabel))
+        {
+            GreyBooleanOrchestrator.Explode(result);
+            GUIUtility.ExitGUI();
         }
     }
 

@@ -7,18 +7,41 @@ public class GreyPrimitiveEditor : Editor
 {
     static readonly GUIContent s_booleanLabel = new GUIContent(
         "Boolean",
-        "Optional Operator to subtract from this object. Drag a Grey object here, or use Pick to " +
-        "click one in the scene. Subtracts the Operator from the Subject. Already-used Operators stay in their hierarchy and can be shared.");
+        "Grey object to subtract from this one: a primitive, a linked group or a Boolean Result. Drag it here " +
+        "or use Pick. Creates a Boolean Result that holds both inputs. An Operator already used by another " +
+        "Boolean stays in place and is shared. Clear the field to undo this Boolean only.");
 
     static readonly GUIContent s_cutMaterialLabel = new GUIContent(
         "Cut Material",
-        "Material for the faces the Operator carves out. Empty = the result keeps one material slot. " +
-        "Assign one to give the Boolean Result a second slot applied to the cut faces only.");
+        "Material for the faces the Operator cuts. Empty = the cut faces use the Subject's material. " +
+        "Assigned = the Boolean Result gets an extra material slot for the cut faces only.");
+
+    static readonly GUIContent s_pickLabel = new GUIContent(
+        "Pick",
+        "Click a Grey object in the Scene View or Hierarchy to use as the Operator. Esc cancels.");
+
+    static readonly GUIContent s_pickingLabel = new GUIContent(
+        "Picking…",
+        "Waiting for a Grey object click in the Scene View or Hierarchy. Esc cancels.");
+
+    static readonly GUIContent s_rebuildLabel = new GUIContent(
+        "Rebuild Mesh",
+        "Regenerate this object's mesh and every Boolean Result that uses it.");
+
+    static readonly GUIContent s_setColliderLabel = new GUIContent(
+        "Set Collider",
+        "Assign the generated mesh to this object's MeshCollider.");
 
     static readonly GUIContent s_recenterLabel = new GUIContent(
         "Recenter Pivot",
         "Move the pivot to the center of the box's bounding box, shifting the transform so the geometry " +
         "stays put.");
+
+    internal static readonly GUIContent ExplodeLabel = new GUIContent(
+        "Explode Boolean",
+        "Undo the whole Boolean this object belongs to, including nested Booleans and groups. Every input returns " +
+        "to the outermost Boolean's parent as a separate, visible primitive. Linked boxes stay linked in a link " +
+        "folder. Operators also used by other Booleans stay with them.");
 
     // Rebuilds are push-only: every path that mutates the primitive's state explicitly triggers
     // RebuildMesh. Inspector edits go through the change-check below. Undo/redo rebuilds are
@@ -61,9 +84,9 @@ public class GreyPrimitiveEditor : Editor
         EditorGUILayout.Space();
         using (new EditorGUILayout.HorizontalScope())
         {
-            if (GUILayout.Button("Rebuild Mesh"))
+            if (GUILayout.Button(s_rebuildLabel))
                 RebuildAndSyncTargets();
-            if (prim.UsesColliderMesh && GUILayout.Button("Set Collider"))
+            if (prim.UsesColliderMesh && GUILayout.Button(s_setColliderLabel))
                 foreach (var t in targets)
                     if (t is GreyPrimitive p) p.ApplyColliderMesh();
         }
@@ -71,6 +94,14 @@ public class GreyPrimitiveEditor : Editor
         if (prim is Greybox && GUILayout.Button(s_recenterLabel))
             foreach (var t in targets)
                 if (t is Greybox g) RecenterGreyboxPivot(g);
+
+        if ((prim is GreyBooleanResult || GreyGeometry.Owner(prim) != null) && GUILayout.Button(ExplodeLabel))
+        {
+            // One target can sit inside another target's tree, which the first Explode already destroyed.
+            foreach (var t in targets)
+                if (t != null) GreyBooleanOrchestrator.Explode((GreyPrimitive)t);
+            GUIUtility.ExitGUI();
+        }
     }
 
     // Re-origin a Greybox at its bounding-box center: shift every corner by -center in local space and
@@ -150,7 +181,7 @@ public class GreyPrimitiveEditor : Editor
             }
             EditorGUI.showMixedValue = false;
             bool picking = GreyBooleanPicker.IsPicking && GreyBooleanPicker.PickingSubject == subject;
-            if (GUILayout.Button(picking ? "Picking…" : "Pick", GUILayout.Width(64f))) GreyBooleanPicker.Begin(subject);
+            if (GUILayout.Button(picking ? s_pickingLabel : s_pickLabel, GUILayout.Width(64f))) GreyBooleanPicker.Begin(subject);
         }
         return EditorGUI.EndChangeCheck();
     }
