@@ -71,13 +71,28 @@ static partial class GPEdit
     /// Alt+~ toggles Edit Mode while the Scene View is focused and at least one Grey Primitive is
     /// selected. Routed through ShortcutManager (not IMGUI/UI Toolkit key events) so it fires once
     /// at the editor level — IMGUIContainers swallow raw key events, and Tab fought the focus ring.
-    /// Rebindable in Edit ▸ Shortcuts.
+    /// Rebindable in Edit ▸ Shortcuts. With no Grey Primitive selected, the press goes to methods
+    /// marked <see cref="ToggleEditModeShortcutHandlerAttribute"/>.
     /// </summary>
     [Shortcut("Editools/Grey Primitive/Toggle Edit Mode", typeof(SceneView), KeyCode.BackQuote, ShortcutModifiers.Alt)]
     static void ToggleEditModeShortcut()
     {
         if (SelectedPrimitive != null)
+        {
             Enabled = !Enabled;
+            return;
+        }
+
+        foreach (var method in TypeCache.GetMethodsWithAttribute<ToggleEditModeShortcutHandlerAttribute>())
+        {
+            if (!method.IsStatic || method.ReturnType != typeof(bool) || method.GetParameters().Length != 0)
+            {
+                Debug.LogError($"[GPEdit] {method.DeclaringType}.{method.Name} has [ToggleEditModeShortcutHandler] but is not 'static bool Method()' - skipped.");
+                continue;
+            }
+            if ((bool)method.Invoke(null, null))
+                return;
+        }
     }
 
     // ─── Hook lifecycle (owned by GPWindowOverlay) ──────────────

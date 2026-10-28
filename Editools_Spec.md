@@ -27,7 +27,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/HierarchyHeatmap/HierarchyHeatmap.cs` — recent-selection heatmap in Hierarchy
 - `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag whole-object transform tool
 - `Editor/QuickTransform/QuickTransformConfig.cs` — per-project config SO for QuickTransform
-- `Editor/GPEditMode/GPEdit.cs` — Grey Primitive Edit Mode: toggle (Alt+~) + per-frame dispatch by primitive type
+- `Editor/GPEditMode/GPEdit.cs` — Grey Primitive Edit Mode: toggle (Alt+~; with no Grey Primitive selected the press goes to `[ToggleEditModeShortcutHandler]` methods, see `Runtime/ToggleEditModeShortcutHandlerAttribute.cs`) + per-frame dispatch by primitive type
 - `Editor/GPEditMode/GPEditGreybox.cs` — Greybox sub-element editing (faces, edges, extrude)
 - `Editor/GPEditMode/GPEditSpline.cs` — Greypipe/Greyroad spline editing (vertices, handles, banking, extend)
 - `Editor/GPEditMode/GPEditShared.cs` — shared hover math/colors (independent of QuickTransform)
