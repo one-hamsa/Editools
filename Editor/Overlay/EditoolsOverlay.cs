@@ -238,6 +238,7 @@ public class EditoolsOverlay : ToolbarOverlay
 		AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
 		RestoreScreenshots();
 		MaterialCheckPopup.RestoreAfterReload();
+		ObjectDisplayToggle.ScheduleClaimShortcutBinding();
 	}
 
 	void OnDisplayedChanged(bool visible)
@@ -977,7 +978,7 @@ class EditoolsSettingsPopup : PopupWindowContent
 		};
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 19 * 22 + 4);
+	public override Vector2 GetWindowSize() => new Vector2(200, 20 * 22 + 4);
 
 	static readonly GUIContent k_SceneViewUndo = new GUIContent(
 		"Scene View Undo",
@@ -1042,6 +1043,15 @@ class EditoolsSettingsPopup : PopupWindowContent
 		"Ctrl + left-click in the Scene View only adds the object under the cursor to the selection " +
 		"(replaces Unity's Ctrl + click toggle). Alt + left-click without dragging removes it. " +
 		"Box selection and Alt + drag camera orbit are unchanged.");
+
+	static readonly GUIContent k_ObjectDisplayToggle = new GUIContent(
+		"Object Display Toggle",
+		"Y cycles the selected objects between Normal, Bounding Box (geometry hidden, bounds " +
+		"drawn as lines), Greybox (Greybox objects only: the Greybox's corner edges) and Outline " +
+		"(mesh silhouette). The lines show with Gizmos off; clicking a line selects the object, " +
+		"and a selected object's lines draw in orange. Unity's Transform tool is unbound from Y " +
+		"in the active shortcut profile. Nothing is saved to the scene; the state lasts until " +
+		"the scene is reloaded.");
 
 	static readonly GUIContent k_SelectShadowOnly = new GUIContent(
 		"Select Shadow Only",
@@ -1152,6 +1162,9 @@ class EditoolsSettingsPopup : PopupWindowContent
 
 		DrawToggleRow(k_AltDeselection, AltDeselection.Enabled,
 			v => AltDeselection.Enabled = v, null);
+
+		DrawToggleRow(k_ObjectDisplayToggle, ObjectDisplayToggle.Enabled,
+			v => ObjectDisplayToggle.Enabled = v, null);
 
 		DrawSubmenuOnlyRow(k_SelectShadowOnly, _ => SelectShadowOnly());
 

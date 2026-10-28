@@ -107,7 +107,17 @@ static partial class GPEdit
             SceneView.duringSceneGui += OnSceneGUI;
             Selection.selectionChanged += CancelPrimitiveClick;
             Undo.undoRedoPerformed += CancelPrimitiveClick;
+            Undo.undoRedoPerformed += RebuildStaleSelectedGreyboxes;
         }
+    }
+
+    // Undo restores the serialized corners / face flags but not the in-memory mesh. Only the
+    // selected boxes are checked, and only one whose mesh no longer matches its inputs is rebuilt.
+    static void RebuildStaleSelectedGreyboxes()
+    {
+        foreach (var go in Selection.gameObjects)
+            if (go.TryGetComponent<Greybox>(out var gb) && gb.MeshIsStale)
+                GreyPrimitiveEditor.RebuildPrimitiveAndDependents(gb);
     }
 
     /// <summary>Called by each GP overlay instance on destruction. Unhooks when the last one goes.</summary>
@@ -118,6 +128,7 @@ static partial class GPEdit
             SceneView.duringSceneGui -= OnSceneGUI;
             Selection.selectionChanged -= CancelPrimitiveClick;
             Undo.undoRedoPerformed -= CancelPrimitiveClick;
+            Undo.undoRedoPerformed -= RebuildStaleSelectedGreyboxes;
             CancelPrimitiveClick();
         }
     }

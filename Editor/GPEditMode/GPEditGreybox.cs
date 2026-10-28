@@ -89,58 +89,15 @@ static partial class GPEdit
     {
         int best = -1;
         float bestDist = GPEditShared.HoverPx;
-        int seamFaces = GreyboxSeamFaceMask(gb);
+        // Every edge is hoverable, including edges between hidden faces (own or welded), so
+        // internal welds stay editable; a drag propagates to the welded partners.
         for (int ei = 0; ei < 12; ei++)
         {
-            if (!IsExternalGreyboxEdge(gb, ei, seamFaces)) continue;
             int[] ec = GPEditShared.EdgeCornerIndices[ei];
             float dist = GPEditShared.DistToSegment(s_gbWc[ec[0]], s_gbWc[ec[1]], mousePos);
             if (dist < bestDist) { bestDist = dist; best = ei; }
         }
         return best;
-    }
-
-    struct WeldedEdge
-    {
-        public Greybox box;
-        public int edge;
-    }
-
-    static bool IsExternalGreyboxEdge(Greybox box, int edge, int seamFaces)
-    {
-        var adjacent = GPEditShared.EdgeFaceAdjacency[edge];
-        if ((seamFaces & ((1 << adjacent[0]) | (1 << adjacent[1]))) == 0) return true;
-
-        using var edgesScope = ListPool<WeldedEdge>.Get(out var edges);
-        using var visitedScope = HashSetPool<long>.Get(out var visited);
-        edges.Add(new WeldedEdge { box = box, edge = edge });
-        visited.Add(((long)box.GetInstanceID() << 4) | (uint)edge);
-        for (int i = 0; i < edges.Count; i++)
-        {
-            var current = edges[i];
-            var corners = GPEditShared.EdgeCornerIndices[current.edge];
-            foreach (int face in GPEditShared.EdgeFaceAdjacency[current.edge])
-                if (current.box.IsFaceVisible(face)) return true;
-            using var seamsScope = ListPool<Greybox.Seam>.Get(out var seams);
-            current.box.GetSeams(seams);
-            foreach (var seam in seams)
-            {
-                int a = System.Array.IndexOf(seam.corners, corners[0]);
-                int b = System.Array.IndexOf(seam.corners, corners[1]);
-                if (a < 0 || b < 0) continue;
-                int mappedA = seam.otherCorners[a], mappedB = seam.otherCorners[b];
-                for (int otherEdge = 0; otherEdge < 12; otherEdge++)
-                {
-                    var pair = GPEditShared.EdgeCornerIndices[otherEdge];
-                    if (!((pair[0] == mappedA && pair[1] == mappedB) || (pair[0] == mappedB && pair[1] == mappedA))) continue;
-                    long key = ((long)seam.other.GetInstanceID() << 4) | (uint)otherEdge;
-                    if (visited.Add(key)) edges.Add(new WeldedEdge { box = seam.other, edge = otherEdge });
-                    break;
-                }
-            }
-        }
-        // Hide only edges with no visible surface anywhere around the weld.
-        return false;
     }
 
     /// <summary>True when at least one of the edge's two faces is visible (drawn full-strength; edges of only-hidden faces are dimmed).</summary>
@@ -488,13 +445,14 @@ static partial class GPEdit
             if ((seamFaces & (1 << face)) == 0 && Vector3.Dot(GreyboxFaceNormal(gb, face), camFwd) < 0f)
                 frontFaces |= 1 << face;
 
-        // Fully internal welded edges are omitted; visible subdivision edges remain editable.
+        // All 12 edges are drawn; edges of hidden faces are dimmed, edges between two seam
+        // faces have no rendered surface to be behind so they skip the backface dim.
         for (int ei = 0; ei < 12; ei++)
         {
-            if (!IsExternalGreyboxEdge(gb, ei, seamFaces)) continue;
             int[] ec = GPEditShared.EdgeCornerIndices[ei];
             var adjacent = GPEditShared.EdgeFaceAdjacency[ei];
-            bool front = (frontFaces & ((1 << adjacent[0]) | (1 << adjacent[1]))) != 0;
+            int adjacentMask = (1 << adjacent[0]) | (1 << adjacent[1]);
+            bool front = (frontFaces & adjacentMask) != 0 || (seamFaces & adjacentMask) == adjacentMask;
             Color color = ei == hoverEdge ? GPEditShared.OutlineHover : GPEditShared.Outline * tint;
             if (!front) color.a *= GPEditShared.BackfaceAlpha;
             if (ei != hoverEdge && !IsOutlineEdge(gb, ei)) color.a *= 0.35f;

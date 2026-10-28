@@ -65,6 +65,19 @@ internal sealed class GreyFaceOutline
             return true;
         }
         WeldSeams(paths, (long)(k_MinWidth / 2d));
+        // Welding folds a hairline fragment onto itself (zero area, edges doubled back), which Clipper
+        // cannot union; those are CSG noise like the slivers removed after the union, so drop them here.
+        for (int i = paths.Count - 1; i >= 0; i--)
+        {
+            var cleaned = Clipper.CleanPolygon(paths[i]);
+            if (cleaned.Count < 3 || Clipper.Area(cleaned) == 0d) paths.RemoveAt(i);
+            else paths[i] = cleaned;
+        }
+        if (paths.Count == 0)
+        {
+            outline = new GreyFaceOutline(unit, new PolyTree(), new IntRect(0, 0, 0, 0), 0d, 0d);
+            return true;
+        }
         try
         {
             // Not StrictlySimple: this Clipper's strict post-pass splits a merged face along spurious seams.

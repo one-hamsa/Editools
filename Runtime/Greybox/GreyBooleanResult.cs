@@ -501,12 +501,12 @@ public class GreyBooleanResult : GreyPrimitive
         double unit = SnapUnit(group, polys);
         string error;
         bool meshed = TryGetFaceFrame(polys[group[0]].tag, out var frame)
-            ? TryMeshBoxFace(group, polys, frame, localToWorld, unit, density, uvScale, verts, normals, uvs, tris, out error)
-            : TryMeshPlanarSurface(group, polys, localToWorld, unit, density, uvScale, verts, normals, uvs, tris, out error);
+            ? TryMeshBoxFace(name, group, polys, frame, localToWorld, unit, density, uvScale, verts, normals, uvs, tris, out error)
+            : TryMeshPlanarSurface(name, group, polys, localToWorld, unit, density, uvScale, verts, normals, uvs, tris, out error);
         if (meshed) return;
 
         // Keep the exact solid intact if an authoring outline cannot be remeshed.
-        Debug.LogError($"[GreyBoolean] '{name}': {error} Using the exact source polygons for this face.", this);
+        Debug.LogWarning($"[GreyBoolean] '{name}': {error} Using the exact source polygons for this face.", this);
         foreach (int index in group)
         {
             var polygon = polys[index];
@@ -516,6 +516,76 @@ public class GreyBooleanResult : GreyPrimitive
             { tris.Add(first); tris.Add(first + k); tris.Add(first + k + 1); }
         }
     }
+
+    // Faces that fail to remesh are written here (project-local, not versioned) for offline replay.
+    const string k_FaceDumpFolder = "Library/GreyBooleanFailures";
+
+    /// <summary>
+    /// Writes a failed face's 2D fragments, snap unit and grid targets (the exact inputs of
+    /// <see cref="GreyFaceOutline.TryBuild"/> and <see cref="GreyFaceOutline.TryTriangulate"/>) plus the
+    /// fragments' 3D vertices as JSON under <see cref="k_FaceDumpFolder"/>, one file per result and face
+    /// (the latest failure wins), and appends the file path to <paramref name="error"/>.
+    /// </summary>
+    static void WriteFaceDump(string resultName, List<int> group, List<CsgPolygon> polys, List<Vector2[]> fragments,
+        double unit, double targetA, double targetB, ref string error)
+    {
+        try
+        {
+            int tag = polys[group[0]].tag;
+            string folder = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(Application.dataPath), k_FaceDumpFolder);
+            System.IO.Directory.CreateDirectory(folder);
+            string fileName = resultName;
+            foreach (char invalid in System.IO.Path.GetInvalidFileNameChars()) fileName = fileName.Replace(invalid, '_');
+            string path = System.IO.Path.Combine(folder, $"{fileName}_tag{tag}.json");
+
+            var culture = System.Globalization.CultureInfo.InvariantCulture;
+            var json = new System.Text.StringBuilder();
+            json.Append("{\"result\":\"").Append(JsonEscape(resultName)).Append("\",");
+            json.Append("\"tag\":").Append(tag).Append(',');
+            json.Append("\"error\":\"").Append(JsonEscape(error)).Append("\",");
+            json.Append("\"unit\":").Append(unit.ToString("R", culture)).Append(',');
+            json.Append("\"targetA\":").Append(targetA.ToString("R", culture)).Append(',');
+            json.Append("\"targetB\":").Append(targetB.ToString("R", culture)).Append(',');
+            json.Append("\"fragments\":[");
+            for (int i = 0; i < fragments.Count; i++)
+            {
+                if (i > 0) json.Append(',');
+                json.Append('[');
+                var fragment = fragments[i];
+                for (int k = 0; k < fragment.Length; k++)
+                {
+                    if (k > 0) json.Append(',');
+                    json.Append('[').Append(fragment[k].x.ToString("R", culture)).Append(',')
+                        .Append(fragment[k].y.ToString("R", culture)).Append(']');
+                }
+                json.Append(']');
+            }
+            json.Append("],\"fragments3d\":[");
+            for (int i = 0; i < group.Count; i++)
+            {
+                if (i > 0) json.Append(',');
+                json.Append('[');
+                var polygon = polys[group[i]];
+                for (int k = 0; k < polygon.verts.Count; k++)
+                {
+                    if (k > 0) json.Append(',');
+                    json.Append('[').Append(polygon.verts[k].x.ToString("R", culture)).Append(',')
+                        .Append(polygon.verts[k].y.ToString("R", culture)).Append(',')
+                        .Append(polygon.verts[k].z.ToString("R", culture)).Append(']');
+                }
+                json.Append(']');
+            }
+            json.Append("]}");
+            System.IO.File.WriteAllText(path, json.ToString());
+            error += $" Fragments written to {path}.";
+        }
+        catch (Exception exception)
+        {
+            Debug.LogException(exception);
+        }
+    }
+
+    static string JsonEscape(string text) => text.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
     // Outline snap length (local units): above the float noise of CSG split vertices at the surface's
     // distance from the origin. Seam vertices that still disagree by a few units are welded by the outline.
@@ -537,7 +607,7 @@ public class GreyBooleanResult : GreyPrimitive
     /// Greybox grid and mapped back onto the CSG surface. The whole face shares the Greybox face normal,
     /// so the diagonal of a distorted face is not visible in flat shading.
     /// </summary>
-    static bool TryMeshBoxFace(List<int> group, List<CsgPolygon> polys, FaceFrame frame, Matrix4x4 localToWorld,
+    static bool TryMeshBoxFace(string resultName, List<int> group, List<CsgPolygon> polys, FaceFrame frame, Matrix4x4 localToWorld,
         double unit, float density, float uvScale,
         List<Vector3> verts, List<Vector3> normals, List<Vector2> uvs, List<int> tris, out string error)
     {
@@ -556,12 +626,15 @@ public class GreyBooleanResult : GreyPrimitive
             }
             fragments.Add(points);
         }
-        if (!GreyFaceOutline.TryBuild(fragments, unit, out var outline, out error)) return false;
-
         // Cell size of the face's Greybox subdivision, so an uncut face keeps the source box grid exactly.
         double targetA = density > 0f ? frame.lengthA / unit / Segments(frame.WorldLengthA(localToWorld), density) : 0d;
         double targetB = density > 0f ? frame.lengthB / unit / Segments(frame.WorldLengthB(localToWorld), density) : 0d;
-        if (!outline.TryTriangulate(targetA, targetB, out var points2D, out var indices, out error)) return false;
+        if (!GreyFaceOutline.TryBuild(fragments, unit, out var outline, out error)
+            || !outline.TryTriangulate(targetA, targetB, out var points2D, out var indices, out error))
+        {
+            WriteFaceDump(resultName, group, polys, fragments, unit, targetA, targetB, ref error);
+            return false;
+        }
 
         Vector3 normal = frame.Normal;
         bool flip = Vector3.Dot(normal, polys[group[0]].plane.normal) < 0f;
@@ -585,7 +658,7 @@ public class GreyBooleanResult : GreyPrimitive
     /// unioned in a planar frame aligned to the outline's longest edge and clipped by a grid at the
     /// target density.
     /// </summary>
-    static bool TryMeshPlanarSurface(List<int> group, List<CsgPolygon> polys, Matrix4x4 localToWorld,
+    static bool TryMeshPlanarSurface(string resultName, List<int> group, List<CsgPolygon> polys, Matrix4x4 localToWorld,
         double unit, float density, float uvScale,
         List<Vector3> verts, List<Vector3> normals, List<Vector2> uvs, List<int> tris, out string error)
     {
@@ -604,14 +677,17 @@ public class GreyBooleanResult : GreyPrimitive
             vDir = Vector3.Cross(normal, uDir).normalized;
             Project(group, polys, origin, uDir, vDir, unit, fragments, sourceVertices);
         }
-        if (!GreyFaceOutline.TryBuild(fragments, unit, out var outline, out error)) return false;
-
         // Target cell size (outline units per axis) from the density (vertices per world meter).
         float worldPerU = localToWorld.MultiplyVector(uDir).magnitude;
         float worldPerV = localToWorld.MultiplyVector(vDir).magnitude;
         double targetA = density > 0f && worldPerU > 0f ? 1d / (density * worldPerU * unit) : 0d;
         double targetB = density > 0f && worldPerV > 0f ? 1d / (density * worldPerV * unit) : 0d;
-        if (!outline.TryTriangulate(targetA, targetB, out var points2D, out var indices, out error)) return false;
+        if (!GreyFaceOutline.TryBuild(fragments, unit, out var outline, out error)
+            || !outline.TryTriangulate(targetA, targetB, out var points2D, out var indices, out error))
+        {
+            WriteFaceDump(resultName, group, polys, fragments, unit, targetA, targetB, ref error);
+            return false;
+        }
 
         bool flip = Vector3.Dot(Vector3.Cross(uDir, vDir), normal) < 0f;
         int first = verts.Count;

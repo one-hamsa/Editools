@@ -38,6 +38,29 @@ public class Greybox : GreyPrimitive
 
     public bool[] ActiveFaces => _activeFaces;
 
+    // Signature of the inputs the mesh was last generated from. Not serialized, so an undo
+    // restores the corners / face flags around it and the mismatch marks the mesh stale.
+    [System.NonSerialized] int _builtInputSignature;
+    [System.NonSerialized] bool _hasBuiltInputSignature;
+
+    /// <summary>
+    /// True when the mesh was generated in this session from corners / face visibility that
+    /// differ from the current ones (typically after an undo or redo). False until the first
+    /// generation of the session.
+    /// </summary>
+    public bool MeshIsStale => _hasBuiltInputSignature && _builtInputSignature != ComputeMeshInputSignature();
+
+    int ComputeMeshInputSignature()
+    {
+        unchecked
+        {
+            int hash = 17;
+            for (int i = 0; i < 8; i++) hash = hash * 31 + _corners[i].GetHashCode();
+            for (int face = 0; face < 6; face++) hash = hash * 31 + (IsFaceVisible(face) ? 1 : 0);
+            return hash;
+        }
+    }
+
     [System.Serializable]
     struct FaceLink
     {
@@ -372,6 +395,9 @@ public class Greybox : GreyPrimitive
         mesh.normals   = normals;
         mesh.uv        = uvs;
         mesh.triangles = tris;
+
+        _builtInputSignature = ComputeMeshInputSignature();
+        _hasBuiltInputSignature = true;
     }
 
     // ─── Public API ──────────────────────────────────────────────

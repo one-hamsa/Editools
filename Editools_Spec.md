@@ -42,6 +42,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/SceneViewVertexCounter/SceneViewVertexCounter.cs` — per-SceneView GPU vertex count overlay (total / view / selected)
 - `Editor/DistanceSelect/DistanceSelect.cs` — Ctrl+= grow selection by distance + settings panel overlay
 - `Editor/AltDeselection/AltDeselection.cs` — Ctrl+click add-only / Alt+click remove-only Scene View selection
+- `Editor/ObjectDisplayToggle/ObjectDisplayToggle.cs` — Y cycles selected objects between Normal / Bounding Box / Greybox / Outline display (session-only, draws with Gizmos off, lines are click-selectable)
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -400,6 +401,21 @@ Separates Scene View click selection into an add modifier and a remove modifier.
 - Click validity: cursor moved <= 6 px (Unity's click/box threshold). Camera movement is not checked — the orbit tool rotates on any Alt+drag, so a few-pixel nudge is still a click. Only Escape cancels on `KeyDown`; a held modifier auto-repeats `KeyDown`.
 - `HandleUtility.PickGameObject(..., ignore, filter)` with a `filter` is not positional (returned the last selected object regardless of cursor) — do not use it for picking among the selection.
 
+### 11d. ObjectDisplayToggle (Editor)
+
+`Y` cycles the selected objects through display states: Normal → Bounding Box → Greybox (Greybox objects only) → Outline → Normal. On by default; Editools Settings row (`EditorPrefs`: `ObjectDisplayToggle_Enabled`). Turning the row off returns every object to Normal.
+
+- Bounding Box: geometry hidden; the enclosing box of every child `MeshFilter` / `SkinnedMeshRenderer` (mesh-local bounds, in root-local space) drawn as 12 lines that follow the root transform.
+- Greybox: only offered when the object has a `Greybox` component; geometry hidden; the Greybox's 12 corner edges drawn (`GetWorldCorners` read each Layout, so edits show live).
+- Outline: geometry hidden; the mesh silhouette drawn as lines: open boundary edges plus edges whose two faces differ in facing toward the Scene View camera (perspective or orthographic). Vertices are merged by position so split vertices (hard normals, UV seams) share one edge. Skinned meshes draw in bind pose. Adjacency is built once when the state is entered; facing is evaluated per Layout.
+- Lines are `Handles` drawn on `Repaint` in `duringSceneGui` in two passes: `zTest = LessEqual` at full opacity, then `zTest = Greater` at 50% opacity, so they show with Gizmos off and remain visible through other geometry. World-space lines are refreshed once per `Layout` and shared by the Repaint and the picking distance.
+- Click selection: each object's lines are a Scene View control (`HandleUtility.AddControl` with the pixel distance to the nearest line). A left click within pick distance captures `hotControl` on MouseDown, which also stops Unity's own picking for that click; the release selects the object (plain click sets, Shift adds, Ctrl/Cmd toggles; Alt is left to orbit). Unity's picking does not hit `forceRenderingOff` renderers, so this is the only way to click-select a toggled object in the Scene View.
+- Selection display: lines of an object that is selected, or under a selected ancestor, draw in the selection color (orange) and, for box edges, one pixel wider.
+- Hiding uses `Renderer.forceRenderingOff` (not serialized, no scene dirtying, no prefab overrides). Renderers already hidden by another system are left alone and not restored. The state lasts until the scene is reloaded; it is dropped on domain reload and when entering Play mode (`forceRenderingOff` would otherwise carry into Play).
+- A mixed selection moves to the state after the active object's state, so one press lands every selected object on the same state; an object the state does not apply to (non-Greybox asked for Greybox) takes the next applicable state.
+- `[Shortcut("Editools/Object Display Toggle", KeyCode.Y)]` is global (a Scene View context only fired while the Scene View had focus / the cursor; elsewhere Unity's `Y` switched to the Transform tool). `ClaimShortcutBinding` unbinds every other shortcut that shares the tool's binding (Unity's `Tools/Transform`) in the active shortcut profile; the default profile is read-only, so an `Editools` profile is created and activated when needed. It runs from `EditoolsOverlay.OnCreated` (one-shot `EditorApplication.update`) and when the settings row is turned on; each unbind is logged. Disabling the tool does not restore the unbound shortcuts (Edit ▸ Shortcuts).
+- No `[InitializeOnLoad]`: the shortcut and the overlay are the entry points; the `duringSceneGui` hook, `beforeAssemblyReload` and `playModeStateChanged` are subscribed only while at least one object is in a non-Normal state.
+
 ### 12. Greybox (Runtime + Editor)
 
 Deformable box primitive for level blockout. Created via `GameObject > 3D Object > Greybox`.
@@ -557,8 +573,12 @@ edges remain full strength.
 An RMB click released on a greybox edge creates two welded boxes at the pressed edge fraction.
 The cut continues across crossed seam faces, preserving the neighbouring welds; internal split
 faces are hidden.
-Only fully internal welded edges are hidden. Edges dividing visible surfaces remain drawn
-and editable, including flat coplanar subdivisions.
+All 12 edges are drawn and editable, including edges between two hidden faces and fully
+internal welded edges (an edge drag propagates to the welded partners through the seam solver).
+Edges of only-hidden faces are dimmed; an edge between two seam faces skips the backface dim.
+On undo/redo, each selected Greybox whose mesh no longer matches its corners / face visibility
+(`Greybox.MeshIsStale`, a non-serialized signature stamped at generation) is rebuilt with its
+dependents; unselected boxes are left to `GreyboxUndoRebuilder`.
 Deleting a linked neighbour reveals the surviving shared face automatically. Undo restores
 the hidden seam. A face stays hidden while another live neighbour still shares it.
 The original parent/child seam format remains supported alongside multiple face welds,
