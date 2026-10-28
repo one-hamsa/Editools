@@ -588,6 +588,15 @@ Groups accept primitives and nested Boolean results. CSG uses exact source solid
 closed box faces even when their rendered seam is hidden, and retains nested subject cut
 materials. Edits rebuild dependent geometry from the inside out. Deletion and Undo refresh
 membership-dependent geometry without requiring selection; an empty input produces no mesh.
+Result meshes rebuild every source box face (Subject, Operator, or a Greybox part of a compound)
+as one grid in that face's own parameter space; surfaces without a source face get a planar
+grid aligned to their longest edge. A face's CSG fragments are first unioned into one outline:
+seam vertices that disagree by float error are welded and hairline slits and slivers (CSG split
+noise) are dropped, so internal seams never show in the grid. The grid is then fitted to that
+outline: a grid line passes through every cut corner (lines closer than half a cell merge), the
+gaps are filled at the Greybox's cell size, and grid points within a quarter cell of a cut edge
+are pulled onto it, so cuts leave no slivers. An uncut face keeps the source box grid exactly;
+a cut face's grid no longer matches its neighbours along the box edges.
 The Inspector and Scene View Boolean field on a group member edit the group's operation.
 Existing box-only compound references and legacy hierarchy ownership remain readable.
 
