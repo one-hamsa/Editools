@@ -78,7 +78,7 @@ public abstract class GreyPrimitive : MonoBehaviour
     [SerializeField]
     [Tooltip("Flip the mesh inside-out — reverses every triangle's winding and its normals so the " +
              "faces render from the other side. Useful for turning a box into a room. Applied to the " +
-             "render mesh on each rebuild.")]
+             "render mesh and the collider mesh on each rebuild.")]
     bool _flipFaces;
 
     public bool FlipFaces
@@ -247,6 +247,7 @@ public abstract class GreyPrimitive : MonoBehaviour
             GenerateMesh(_colliderMesh);
             _suppressSubdivision = false;
             _colliderMesh.RecalculateBounds();
+            ApplyFaceFlip(_colliderMesh);
             colliderMesh = _colliderMesh;
         }
 
