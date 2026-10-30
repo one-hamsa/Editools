@@ -6,27 +6,30 @@ using UnityEditor.ShortcutManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-[InitializeOnLoad]
+/// <summary>
+/// Color-codes recently selected items in the Hierarchy and Project windows and draws Alt+D marks.
+/// Colors and limits live in <see cref="EditoolsSettings"/>; the window hooks are subscribed only
+/// while the function is enabled and the Editools overlay is displayed (<see cref="Sync"/>).
+/// </summary>
 public static class HierarchyHeatmap
 {
-    public const int DefaultMaxRecent = 5;
-    public const int DefaultMaxMarked = 10;
-    public static int maxRecent = DefaultMaxRecent; // Now configurable
-    public static int maxMarked = DefaultMaxMarked; // Configurable mark limit
+    static EditoolsSettings Settings => EditoolsSettings.Current;
+    static int maxRecent => Settings.heatmapMaxRecent;
+    static int maxMarked => Settings.heatmapMaxMarked;
     private static List<int> recentHierarchySelections = new List<int>(); // Index 0: oldest, last: newest
     private static List<string> recentProjectSelections = new List<string>(); // Index 0: oldest, last: newest
-    private static bool enabled; // Opt-in: loaded from EditorPrefs
+    static bool s_subscribed;
 
-    public static Color lowHeatColor;
-    public static Color highHeatColor;
-    public static float heatAlpha;
-    public static float gradientStrength;
+    static Color lowHeatColor => Settings.heatmapLowColor;
+    static Color highHeatColor => Settings.heatmapHighColor;
+    static float heatAlpha => Settings.heatmapAlpha;
+    static float gradientStrength => Settings.heatmapGradientStrength;
 
     // Mark functionality
     private static List<int> markedHierarchyItems = new List<int>(); // Changed to List to maintain order
     private static List<string> markedProjectItems = new List<string>(); // Changed to List to maintain order
-    public static Color markColor;
-    public static float markAlpha;
+    static Color markColor => Settings.heatmapMarkColor;
+    static float markAlpha => Settings.heatmapMarkAlpha;
 
     private static string lastFolderPath = string.Empty;
     private static MethodInfo getActiveFolderPathMethod;
@@ -68,34 +71,7 @@ public static class HierarchyHeatmap
     private static bool s_warnedProjectIsExpanded;
 
     static HierarchyHeatmap() {
-        // Load enabled state from EditorPrefs
-        enabled = EditorPrefs.GetBool("HierarchyHeatmapEnabled", false);
-
-        // Load maxRecent and maxMarked
-        maxRecent = EditorPrefs.GetInt("HierarchyHeatmap_MaxRecent", DefaultMaxRecent);
-        maxMarked = EditorPrefs.GetInt("HierarchyHeatmap_MaxMarked", DefaultMaxMarked);
-
-        // Load colors from EditorPrefs
-        LoadSettings();
-
-        // Load marked items
         LoadMarkedItems();
-
-        // Defensive -= before += so an unexpected re-entry into the static ctor
-        // (or a previously-subscribed handler that survives domain reload) can't
-        // double up. Unity normally clears these on reload, but the duplicate-sub
-        // category of bug is silent and expensive, so the redundancy is worth it.
-        Selection.selectionChanged -= OnSelectionChanged;
-        Selection.selectionChanged += OnSelectionChanged;
-
-        EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyItemGUI;
-        EditorApplication.hierarchyWindowItemOnGUI += OnHierarchyItemGUI;
-
-        EditorApplication.projectWindowItemOnGUI -= OnProjectItemGUI;
-        EditorApplication.projectWindowItemOnGUI += OnProjectItemGUI;
-
-        EditorApplication.update -= OnUpdate;
-        EditorApplication.update += OnUpdate;
 
         // Setup reflection for active folder path
         var assembly = typeof(UnityEditor.Editor).Assembly;
@@ -107,12 +83,34 @@ public static class HierarchyHeatmap
         // Pre-load types
         hierarchyWindowType = assembly.GetType("UnityEditor.SceneHierarchyWindow");
         projectBrowserType = assembly.GetType("UnityEditor.ProjectBrowser");
+    }
 
-        // Reset on play mode change or scene change
-        EditorApplication.playModeStateChanged -= OnPlayModeChanged;
-        EditorApplication.playModeStateChanged += OnPlayModeChanged;
-        SceneManager.sceneLoaded -= OnSceneLoaded;
-        SceneManager.sceneLoaded += OnSceneLoaded;
+    internal static bool Enabled => Settings.hierarchyHeatmapEnabled;
+
+    /// <summary>Hooks the Hierarchy / Project windows while enabled and the overlay is active; unhooks otherwise.</summary>
+    internal static void Sync() {
+        bool wanted = EditoolsOverlay.IsActive && Enabled;
+        if (wanted == s_subscribed) return;
+        s_subscribed = wanted;
+
+        if (wanted) {
+            Selection.selectionChanged += OnSelectionChanged;
+            EditorApplication.hierarchyWindowItemOnGUI += OnHierarchyItemGUI;
+            EditorApplication.projectWindowItemOnGUI += OnProjectItemGUI;
+            EditorApplication.update += OnUpdate;
+            EditorApplication.playModeStateChanged += OnPlayModeChanged;
+            SceneManager.sceneLoaded += OnSceneLoaded;
+        } else {
+            Selection.selectionChanged -= OnSelectionChanged;
+            EditorApplication.hierarchyWindowItemOnGUI -= OnHierarchyItemGUI;
+            EditorApplication.projectWindowItemOnGUI -= OnProjectItemGUI;
+            EditorApplication.update -= OnUpdate;
+            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
+            SceneManager.sceneLoaded -= OnSceneLoaded;
+        }
+
+        EditorApplication.RepaintHierarchyWindow();
+        EditorApplication.RepaintProjectWindow();
     }
 
     // ─── Resolved-object caches (rebuilt lazily on dirty) ────────
@@ -157,64 +155,6 @@ public static class HierarchyHeatmap
         s_recentProjectDirty = false;
     }
 
-    private static void LoadSettings() {
-        lowHeatColor = new Color(
-            EditorPrefs.GetFloat("HierarchyHeatmap_LowR", 0.9f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_LowG", 0.9f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_LowB", 1f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_LowA", 1f)
-        );
-
-        highHeatColor = new Color(
-            EditorPrefs.GetFloat("HierarchyHeatmap_HighR", 1f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_HighG", 0.2f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_HighB", 0.2f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_HighA", 1f)
-        );
-
-        heatAlpha = EditorPrefs.GetFloat("HierarchyHeatmap_Alpha", 0.3f);
-        gradientStrength = EditorPrefs.GetFloat("HierarchyHeatmap_GradientStrength", 0.5f);
-
-        // Load mark color settings
-        markColor = new Color(
-            EditorPrefs.GetFloat("HierarchyHeatmap_MarkR", 1f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_MarkG", 0.8f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_MarkB", 0f),
-            EditorPrefs.GetFloat("HierarchyHeatmap_MarkA", 1f)
-        );
-
-        markAlpha = EditorPrefs.GetFloat("HierarchyHeatmap_MarkAlpha", 0.4f);
-    }
-
-    public static void SaveSettings() {
-        EditorPrefs.SetFloat("HierarchyHeatmap_LowR", lowHeatColor.r);
-        EditorPrefs.SetFloat("HierarchyHeatmap_LowG", lowHeatColor.g);
-        EditorPrefs.SetFloat("HierarchyHeatmap_LowB", lowHeatColor.b);
-        EditorPrefs.SetFloat("HierarchyHeatmap_LowA", lowHeatColor.a);
-
-        EditorPrefs.SetFloat("HierarchyHeatmap_HighR", highHeatColor.r);
-        EditorPrefs.SetFloat("HierarchyHeatmap_HighG", highHeatColor.g);
-        EditorPrefs.SetFloat("HierarchyHeatmap_HighB", highHeatColor.b);
-        EditorPrefs.SetFloat("HierarchyHeatmap_HighA", highHeatColor.a);
-
-        EditorPrefs.SetFloat("HierarchyHeatmap_Alpha", heatAlpha);
-        EditorPrefs.SetFloat("HierarchyHeatmap_GradientStrength", gradientStrength);
-
-        EditorPrefs.SetInt("HierarchyHeatmap_MaxRecent", maxRecent);
-        EditorPrefs.SetInt("HierarchyHeatmap_MaxMarked", maxMarked);
-
-        // Save mark color settings
-        EditorPrefs.SetFloat("HierarchyHeatmap_MarkR", markColor.r);
-        EditorPrefs.SetFloat("HierarchyHeatmap_MarkG", markColor.g);
-        EditorPrefs.SetFloat("HierarchyHeatmap_MarkB", markColor.b);
-        EditorPrefs.SetFloat("HierarchyHeatmap_MarkA", markColor.a);
-
-        EditorPrefs.SetFloat("HierarchyHeatmap_MarkAlpha", markAlpha);
-
-        EditorApplication.RepaintHierarchyWindow();
-        EditorApplication.RepaintProjectWindow();
-    }
-
     private static void LoadMarkedItems() {
         // Load marked hierarchy items
         string hierarchyData = EditorPrefs.GetString("HierarchyHeatmap_MarkedHierarchy", "");
@@ -257,6 +197,7 @@ public static class HierarchyHeatmap
 
     [Shortcut("Editools/Toggle Heatmap Mark", KeyCode.D, ShortcutModifiers.Alt)]
     private static void ToggleMark() {
+        if (!s_subscribed) return;
         // Handle active folder in project view (even if not explicitly selected)
         string activeFolderPath = GetActiveFolderPath();
         if (!string.IsNullOrEmpty(activeFolderPath)) {
@@ -316,6 +257,7 @@ public static class HierarchyHeatmap
 
     [Shortcut("Editools/Clear All Heatmap Marks", KeyCode.D, ShortcutModifiers.Alt | ShortcutModifiers.Shift)]
     private static void ClearAllMarks() {
+        if (!s_subscribed) return;
         markedHierarchyItems.Clear();
         markedProjectItems.Clear();
         s_markedHierarchyDirty = true;
@@ -395,8 +337,6 @@ public static class HierarchyHeatmap
     }
 
     private static void OnUpdate() {
-        if (!EditoolsOverlay.IsActive || !enabled) return;
-
         string currentFolderPath = GetActiveFolderPath();
         if (!string.IsNullOrEmpty(currentFolderPath) && currentFolderPath != lastFolderPath) {
             lastFolderPath = currentFolderPath;
@@ -409,8 +349,6 @@ public static class HierarchyHeatmap
     }
 
     private static void OnSelectionChanged() {
-        if (!EditoolsOverlay.IsActive || !enabled) return;
-
         foreach (var obj in Selection.objects) {
             string path = AssetDatabase.GetAssetPath(obj);
             if (!string.IsNullOrEmpty(path)) {
@@ -446,7 +384,6 @@ public static class HierarchyHeatmap
     }
 
     private static void OnHierarchyItemGUI(int instanceID, Rect selectionRect) {
-        if (!EditoolsOverlay.IsActive) return;
         GameObject go = EditorUtility.EntityIdToObject(instanceID) as GameObject;
         if (go == null) return;
 
@@ -501,8 +438,6 @@ public static class HierarchyHeatmap
             return;
         }
 
-        if (!enabled) return;
-
         int tier = GetHierarchyRecencyTier(instanceID);
 
         if (hasChildren && !isExpanded) {
@@ -543,7 +478,6 @@ public static class HierarchyHeatmap
     }
 
     private static void OnProjectItemGUI(string guid, Rect selectionRect) {
-        if (!EditoolsOverlay.IsActive) return;
         string path = AssetDatabase.GUIDToAssetPath(guid);
         if (string.IsNullOrEmpty(path)) return;
 
@@ -605,8 +539,6 @@ public static class HierarchyHeatmap
             return;
         }
 
-        if (!enabled) return;
-
         int tier = GetProjectRecencyTier(guid);
 
         if (isFolder && !isExpanded) {
@@ -646,13 +578,6 @@ public static class HierarchyHeatmap
         return Mathf.CeilToInt(normalized * 5); // 1 to 5
     }
 
-    public static void SetEnabled(bool value) {
-        enabled = value;
-        EditorPrefs.SetBool("HierarchyHeatmapEnabled", enabled);
-        EditorApplication.RepaintHierarchyWindow();
-        EditorApplication.RepaintProjectWindow();
-    }
-
     public static void ResetRecent() {
         recentHierarchySelections.Clear();
         recentProjectSelections.Clear();
@@ -677,45 +602,3 @@ public static class HierarchyHeatmap
     }
 }
 
-public class HeatmapSettingsWindow : EditorWindow
-{
-    public static void ShowWindow() {
-        var window = GetWindow<HeatmapSettingsWindow>();
-        window.titleContent = new GUIContent("Heatmap Settings");
-        window.Show();
-    }
-
-    private void OnGUI() {
-        EditorGUI.BeginChangeCheck();
-
-        GUILayout.Label("Heatmap Settings", EditorStyles.boldLabel);
-        HierarchyHeatmap.lowHeatColor = EditorGUILayout.ColorField("Low Heat Color", HierarchyHeatmap.lowHeatColor);
-        HierarchyHeatmap.highHeatColor = EditorGUILayout.ColorField("High Heat Color", HierarchyHeatmap.highHeatColor);
-        HierarchyHeatmap.heatAlpha = EditorGUILayout.Slider("Heat Alpha", HierarchyHeatmap.heatAlpha, 0f, 1f);
-        HierarchyHeatmap.gradientStrength = EditorGUILayout.Slider("Gradient Strength", HierarchyHeatmap.gradientStrength, 0f, 1f);
-        HierarchyHeatmap.maxRecent = EditorGUILayout.IntSlider("Max Recent Items", HierarchyHeatmap.maxRecent, 1, 20);
-
-        EditorGUILayout.Space();
-        GUILayout.Label("Mark Settings", EditorStyles.boldLabel);
-        HierarchyHeatmap.markColor = EditorGUILayout.ColorField("Mark Color", HierarchyHeatmap.markColor);
-        HierarchyHeatmap.markAlpha = EditorGUILayout.Slider("Mark Alpha", HierarchyHeatmap.markAlpha, 0f, 1f);
-        HierarchyHeatmap.maxMarked = EditorGUILayout.IntSlider("Max Marked Items", HierarchyHeatmap.maxMarked, 1, 50);
-
-        if (EditorGUI.EndChangeCheck()) {
-            HierarchyHeatmap.SaveSettings();
-        }
-
-        EditorGUILayout.Space();
-        if (GUILayout.Button("Reset to Defaults")) {
-            HierarchyHeatmap.lowHeatColor = new Color(0.9f, 0.9f, 1f, 1f);
-            HierarchyHeatmap.highHeatColor = new Color(1f, 0.2f, 0.2f, 1f);
-            HierarchyHeatmap.heatAlpha = 0.3f;
-            HierarchyHeatmap.gradientStrength = 0.5f;
-            HierarchyHeatmap.maxRecent = HierarchyHeatmap.DefaultMaxRecent;
-            HierarchyHeatmap.markColor = new Color(1f, 0.8f, 0f, 1f);
-            HierarchyHeatmap.markAlpha = 0.4f;
-            HierarchyHeatmap.maxMarked = HierarchyHeatmap.DefaultMaxMarked;
-            HierarchyHeatmap.SaveSettings();
-        }
-    }
-}

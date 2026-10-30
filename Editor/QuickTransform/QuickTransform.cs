@@ -36,7 +36,6 @@ using UnityEngine;
 /// Toggle on/off via the Editools toolbar button.
 /// Configure per-project via a QuickTransformConfig ScriptableObject asset.
 /// </summary>
-[InitializeOnLoad]
 static partial class QuickTransform
 {
     // ─── Enums ──────────────────────────────────────────────────
@@ -45,56 +44,38 @@ static partial class QuickTransform
     enum Phase { Idle, Ready, Dragging }
     enum HoverKind { None, AllSideFaces, Face, Edge }
 
-    // ─── Public API / Settings (EditorPrefs-backed) ───────────
+    // ─── Public API / Settings (EditoolsSettings-backed) ──────────
 
-    const string k_Pref          = "QuickTransform_";
-    const string k_EnabledPref   = k_Pref + "Enabled";
-    const string k_EdgeHoverPref = k_Pref + "EdgeHoverPx";
-    const string k_CircleRadPref = k_Pref + "CircleRadius";
-    const string k_LinearRotPref = k_Pref + "LinearRot";
-    const string k_LinearRotSensPref = k_Pref + "LinearRotSens";
-    const string k_RotSnapPref      = k_Pref + "RotSnapAngle";
-    const string k_ShowTooltipsPref = k_Pref + "ShowTooltips";
-    internal static bool Enabled
-    {
-        get => EditorPrefs.GetBool(k_EnabledPref, true);
-        set => EditorPrefs.SetBool(k_EnabledPref, value);
-    }
+    internal static bool Enabled => EditoolsSettings.Current.quickTransformEnabled;
+    internal static float EdgeHoverPx => EditoolsSettings.Current.quickTransformEdgeHoverPx;
+    internal static float CircleRadius => EditoolsSettings.Current.quickTransformCircleRadius;
+    internal static bool LinearRotation => EditoolsSettings.Current.quickTransformLinearRotation;
+    internal static float LinearRotSensitivity => EditoolsSettings.Current.quickTransformLinearRotSensitivity;
+    internal static float RotSnapAngle => EditoolsSettings.Current.quickTransformRotSnapAngle;
+    internal static bool ShowTooltips => EditoolsSettings.Current.quickTransformShowTooltips;
 
-    internal static float EdgeHoverPx
-    {
-        get => EditorPrefs.GetFloat(k_EdgeHoverPref, 10f);
-        set => EditorPrefs.SetFloat(k_EdgeHoverPref, Mathf.Clamp(value, 4f, 30f));
-    }
+    static bool s_subscribed;
 
-    internal static float CircleRadius
+    /// <summary>Hooks the Scene View while enabled and the overlay is active; unhooks and resets otherwise.</summary>
+    internal static void Sync()
     {
-        get => EditorPrefs.GetFloat(k_CircleRadPref, 1.2f);
-        set => EditorPrefs.SetFloat(k_CircleRadPref, Mathf.Clamp(value, 0.3f, 5f));
-    }
+        bool wanted = EditoolsOverlay.IsActive && Enabled;
+        if (wanted == s_subscribed) return;
+        s_subscribed = wanted;
 
-    internal static bool LinearRotation
-    {
-        get => EditorPrefs.GetBool(k_LinearRotPref, false);
-        set => EditorPrefs.SetBool(k_LinearRotPref, value);
-    }
-
-    internal static float LinearRotSensitivity
-    {
-        get => EditorPrefs.GetFloat(k_LinearRotSensPref, 0.5f);
-        set => EditorPrefs.SetFloat(k_LinearRotSensPref, Mathf.Clamp(value, 0.01f, 10f));
-    }
-
-    internal static float RotSnapAngle
-    {
-        get => EditorPrefs.GetFloat(k_RotSnapPref, 15f);
-        set => EditorPrefs.SetFloat(k_RotSnapPref, Mathf.Clamp(value, 1f, 90f));
-    }
-
-    internal static bool ShowTooltips
-    {
-        get => EditorPrefs.GetBool(k_ShowTooltipsPref, true);
-        set => EditorPrefs.SetBool(k_ShowTooltipsPref, value);
+        if (wanted)
+        {
+            SceneView.duringSceneGui += OnSceneGUI;
+            Undo.undoRedoPerformed += OnUndoRedo;
+        }
+        else
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
+            Undo.undoRedoPerformed -= OnUndoRedo;
+            wHeld = eHeld = rHeld = rmbHeld = false;
+            if (phase != Phase.Idle) { GUIUtility.hotControl = 0; ResetState(); }
+            Tools.hidden = false;
+        }
     }
 
     // ─── Config (legacy ScriptableObject, still used for UpAxis) ─
@@ -227,14 +208,6 @@ static partial class QuickTransform
         SetCursorPos(pt.X + Mathf.RoundToInt(delta.x), pt.Y + Mathf.RoundToInt(delta.y));
     }
 #endif
-
-    // ─── Hook ───────────────────────────────────────────────────
-
-    static QuickTransform()
-    {
-        SceneView.duringSceneGui += OnSceneGUI;
-        Undo.undoRedoPerformed += OnUndoRedo;
-    }
 
     static void OnUndoRedo()
     {

@@ -5,20 +5,7 @@ using UnityEngine;
 
 static class GreyquadSettings
 {
-    const string k_SizeXPref = "Editools_Greyquad_DefaultSizeX";
-    const string k_SizeZPref = "Editools_Greyquad_DefaultSizeZ";
-
-    internal static Vector2 DefaultSize
-    {
-        get => new Vector2(
-            EditorPrefs.GetFloat(k_SizeXPref, 10f),
-            EditorPrefs.GetFloat(k_SizeZPref, 10f));
-        set
-        {
-            EditorPrefs.SetFloat(k_SizeXPref, value.x);
-            EditorPrefs.SetFloat(k_SizeZPref, value.y);
-        }
-    }
+    internal static Vector2 DefaultSize => EditoolsSettings.Current.greyquadDefaultSize;
 
     // ─── Menu item ───────────────────────────────────────────────
 
@@ -31,7 +18,7 @@ static class GreyquadSettings
     }
 
     [MenuItem("GameObject/3D Object/Greyquad", true)]
-    static bool CreateGreyquadValidate() => true;
+    static bool CreateGreyquadValidate() => GreyPrimitiveSettings.Enabled;
 
     // A Greyquad never casts shadows and never gets a collider — the shared
     // DefaultMeshCollider/DefaultShadowCasting prefs don't apply to it.
@@ -44,28 +31,12 @@ static class GreyquadSettings
         return go;
     }
 }
-
-static class GreyquadSettingsGUI
-{
-    static readonly GUIContent k_SizeLabel = new GUIContent(
-        "Default Size",
-        "Local scale (X, Z) applied to new Greyquads on creation. " +
-        "The mesh is a 1x1 unit quad, so a size of 10 creates a 10x10 quad.");
-
-    internal static void DrawGUI()
-    {
-        var curSize  = GreyquadSettings.DefaultSize;
-        var nextSize = EditorGUILayout.Vector2Field(k_SizeLabel, curSize);
-        if (nextSize != curSize)
-            GreyquadSettings.DefaultSize = nextSize;
-    }
-}
-
 static class GreyquadCreationShortcut
 {
     [Shortcut("Editools/Create Greyquad", typeof(SceneView), KeyCode.Q, ShortcutModifiers.Control)]
     static void Execute()
     {
+        if (!GreyPrimitiveSettings.CanCreate) return;
         var sv = SceneView.lastActiveSceneView;
         Vector3 spawnPos = sv != null ? sv.pivot : Vector3.zero;
 

@@ -75,50 +75,55 @@ public class SnapToSurface : EditorWindow
     }
     private static readonly List<SnapMeshEntry> s_snapMeshes = new();
 
-    // Master on/off for the tool, matching the Editools gating convention
-    // (see EditoolsSettingsPopup). Backed by EditorPrefs so it persists per machine.
-    internal static bool Enabled {
-        get => EditorPrefs.GetBool("SnapToSurface_Enabled", true);
-        set => EditorPrefs.SetBool("SnapToSurface_Enabled", value);
+    // Gate and placement settings live in EditoolsSettings (per user).
+    internal static bool Enabled => EditoolsSettings.Current.snapToSurfaceEnabled;
+
+    static void SetSetting<T>(ref T field, T value) where T : System.IEquatable<T>
+    {
+        if (field.Equals(value)) return;
+        var settings = EditoolsSettings.Current;
+        Undo.RecordObject(settings, "Snap To Surface Setting");
+        field = value;
+        settings.SaveAndNotify();
     }
 
     // Per-mask filters deciding which surface types are eligible snap targets.
     // Exposed as checkboxes in the Snap To Surface settings submenu.
     internal static bool SnapSkinnedMeshes {
-        get => EditorPrefs.GetBool("SnapToSurface_SnapSkinned", true);
-        set => EditorPrefs.SetBool("SnapToSurface_SnapSkinned", value);
+        get => EditoolsSettings.Current.snapSkinnedMeshes;
+        set => SetSetting(ref EditoolsSettings.Current.snapSkinnedMeshes, value);
     }
     // Static-flag filter, orthogonal to renderer type: only objects flagged Static
     // (GameObject.isStatic) are snap targets by default. When on, non-static objects
     // are also eligible.
     internal static bool SnapNonStatic {
-        get => EditorPrefs.GetBool("SnapToSurface_SnapNonStatic", false);
-        set => EditorPrefs.SetBool("SnapToSurface_SnapNonStatic", value);
+        get => EditoolsSettings.Current.snapNonStatic;
+        set => SetSetting(ref EditoolsSettings.Current.snapNonStatic, value);
     }
     // ZWrite-off surfaces (glow/additive/transparent) are skipped unless this is on.
     internal static bool SnapTransparentMeshes {
-        get => EditorPrefs.GetBool("SnapToSurface_SnapTransparent", false);
-        set => EditorPrefs.SetBool("SnapToSurface_SnapTransparent", value);
+        get => EditoolsSettings.Current.snapTransparentMeshes;
+        set => SetSetting(ref EditoolsSettings.Current.snapTransparentMeshes, value);
     }
     // When on, the object's Z+ (forward) axis is aligned to the surface normal instead
     // of the default Y+ (up) axis. Useful for objects authored facing down their Z axis.
     internal static bool AlignZToSurface {
-        get => EditorPrefs.GetBool("SnapToSurface_AlignZ", false);
-        set => EditorPrefs.SetBool("SnapToSurface_AlignZ", value);
+        get => EditoolsSettings.Current.snapAlignZToSurface;
+        set => SetSetting(ref EditoolsSettings.Current.snapAlignZToSurface, value);
     }
     // Distance to push the snapped object off the surface along its normal. 0 sits flush
     // on the surface; positive lifts it away from the surface, negative sinks it in.
     internal static float SurfaceOffset {
-        get => EditorPrefs.GetFloat("SnapToSurface_Offset", 0f);
-        set => EditorPrefs.SetFloat("SnapToSurface_Offset", value);
+        get => EditoolsSettings.Current.snapSurfaceOffset;
+        set => SetSetting(ref EditoolsSettings.Current.snapSurfaceOffset, value);
     }
     // When on, the aligned axis points the opposite way along the surface normal
     // (flipped 180° about the surface tangent) — e.g. the object faces into the
     // surface instead of out of it. The off-surface offset still follows the true
-    // outward normal. Backed by EditorPrefs so it persists per machine.
+    // outward normal.
     internal static bool FlipAxis {
-        get => EditorPrefs.GetBool("SnapToSurface_FlipAxis", false);
-        set => EditorPrefs.SetBool("SnapToSurface_FlipAxis", value);
+        get => EditoolsSettings.Current.snapFlipAxis;
+        set => SetSetting(ref EditoolsSettings.Current.snapFlipAxis, value);
     }
 
     // Raised whenever snap mode starts or ends so the Snap To Surface scene-view

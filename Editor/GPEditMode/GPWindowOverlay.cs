@@ -11,8 +11,8 @@ using UnityEngine.UIElements;
 /// (matching the rest of Editools) and adapts to the selected GP type.
 ///
 /// Each SceneView gets its own instance. The instances collectively own the Edit Mode scene hook
-/// via <see cref="GPEdit.Subscribe"/> / <see cref="GPEdit.Unsubscribe"/> (ref-counted), which is
-/// why GPEdit needs no InitializeOnLoad.
+/// via <see cref="GPEdit.Subscribe"/> / <see cref="GPEdit.Unsubscribe"/> (ref-counted), held only while
+/// Grey Primitives are enabled in Editools Settings, which is why GPEdit needs no InitializeOnLoad.
 /// </summary>
 [Overlay(typeof(SceneView), k_Id, "Grey Primitive")]
 class GPWindowOverlay : Overlay
@@ -56,20 +56,44 @@ class GPWindowOverlay : Overlay
         return root;
     }
 
+    bool _hooked;
+
     public override void OnCreated()
     {
-        GPEdit.Subscribe();
-        Selection.selectionChanged += UpdateVisibility;
-        UpdateVisibility();
+        EditoolsSettings.Changed += SyncGate;
+        SyncGate();
     }
 
     public override void OnWillBeDestroyed()
     {
-        Selection.selectionChanged -= UpdateVisibility;
-        GPEdit.Unsubscribe();
+        EditoolsSettings.Changed -= SyncGate;
+        SetHooked(false);
     }
 
-    void UpdateVisibility() => displayed = IsSingleTypeSelection();
+    // The Edit Mode scene hook and the selection watch are held only while Grey Primitives are enabled.
+    void SyncGate()
+    {
+        SetHooked(GreyPrimitiveSettings.Enabled);
+        UpdateVisibility();
+    }
+
+    void SetHooked(bool on)
+    {
+        if (on == _hooked) return;
+        _hooked = on;
+        if (on)
+        {
+            GPEdit.Subscribe();
+            Selection.selectionChanged += UpdateVisibility;
+        }
+        else
+        {
+            Selection.selectionChanged -= UpdateVisibility;
+            GPEdit.Unsubscribe();
+        }
+    }
+
+    void UpdateVisibility() => displayed = _hooked && IsSingleTypeSelection();
 
     static bool IsSingleTypeSelection()
     {

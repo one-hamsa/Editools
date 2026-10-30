@@ -10,7 +10,7 @@ using UnityEngine.UIElements;
 
 /// <summary>
 /// Adds GameObjects near the selection to the selection. Each activation (Ctrl+= or the
-/// Editools Settings row) searches one more distance interval:
+/// Editools toolbar button or settings menu) searches one more distance interval:
 /// aggregate mode searches one interval from the whole current selection;
 /// otherwise the search starts from the original selection and its distance grows by one
 /// interval per activation, until the selection is changed by something else.
@@ -88,10 +88,21 @@ static class DistanceSelect
 
     internal static string Status { get; private set; } = "";
 
+    internal static bool Enabled => EditoolsSettings.Current.distanceSelectEnabled;
+
+    /// <summary>Hides the panel when the function is turned off.</summary>
+    internal static void Sync()
+    {
+        if (!Enabled && Shown) Shown = false;
+    }
+
     // ─── Activation ─────────────────────────────────────────────
 
     [Shortcut("Editools/Distance Select", KeyCode.Equals, ShortcutModifiers.Action)]
-    static void DistanceSelectShortcut() => Activate();
+    static void DistanceSelectShortcut()
+    {
+        if (EditoolsOverlay.IsActive && Enabled) Activate();
+    }
 
     /// <summary>Shows the settings panel and adds the next distance interval to the selection.</summary>
     internal static void Activate()
@@ -658,16 +669,26 @@ class DistanceSelectOverlay : Overlay
     public override void OnCreated()
     {
         DistanceSelect.s_onShownChanged += UpdateVisibility;
-        DistanceSelect.s_onStateChanged += Repaint;
-        Selection.selectionChanged += Repaint;
+        displayedChanged += OnDisplayedChanged;
         UpdateVisibility();
+        OnDisplayedChanged(displayed);
     }
 
     public override void OnWillBeDestroyed()
     {
-        Selection.selectionChanged -= Repaint;
-        DistanceSelect.s_onStateChanged -= Repaint;
+        OnDisplayedChanged(false);
+        displayedChanged -= OnDisplayedChanged;
         DistanceSelect.s_onShownChanged -= UpdateVisibility;
+    }
+
+    // Repaint hooks are live only while the panel is visible, so a hidden panel costs nothing.
+    void OnDisplayedChanged(bool shown)
+    {
+        DistanceSelect.s_onStateChanged -= Repaint;
+        Selection.selectionChanged -= Repaint;
+        if (!shown) return;
+        DistanceSelect.s_onStateChanged += Repaint;
+        Selection.selectionChanged += Repaint;
     }
 
     void UpdateVisibility() => displayed = DistanceSelect.Shown;

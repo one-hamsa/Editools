@@ -8,27 +8,26 @@ using UnityEngine.UIElements;
 /// Floating Scene View panel with X / Y / Z buttons that reorient the selected objects:
 /// each click rotates an object 90° clockwise around its own local axis and swaps the
 /// localScale of the two other axes, so the object keeps its world-space proportions
-/// while the mesh turns "inside" them. Shown/hidden via the Editools Settings toggle.
+/// while the mesh turns "inside" them. Shown/hidden via its Editools toolbar toggle or settings menu row.
 /// </summary>
 [Overlay(typeof(SceneView), k_Id, "Change Orientation")]
 class ChangeOrientationOverlay : Overlay
 {
     public const string k_Id = "change-orientation";
 
-    const string k_EnabledPref = "Editools_ChangeOrientation_Enabled";
+    internal static bool Enabled => EditoolsSettings.Current.changeOrientationEnabled;
 
-    // notifies live overlay instances when the Settings toggle flips
-    static event System.Action s_onEnabledChanged;
-
-    internal static bool Enabled
+    /// <summary>Whether the panel is shown. Flipped by the toolbar toggle / settings menu row.</summary>
+    internal static bool Shown
     {
-        get => EditorPrefs.GetBool(k_EnabledPref, false);
-        set
-        {
-            if (value == Enabled) return;
-            EditorPrefs.SetBool(k_EnabledPref, value);
-            s_onEnabledChanged?.Invoke();
-        }
+        get => EditoolsSettings.Current.changeOrientationShown;
+        set => EditoolsSettings.SetBool(ref EditoolsSettings.Current.changeOrientationShown, value, "Toggle Change Orientation");
+    }
+
+    /// <summary>Hides the panel when the function is turned off; live instances follow <see cref="EditoolsSettings.Changed"/>.</summary>
+    internal static void Sync()
+    {
+        if (!Enabled && Shown) Shown = false;
     }
 
     static readonly GUIContent k_XAxis = new GUIContent("X Axis",
@@ -52,18 +51,27 @@ class ChangeOrientationOverlay : Overlay
 
     public override void OnCreated()
     {
-        s_onEnabledChanged += UpdateVisibility;
-        Selection.selectionChanged += OnSelectionChanged;
+        EditoolsSettings.Changed += UpdateVisibility;
+        displayedChanged += OnDisplayedChanged;
         UpdateVisibility();
+        OnDisplayedChanged(displayed);
     }
 
     public override void OnWillBeDestroyed()
     {
         Selection.selectionChanged -= OnSelectionChanged;
-        s_onEnabledChanged -= UpdateVisibility;
+        displayedChanged -= OnDisplayedChanged;
+        EditoolsSettings.Changed -= UpdateVisibility;
     }
 
-    void UpdateVisibility() => displayed = Enabled;
+    void UpdateVisibility() => displayed = Enabled && Shown;
+
+    // The selection hook is live only while the panel is visible, so a hidden panel costs nothing.
+    void OnDisplayedChanged(bool shown)
+    {
+        Selection.selectionChanged -= OnSelectionChanged;
+        if (shown) Selection.selectionChanged += OnSelectionChanged;
+    }
 
     void OnSelectionChanged() => _content?.MarkDirtyRepaint();
 

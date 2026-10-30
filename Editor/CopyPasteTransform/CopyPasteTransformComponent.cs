@@ -2,6 +2,10 @@ using UnityEngine;
 using UnityEditor;
 using UnityEditor.ShortcutManagement;
 
+/// <summary>
+/// Alt+Ctrl+C / V / X copy, paste and reset the local transform of the selection.
+/// Gated by the Copy / Paste Transform function in Editools Settings.
+/// </summary>
 public static class CopyPasteTransformComponent {
     struct TransformData {
         public Vector3      localPosition;
@@ -17,8 +21,11 @@ public static class CopyPasteTransformComponent {
 
     private static TransformData _data;
 
+    static bool Enabled => EditoolsOverlay.IsActive && EditoolsSettings.Current.copyPasteTransformEnabled;
+
     [Shortcut("Editools/Copy Transform", KeyCode.C, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
     public static void CopyTransformValues() {
+        if(!Enabled) return;
         if(Selection.gameObjects.Length == 0) return;
         var selectionTr = Selection.gameObjects[0].transform;
         _data = new TransformData(selectionTr.localPosition, selectionTr.localRotation, selectionTr.localScale);
@@ -26,6 +33,7 @@ public static class CopyPasteTransformComponent {
 
     [Shortcut("Editools/Paste Transform", KeyCode.V, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
     public static void PasteTransformValues() {
+        if(!Enabled) return;
         foreach(var selection in Selection.gameObjects) {
             Transform selectionTr = selection.transform;
             Undo.RecordObject(selectionTr, "Paste Transform Values");
@@ -37,6 +45,7 @@ public static class CopyPasteTransformComponent {
 
     [Shortcut("Editools/Reset Transform", KeyCode.X, ShortcutModifiers.Alt | ShortcutModifiers.Action)]
     public static void ResetTransformValues() {
+        if(!Enabled) return;
         if(Selection.gameObjects.Length == 0) return;
         foreach(var selection in Selection.gameObjects) {
             Transform selectionTr = selection.transform;

@@ -157,33 +157,29 @@ public class ViewCompScreenshot
 }
 
 /// <summary>
-/// Main Editools overlay in the Scene View toolbar. Hosts screenshot capture,
-/// material check, hierarchy heatmap, and serves as the central access point
-/// for all Editools features. Each SceneView window gets its own instance.
+/// Editools toolbar overlay in the Scene View. Its buttons are the functions the user selected
+/// for the overlay in <see cref="EditoolsSettings"/> (the Scene Capture strip always comes first),
+/// followed by the settings menu. Also owns the screenshot capture / compare feature.
+/// Each SceneView window gets its own instance; <see cref="IsActive"/> is true while at least
+/// one instance is displayed, and every Editools tool is subscribed only while it is.
 /// </summary>
 [Overlay(typeof(SceneView), "editools-toolbar", "Editools")]
-public class EditoolsOverlay : ToolbarOverlay
+public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVerticalToolbar
 {
 	const int MaxScreenshots = 10;
 	const string k_Session = "AV_";
+	const string k_ScreenshotFunctionId = "screenshot-capture";
 	static string ScreenshotDir => Path.Combine("Library", "AdvancedVisuals");
 
 	internal static readonly Dictionary<SceneView, EditoolsOverlay> s_instances = new();
 	static bool s_subscribedToSceneGui;
+	static bool s_isActive;
 
 	/// <summary>
-	/// True when at least one Editools overlay is displayed in a SceneView.
-	/// Subsystems should check this before doing any work.
+	/// True when at least one Editools overlay is displayed in a SceneView. Tools subscribe to
+	/// editor events only while this holds (see <see cref="EditoolsFunctions.SyncAll"/>).
 	/// </summary>
-	internal static bool IsActive
-	{
-		get
-		{
-			foreach (var kvp in s_instances)
-				if (kvp.Value.displayed) return true;
-			return false;
-		}
-	}
+	internal static bool IsActive => s_isActive;
 
 	readonly List<ViewCompScreenshot> _screenshots = new();
 
@@ -194,26 +190,87 @@ public class EditoolsOverlay : ToolbarOverlay
 	IMGUIContainer _displayIMGUI;
 	bool _pendingCapture;
 
-	// Screenshot strip element reference (for rebuilding dynamic buttons)
+	OverlayToolbar _toolbar;
 	EditoolsScreenshotStrip _screenshotStrip;
 
-	EditoolsOverlay() : base(
-		EditoolsScreenshotStrip.k_Id,
-		EditoolsCaptureButton.k_Id,
-		EditoolsMaterialCheckButton.k_Id,
-		EditoolsSelectByMaterialButton.k_Id,
-		EditoolsTriggerDebugButton.k_Id,
-		EditoolsGammaCorrectorButton.k_Id,
-		EditoolsSettingsButton.k_Id
-	) { }
+	/// <summary>USS class for toolbar elements that handle right-click themselves; the overlay then does not open the settings for them.</summary>
+	internal const string k_OwnContextMenuClass = "editools-own-context-menu";
 
-	// ---- Element registration ----
+	// ---- Toolbar content ----
 
-	internal void RegisterScreenshotStrip(EditoolsScreenshotStrip strip) => _screenshotStrip = strip;
-	internal void UnregisterScreenshotStrip(EditoolsScreenshotStrip strip)
+	public override VisualElement CreatePanelContent() => CreateToolbar();
+	public OverlayToolbar CreateHorizontalToolbarContent() => CreateToolbar();
+	public OverlayToolbar CreateVerticalToolbarContent() => CreateToolbar();
+
+	OverlayToolbar CreateToolbar()
 	{
-		if (_screenshotStrip == strip) _screenshotStrip = null;
+		_toolbar = new OverlayToolbar();
+		// Right-click is consumed by the Scene View before it reaches toolbar elements, so the
+		// watcher sits at the panel root (trickle-down) and tests the toolbar's children itself.
+		_toolbar.RegisterCallback<AttachToPanelEvent>(evt =>
+			evt.destinationPanel?.visualTree.RegisterCallback<PointerDownEvent>(OnPanelPointerDown, TrickleDown.TrickleDown));
+		_toolbar.RegisterCallback<DetachFromPanelEvent>(evt =>
+			evt.originPanel?.visualTree.UnregisterCallback<PointerDownEvent>(OnPanelPointerDown, TrickleDown.TrickleDown));
+		_toolbar.RegisterCallback<ContextClickEvent>(evt =>
+		{
+			if (OpenSettingsForButtonAt(new Vector2(evt.mousePosition.x, evt.mousePosition.y)))
+				evt.StopPropagation();
+		});
+		PopulateToolbar();
+		return _toolbar;
 	}
+
+	void OnPanelPointerDown(PointerDownEvent evt)
+	{
+		if (evt.button != 1) return;
+		if (OpenSettingsForButtonAt(new Vector2(evt.position.x, evt.position.y)))
+			evt.StopImmediatePropagation();
+	}
+
+	// Right-click on any toolbar button opens the settings, except buttons with their own context menu.
+	bool OpenSettingsForButtonAt(Vector2 panelPosition)
+	{
+		if (_toolbar == null || !_toolbar.worldBound.Contains(panelPosition)) return false;
+		foreach (var child in _toolbar.Children())
+		{
+			if (!child.worldBound.Contains(panelPosition)) continue;
+			if (child.ClassListContains(k_OwnContextMenuClass)) return false;
+			EditoolsSettings.OpenInInspector();
+			return true;
+		}
+		return false;
+	}
+
+	void PopulateToolbar()
+	{
+		_toolbar.Clear();
+		_screenshotStrip = null;
+
+		var capture = EditoolsFunctions.Find(k_ScreenshotFunctionId);
+		if (capture.ShowsInOverlay)
+		{
+			_screenshotStrip = new EditoolsScreenshotStrip(this);
+			_toolbar.Add(_screenshotStrip);
+			_toolbar.Add(capture.CreateOverlayElement(this));
+		}
+
+		foreach (var function in EditoolsFunctions.All)
+		{
+			if (function == capture || !function.ShowsInOverlay) continue;
+			var element = function.CreateOverlayElement(this);
+			if (element != null) _toolbar.Add(element);
+		}
+
+		_toolbar.Add(new EditoolsSettingsButton());
+		EditorToolbarUtility.SetupChildrenAsButtonStrip(_toolbar);
+	}
+
+	void OnSettingsChanged()
+	{
+		if (_toolbar != null) PopulateToolbar();
+	}
+
+	internal VisualElement CreateCaptureElement() => new EditoolsCaptureButton(this);
 
 	// ---- Internal accessors for toolbar elements ----
 
@@ -236,15 +293,16 @@ public class EditoolsOverlay : ToolbarOverlay
 
 		displayedChanged += OnDisplayedChanged;
 		AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+		EditoolsSettings.Changed += OnSettingsChanged;
 		RestoreScreenshots();
-		MaterialCheckPopup.RestoreAfterReload();
-		ObjectDisplayToggle.ScheduleClaimShortcutBinding();
+		MaterialCheck.RestoreAfterReload();
+		RefreshActive();
 	}
 
 	void OnDisplayedChanged(bool visible)
 	{
-		// When the overlay is hidden/shown, repaint hierarchy & project windows
-		// so heatmap drawing responds immediately
+		RefreshActive();
+		// Hierarchy & project windows repaint so the heatmap follows the overlay immediately.
 		EditorApplication.RepaintHierarchyWindow();
 		EditorApplication.RepaintProjectWindow();
 	}
@@ -253,6 +311,7 @@ public class EditoolsOverlay : ToolbarOverlay
 	{
 		displayedChanged -= OnDisplayedChanged;
 		AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+		EditoolsSettings.Changed -= OnSettingsChanged;
 
 		var sceneView = containerWindow as SceneView;
 		if (sceneView != null)
@@ -265,6 +324,27 @@ public class EditoolsOverlay : ToolbarOverlay
 			SceneView.duringSceneGui -= OnSceneGUI;
 			s_subscribedToSceneGui = false;
 		}
+
+		RefreshActive();
+	}
+
+	// Recomputes IsActive from the live instances and re-syncs every tool to it.
+	static void RefreshActive()
+	{
+		bool active = false;
+		foreach (var kvp in s_instances)
+			if (kvp.Value.displayed) { active = true; break; }
+
+		s_isActive = active;
+		EditoolsFunctions.SyncAll();
+	}
+
+	/// <summary>Captures the last active Scene View (settings menu entry point).</summary>
+	internal static void CaptureLastActiveSceneView()
+	{
+		var view = SceneView.lastActiveSceneView;
+		if (view != null && s_instances.TryGetValue(view, out var overlay))
+			overlay.OnCaptureClicked();
 	}
 
 	// ---- Capture ----
@@ -353,7 +433,7 @@ public class EditoolsOverlay : ToolbarOverlay
 		RenderTexture.active = prevActive;
 		RenderTexture.ReleaseTemporary(sceneRT);
 
-		if (SceneViewVertexCounter.Enabled)
+		if (SceneViewVertexCounter.IsDrawing)
 			SceneViewVertexCounter.DrawToCapture(sceneView, tex);
 
 		// Commit
@@ -369,7 +449,8 @@ public class EditoolsOverlay : ToolbarOverlay
 		}
 
 		_screenshots.Add(new ViewCompScreenshot { texture = tex, comment = "" });
-		_lastViewportSize = sceneView.cameraViewport.size;
+		// Baseline for CheckViewportSize is taken on the next Scene GUI, after the toolbar has laid out the new strip button.
+		_lastViewportSize = Vector2.zero;
 
 		_screenshotStrip?.Rebuild();
 	}
@@ -512,7 +593,12 @@ public class EditoolsOverlay : ToolbarOverlay
 		if (_screenshots.Count == 0) return;
 
 		Vector2 currentSize = sceneView.cameraViewport.size;
-		if (_lastViewportSize != Vector2.zero && _lastViewportSize != currentSize)
+		if (_lastViewportSize == Vector2.zero)
+		{
+			_lastViewportSize = currentSize;
+			return;
+		}
+		if (_lastViewportSize != currentSize)
 			ClearAllScreenshots();
 	}
 
@@ -670,77 +756,31 @@ public class EditoolsOverlay : ToolbarOverlay
 		}
 	}
 
-	// ---- Shared helper: find overlay from a toolbar element ----
-
-	internal static EditoolsOverlay FindOverlayFromElement(VisualElement element)
-	{
-		// Match by panel — toolbar strip elements share a panel with their SceneView
-		// even though they're not children of rootVisualElement
-		var p = element.panel;
-		if (p != null)
-		{
-			foreach (var kvp in s_instances)
-			{
-				if (kvp.Key != null && kvp.Key.rootVisualElement?.panel == p)
-					return kvp.Value;
-			}
-		}
-
-		// Fallback: single SceneView
-		if (s_instances.Count == 1)
-		{
-			foreach (var kvp in s_instances)
-				return kvp.Value;
-		}
-
-		return null;
-	}
 }
 
-// ---- Toolbar elements (each is a separate class so Unity can lay them out individually) ----
+// ---- Toolbar elements ----
 
 /// <summary>
 /// Dynamic strip of numbered screenshot buttons. Empty when no screenshots exist.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsScreenshotStrip : VisualElement
 {
-	public const string k_Id = "Editools/Screenshots";
-
-	EditoolsOverlay _overlay;
+	readonly EditoolsOverlay _overlay;
 	readonly List<Button> _buttons = new();
 
-	public EditoolsScreenshotStrip()
+	public EditoolsScreenshotStrip(EditoolsOverlay overlay)
 	{
+		_overlay = overlay;
 		style.flexDirection = FlexDirection.Row;
 		style.alignItems = Align.Center;
-
-		RegisterCallback<AttachToPanelEvent>(_ =>
-		{
-			// Defer lookup to avoid recursive AttachToPanelEvent from rootVisualElement access
-			EditorApplication.delayCall += () =>
-			{
-				if (panel == null) return; // detached before callback fired
-				_overlay = EditoolsOverlay.FindOverlayFromElement(this);
-				_overlay?.RegisterScreenshotStrip(this);
-				Rebuild();
-			};
-		});
-
-		RegisterCallback<DetachFromPanelEvent>(_ =>
-		{
-			_overlay?.UnregisterScreenshotStrip(this);
-			_overlay = null;
-		});
+		AddToClassList(EditoolsOverlay.k_OwnContextMenuClass);
+		Rebuild();
 	}
 
 	public void Rebuild()
 	{
 		Clear();
 		_buttons.Clear();
-
-		_overlay ??= EditoolsOverlay.FindOverlayFromElement(this);
-		if (_overlay == null) return;
 
 		for (int i = 0; i < _overlay.Screenshots.Count; i++)
 		{
@@ -753,13 +793,15 @@ class EditoolsScreenshotStrip : VisualElement
 			btn.style.minWidth = 24;
 			btn.style.paddingLeft = 4;
 			btn.style.paddingRight = 4;
+			btn.style.marginTop = 0;
+			btn.style.marginBottom = 0;
 
 			btn.AddManipulator(new ContextualMenuManipulator(evt =>
 			{
-				evt.menu.AppendAction("Edit Comment...", _ => _overlay?.ShowCommentPopup(idx, btn));
-				evt.menu.AppendAction("Delete", _ => _overlay?.DeleteScreenshot(idx));
+				evt.menu.AppendAction("Edit Comment...", _ => _overlay.ShowCommentPopup(idx, btn));
+				evt.menu.AppendAction("Delete", _ => _overlay.DeleteScreenshot(idx));
 				evt.menu.AppendSeparator("");
-				evt.menu.AppendAction("Delete All", _ => _overlay?.ClearAllScreenshots());
+				evt.menu.AppendAction("Delete All", _ => _overlay.ClearAllScreenshots());
 			}));
 
 			_buttons.Add(btn);
@@ -771,8 +813,6 @@ class EditoolsScreenshotStrip : VisualElement
 
 	public void UpdateStyles()
 	{
-		if (_overlay == null) return;
-
 		for (int i = 0; i < _buttons.Count; i++)
 		{
 			bool isActive = (i == _overlay.ActiveIndex);
@@ -787,72 +827,46 @@ class EditoolsScreenshotStrip : VisualElement
 }
 
 /// <summary>
-/// Capture button — takes a screenshot of the current scene view.
+/// Capture button - takes a screenshot of the current scene view.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsCaptureButton : EditorToolbarButton
 {
-	public const string k_Id = "Editools/Capture";
-
-	EditoolsOverlay _overlay;
-
-	public EditoolsCaptureButton() : base()
+	public EditoolsCaptureButton(EditoolsOverlay overlay)
 	{
-		icon = EditorGUIUtility.IconContent("d_SceneViewCamera").image as Texture2D;
+		icon = EditoolsIcons.Builtin("d_SceneViewCamera");
 		tooltip = "Capture current scene view";
-		clicked += OnClick;
-
-		RegisterCallback<AttachToPanelEvent>(_ =>
-		{
-			EditorApplication.delayCall += () =>
-			{
-				if (panel == null) return;
-				_overlay = EditoolsOverlay.FindOverlayFromElement(this);
-			};
-		});
-	}
-
-	void OnClick()
-	{
-		_overlay ??= EditoolsOverlay.FindOverlayFromElement(this);
-		_overlay?.OnCaptureClicked();
+		clicked += overlay.OnCaptureClicked;
 	}
 }
 
 /// <summary>
-/// Material Check dropdown — shows a small popup to assign and toggle
+/// Material Check dropdown - shows a small popup to assign and toggle
 /// a material override on all opaque scene renderers.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsMaterialCheckButton : EditorToolbarDropdown
 {
-	public const string k_Id = "Editools/MaterialCheck";
-
 	public EditoolsMaterialCheckButton()
 	{
-		icon = EditorGUIUtility.IconContent("d_Material Icon").image as Texture2D;
-		tooltip = "Material Check — drag a material here to assign it";
+		icon = EditoolsIcons.Builtin("d_Material Icon");
+		tooltip = "Material Check - drag a material here to assign it";
 		clicked += () => UnityEditor.PopupWindow.Show(worldBound, new MaterialCheckPopup());
 
-		// Accept drag-and-drop of materials onto this button
-		RegisterCallback<DragEnterEvent>(_ =>
-		{
-			if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Material)
-				DragAndDrop.visualMode = DragAndDropVisualMode.Link;
-		});
-		RegisterCallback<DragUpdatedEvent>(_ =>
-		{
-			if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Material)
-				DragAndDrop.visualMode = DragAndDropVisualMode.Link;
-		});
+		RegisterCallback<DragEnterEvent>(_ => AcceptMaterialDrag());
+		RegisterCallback<DragUpdatedEvent>(_ => AcceptMaterialDrag());
 		RegisterCallback<DragPerformEvent>(_ =>
 		{
 			if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Material mat)
 			{
 				DragAndDrop.AcceptDrag();
-				MaterialCheckPopup.SetMaterial(mat);
+				MaterialCheck.Material = mat;
 			}
 		});
+	}
+
+	static void AcceptMaterialDrag()
+	{
+		if (DragAndDrop.objectReferences.Length == 1 && DragAndDrop.objectReferences[0] is Material)
+			DragAndDrop.visualMode = DragAndDropVisualMode.Link;
 	}
 }
 
@@ -861,10 +875,8 @@ class EditoolsMaterialCheckButton : EditorToolbarDropdown
 /// Drag materials, shaders or objects onto the button to add them to the panel's lists
 /// (or set the Replacement material) via a context menu.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsSelectByMaterialButton : EditorToolbarToggle
 {
-	public const string k_Id = "Editools/SelectByMaterial";
 
 	public EditoolsSelectByMaterialButton()
 	{
@@ -935,578 +947,238 @@ class EditoolsSelectByMaterialButton : EditorToolbarToggle
 	}
 }
 
+
 /// <summary>
-/// Settings dropdown — opens the central Editools settings popup where all
-/// features can be toggled on/off and their sub-settings accessed.
+/// Settings dropdown at the end of the toolbar. Opens <see cref="EditoolsSettingsMenuPopup"/>.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsSettingsButton : EditorToolbarDropdown
 {
-	public const string k_Id = "Editools/Settings";
-
 	public EditoolsSettingsButton()
 	{
-		icon = EditorGUIUtility.IconContent("d_Settings").image as Texture2D;
-		tooltip = "Editools Settings";
-		clicked += () => UnityEditor.PopupWindow.Show(worldBound, new EditoolsSettingsPopup());
+		icon = EditoolsIcons.Builtin("d_Settings");
+		tooltip = "Editools: functions not shown as toolbar buttons, and Settings.";
+		clicked += () => UnityEditor.PopupWindow.Show(worldBound, new EditoolsSettingsMenuPopup());
 	}
 }
 
 /// <summary>
-/// Central settings popup — lists all Editools features with checkboxes to
-/// toggle them on/off and arrows to open sub-settings where applicable.
+/// Menu behind the settings button: one row per enabled function that supports a toolbar button
+/// but is not selected for the overlay (clicking runs it; toggle functions show their on/off state),
+/// then a bold Settings row that opens
+/// <see cref="EditoolsSettings"/> in the Inspector.
 /// </summary>
-class EditoolsSettingsPopup : PopupWindowContent
+class EditoolsSettingsMenuPopup : PopupWindowContent
 {
-	static GUIStyle s_rowButtonStyle;
-	static GUIStyle s_arrowStyle;
+	const float k_RowHeight = 22f;
+	const float k_Width = 230f;
+
+	static GUIStyle s_rowStyle;
+	static GUIStyle s_settingsRowStyle;
+
+	readonly List<EditoolsFunction> _rows = new List<EditoolsFunction>(16);
+
+	public EditoolsSettingsMenuPopup()
+	{
+		foreach (var function in EditoolsFunctions.All)
+			if (function.ShowsInSettingsMenu)
+				_rows.Add(function);
+	}
 
 	static void EnsureStyles()
 	{
-		if (s_rowButtonStyle != null) return;
-		s_rowButtonStyle = new GUIStyle(EditorStyles.label)
+		if (s_rowStyle != null) return;
+		s_rowStyle = new GUIStyle(EditorStyles.label)
 		{
 			alignment = TextAnchor.MiddleLeft,
-			padding = new RectOffset(0, 0, 0, 0),
+			padding = new RectOffset(4, 4, 0, 0),
 			margin = new RectOffset(0, 0, 0, 0)
 		};
-		s_arrowStyle = new GUIStyle(EditorStyles.label)
-		{
-			alignment = TextAnchor.MiddleCenter,
-			fontStyle = FontStyle.Normal,
-			padding = new RectOffset(0, 0, 0, 0)
-		};
+		s_settingsRowStyle = new GUIStyle(s_rowStyle) { fontStyle = FontStyle.Bold };
 	}
 
-	public override Vector2 GetWindowSize() => new Vector2(200, 20 * 22 + 4);
-
-	static readonly GUIContent k_SceneViewUndo = new GUIContent(
-		"Scene View Undo",
-		"Tracks Scene View camera movements and lets you step back/forward through them. " +
-		"Use Shift+Z to undo and Shift+Y to redo camera navigation. " +
-		"Stores up to 32 positions per Scene View.");
-
-	static readonly GUIContent k_HierarchyHeatmap = new GUIContent(
-		"Hierarchy Heatmap",
-		"Color-codes recently selected objects in the Hierarchy window. " +
-		"Most recently selected objects appear warmer. " +
-		"Click the arrow for settings (max tracked items, color range) or to reset the history.");
-
-	static readonly GUIContent k_QuickTransform = new GUIContent(
-		"QuickTransform",
-		"Hold W / E / R and drag in the Scene View to transform without gizmo handles.\n" +
-		"A wireframe bounding box appears around the selection.\n" +
-		"\n" +
-		"W — Move\n" +
-		"  LMB outside box: slide on world XZ plane\n" +
-		"  LMB on face: slide on that face's plane\n" +
-		"  RMB on face: push/pull along face normal\n" +
-		"\n" +
-		"E — Rotate\n" +
-		"  LMB outside box: rotate around world Y, pivot at center\n" +
-		"  LMB on face: rotate around face normal\n" +
-		"  LMB on edge: rotate around the edge axis\n" +
-		"  Ctrl: snap to angle increments (default 15°)\n" +
-		"\n" +
-		"R — Scale\n" +
-		"  LMB on face: single-axis scale, opposite face anchored\n" +
-		"  LMB outside box: nearest-side axis scale\n" +
-		"  RMB on face: uniform scale from opposite face\n" +
-		"  RMB outside box: uniform scale from pivot\n" +
-		"\n" +
-		"Shift + W/E/R: duplicate first, then transform the copies.\n" +
-		"\n" +
-		"Click ▸ for settings (edge detection threshold, rotation circle size, snap angle, linear rotation mode).");
-
-	static readonly GUIContent k_SceneViewRoll = new GUIContent(
-		"Scene View Roll",
-		"Roll the Scene View camera by holding Alt and dragging the middle mouse button left or right. " +
-		"Alt + middle-mouse click (without dragging) resets the camera roll back to zero.");
-
-	static readonly GUIContent k_QuickAccess = new GUIContent(
-		"Quick Access",
-		"Opens a dockable panel for pinning frequently used scene objects and project assets. " +
-		"Drag items from the Hierarchy or Project window into the panel for quick one-click selection.");
-
-	static readonly GUIContent k_MassRename = new GUIContent(
-		"Mass Rename",
-		"Batch-rename multiple selected objects or assets with F2. " +
-		"Supports find/replace with wildcards, prefix/suffix removal, and auto-numbering.");
-
-	static readonly GUIContent k_SelectMaterial = new GUIContent(
-		"Select Material",
-		"Alt + left-click in the Scene View to select the material of the object under the cursor " +
-		"(first material slot). The material is highlighted in the Project window.");
-
-	static readonly GUIContent k_AltDeselection = new GUIContent(
-		"Alt-Deselection",
-		"Ctrl + left-click in the Scene View only adds the object under the cursor to the selection " +
-		"(replaces Unity's Ctrl + click toggle). Alt + left-click without dragging removes it. " +
-		"Box selection and Alt + drag camera orbit are unchanged.");
-
-	static readonly GUIContent k_ObjectDisplayToggle = new GUIContent(
-		"Object Display Toggle",
-		"Y cycles the selected objects between Normal, Bounding Box (geometry hidden, bounds " +
-		"drawn as lines), Greybox (Greybox objects only: the Greybox's corner edges) and Outline " +
-		"(mesh silhouette). The lines show with Gizmos off; clicking a line selects the object, " +
-		"and a selected object's lines draw in orange. Unity's Transform tool is unbound from Y " +
-		"in the active shortcut profile. Nothing is saved to the scene; the state lasts until " +
-		"the scene is reloaded.");
-
-	static readonly GUIContent k_SelectShadowOnly = new GUIContent(
-		"Select Shadow Only",
-		"Selects all scene objects whose MeshRenderer has Cast Shadows set to Shadows Only. " +
-		"Includes inactive objects.");
-
-	static readonly GUIContent k_DistanceSelect = new GUIContent(
-		"Distance Select",
-		"Ctrl+= — adds objects near the selection to the selection and opens its settings panel. " +
-		"Distance is measured from pivot, bounding box or mesh surface to pivot, bounding box or mesh surface.\n\n" +
-		"Aggregate on: each press searches one interval from the whole current selection.\n" +
-		"Aggregate off: each press searches from the original selection, one interval further each time, " +
-		"until the selection is changed by something else.");
-
-	static readonly GUIContent k_PlaneToQuad = new GUIContent(
-		"Plane → Quad",
-		"Replaces the built-in Plane mesh (121 verts) on the selected objects with a shared " +
-		"4-vertex quad in the same coordinate system — 10x10 on local XZ, facing +Y. " +
-		"Only the mesh reference changes: transform, materials, and prefab overrides are kept. " +
-		"MeshColliders using the Plane mesh are swapped too.");
-
-	static readonly GUIContent k_FpsCounter = new GUIContent(
-		"FPS Counter",
-		"Shows a live FPS counter in the top-left corner of each Scene View. " +
-		"Displays average FPS and frame time in milliseconds. Tracked independently per view.");
-
-	static readonly GUIContent k_VertexCounter = new GUIContent(
-		"Vertex Counter",
-		"Shows the number of vertices sent to the GPU, under the FPS counter in each Scene View: " +
-		"whole scene, inside the Scene View frustum, and the selection (with children, ignoring the frustum).\n\n" +
-		"Counts one draw per material slot using its submesh's vertices, so hard-edge and UV-seam splits " +
-		"and multi-material redraws are included. Only Mesh and Skinned Mesh Renderers that draw are counted: " +
-		"enabled, not Shadows Only, and in the LOD the Scene View camera currently shows.\n\n" +
-		"Included in Editools scene captures.");
-
-	static readonly GUIContent k_GreyPrimitives = new GUIContent(
-		"Grey Primitives",
-		"Procedural primitives for level blockout.\n\n" +
-		"Greybox — Ctrl+G — deformable box. Hold W over an edge to deform.\n" +
-		"Greypipe — Ctrl+T — spline-based tube. Hold Q to insert/extend/delete vertices.\n\n" +
-		"Click ▸ to edit shared defaults (material, layer, collider, shadows) and per-primitive defaults.");
-
-	static readonly GUIContent k_Sticker = new GUIContent(
-		"Sticker",
-		"Ctrl+Shift+K — planar mesh that conforms to nearby static geometry. " +
-		"Drives size + texture from a MainTex field and pushes it through LocalMaterial.\n\n" +
-		"Click ▸ to edit Sticker defaults (material, layer, static, subdivisions, raycast slab, relax, offset).");
-
-	static readonly GUIContent k_SnapToSurface = new GUIContent(
-		"Snap To Surface",
-		"Alt+A in the Scene View drops the selected object onto the surface under the " +
-		"cursor and aligns it to that surface's normal. Left-click confirms, right-click cancels.\n\n" +
-		"Click ▸ to choose which surface types are snap targets (skinned, static, transparent).");
-
-	static readonly GUIContent k_ChangeOrientation = new GUIContent(
-		"Change Orientation",
-		"Shows a floating Scene View panel with X / Y / Z buttons. Each click rotates the " +
-		"selected objects 90° clockwise around their local axis and swaps the scale of the " +
-		"other two axes, so objects keep their world-space proportions while reorienting inside them.");
-
-	static readonly GUIContent k_GammaCorrector = new GUIContent(
-		"Gamma Corrector",
-		"Shows the Gamma Corrector swatch button in the Scene View toolbar. " +
-		"Left-click picks a color and live-converts between gamma and linear; " +
-		"right-click copies/pastes or switches conversion direction.");
-
-	static readonly GUIContent k_ReplaceObject = new GUIContent(
-		"Replace Object",
-		"Replaces every selected Hierarchy object with a duplicate of one reference " +
-		"object, keeping each original's transform (parent, position, rotation, scale, " +
-		"sibling index) and name. The reference may be a prefab asset (linked instances) " +
-		"or a scene object (plain duplicates). Click to open the window.");
-
-	static readonly GUIContent k_SdfGenerator = new GUIContent(
-		"SDF Generator",
-		"Bakes a source texture into a signed distance field. Pick a source, tune channel, " +
-		"spread, smoothing and output packing, preview, then save the SDF as a PNG.\n\n" +
-		"Click ▸ to open the generator window.");
+	public override Vector2 GetWindowSize()
+	{
+		float separator = _rows.Count > 0 ? 6f : 0f;
+		return new Vector2(k_Width, (_rows.Count + 1) * k_RowHeight + separator + 4f);
+	}
 
 	public override void OnGUI(Rect rect)
 	{
 		EnsureStyles();
 
-		DrawToggleRow(k_SceneViewUndo, SceneCameraUndo.Enabled,
-			v => SceneCameraUndo.Enabled = v, null);
-
-		DrawToggleRow(k_HierarchyHeatmap,
-			EditorPrefs.GetBool("HierarchyHeatmapEnabled", false),
-			v => HierarchyHeatmap.SetEnabled(v),
-			() => ShowHeatmapMenu());
-
-		DrawToggleRow(k_QuickTransform, QuickTransform.Enabled,
-			v => QuickTransform.Enabled = v,
-			() => UnityEditor.PopupWindow.Show(
-				GUILayoutUtility.GetLastRect(), new QuickTransformPopup()));
-
-		DrawToggleRow(k_SceneViewRoll, SceneViewRoll.Enabled,
-			v => SceneViewRoll.Enabled = v, null);
-
-		DrawToggleRow(k_QuickAccess, QuickAccess.IsOpen,
-			_ => QuickAccess.ToggleWindow(), null);
-
-		DrawToggleRow(k_MassRename, MassRename.Enabled,
-			v => MassRename.Enabled = v, null);
-
-		DrawToggleRow(k_SelectMaterial, SelectMaterial.Enabled,
-			v => SelectMaterial.Enabled = v, null);
-
-		DrawToggleRow(k_AltDeselection, AltDeselection.Enabled,
-			v => AltDeselection.Enabled = v, null);
-
-		DrawToggleRow(k_ObjectDisplayToggle, ObjectDisplayToggle.Enabled,
-			v => ObjectDisplayToggle.Enabled = v, null);
-
-		DrawSubmenuOnlyRow(k_SelectShadowOnly, _ => SelectShadowOnly());
-
-		DrawSubmenuOnlyRow(k_DistanceSelect, _ => DistanceSelect.Activate());
-
-		DrawSubmenuOnlyRow(k_PlaneToQuad, _ => PlaneToQuad.ReplaceSelectedPlanes());
-
-		DrawToggleRow(k_FpsCounter, SceneViewFpsCounter.Enabled,
-			v => SceneViewFpsCounter.Enabled = v, null);
-
-		DrawToggleRow(k_VertexCounter, SceneViewVertexCounter.Enabled,
-			v => SceneViewVertexCounter.Enabled = v, null);
-
-		DrawSubmenuOnlyRow(k_GreyPrimitives,
-			rect => UnityEditor.PopupWindow.Show(rect, new GreyPrimitivesSettingsPopup()));
-
-		DrawSubmenuOnlyRow(k_Sticker,
-			rect => UnityEditor.PopupWindow.Show(rect, new StickerSettingsPopup()));
-
-		DrawToggleRow(k_SnapToSurface, SnapToSurface.Enabled,
-			v => SnapToSurface.Enabled = v,
-			() => UnityEditor.PopupWindow.Show(
-				GUILayoutUtility.GetLastRect(), new SnapToSurfaceSettingsPopup()));
-
-		DrawToggleRow(k_ChangeOrientation, ChangeOrientationOverlay.Enabled,
-			v => ChangeOrientationOverlay.Enabled = v, null);
-
-		DrawToggleRow(k_GammaCorrector, EditoolsGammaCorrectorButton.Enabled,
-			v => EditoolsGammaCorrectorButton.Enabled = v, null);
-
-		DrawSubmenuOnlyRow(k_SdfGenerator, _ => SdfGeneratorWindow.ShowWindow());
-
-		DrawSubmenuOnlyRow(k_ReplaceObject, _ => ReplaceObjectWindow.ShowWindow());
-	}
-
-	void DrawSubmenuOnlyRow(GUIContent label, System.Action<Rect> onSubmenu)
-	{
-		EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
-		GUILayout.Space(20);
-		if (GUILayout.Button(label, s_rowButtonStyle))
+		float y = 2f;
+		foreach (var function in _rows)
 		{
-			// editorWindow.position is screen-space. Inside OnGUI, GUIToScreenRect adds
-			// the popup's screen origin, so we pass (win.width, 0) in GUI space to land
-			// at (win.xMax, win.yMin) in screen space — opening to the right of the settings popup.
-			Rect win = editorWindow != null ? editorWindow.position : new Rect(200, 300, 200, 202);
-			onSubmenu?.Invoke(new Rect(win.width, 0f, 0f, 0f));
-		}
-		GUILayout.Label("▸", s_arrowStyle, GUILayout.Width(16));
-		EditorGUILayout.EndHorizontal();
-	}
-
-	void DrawToggleRow(GUIContent label, bool isOn, System.Action<bool> onToggle,
-		System.Action onSubmenu)
-	{
-		EditorGUILayout.BeginHorizontal(GUILayout.Height(20));
-
-		// Checkbox
-		bool newValue = EditorGUILayout.Toggle(isOn, GUILayout.Width(16));
-		if (newValue != isOn)
-			onToggle?.Invoke(newValue);
-
-		// Label — clickable for submenu items, toggles for non-submenu items
-		if (onSubmenu != null)
-		{
-			if (GUILayout.Button(label, s_rowButtonStyle))
-				onSubmenu.Invoke();
-
-			// Arrow indicator
-			GUILayout.Label("\u25B8", s_arrowStyle, GUILayout.Width(16));
-		}
-		else
-		{
-			if (GUILayout.Button(label, s_rowButtonStyle))
-				onToggle?.Invoke(!isOn);
+			var rowRect = new Rect(2f, y, rect.width - 4f, k_RowHeight);
+			DrawRow(rowRect, function);
+			y += k_RowHeight;
 		}
 
-		EditorGUILayout.EndHorizontal();
+		if (_rows.Count > 0)
+		{
+			EditorGUI.DrawRect(new Rect(6f, y + 2f, rect.width - 12f, 1f), new Color(1f, 1f, 1f, 0.15f));
+			y += 6f;
+		}
+
+		var settingsRect = new Rect(2f, y, rect.width - 4f, k_RowHeight);
+		if (GUI.Button(settingsRect, new GUIContent("Settings", "Open the Editools settings in the Inspector."), s_settingsRowStyle))
+		{
+			EditoolsSettings.OpenInInspector();
+			editorWindow.Close();
+		}
 	}
 
-	static void ShowHeatmapMenu()
+	void DrawRow(Rect rowRect, EditoolsFunction function)
 	{
-		var menu = new GenericMenu();
-		menu.AddItem(new GUIContent("Settings..."), false,
-			() => HeatmapSettingsWindow.ShowWindow());
-		menu.AddItem(new GUIContent("Reset Recent"), false,
-			() => HierarchyHeatmap.ResetRecent());
-		menu.ShowAsContext();
-	}
+		var iconRect = new Rect(rowRect.x + 4f, rowRect.y + 3f, 16f, 16f);
+		var icon = function.Icon?.Invoke();
+		if (icon != null)
+			GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
-	void SelectShadowOnly()
-	{
-		var objects = new List<Object>();
-		foreach (var r in Object.FindObjectsByType<MeshRenderer>(FindObjectsInactive.Include, FindObjectsSortMode.None))
-			if (r.shadowCastingMode == UnityEngine.Rendering.ShadowCastingMode.ShadowsOnly)
-				objects.Add(r.gameObject);
-		Selection.objects = objects.ToArray();
-		Debug.Log($"[Editools] Select Shadow Only: {objects.Count} object(s)");
-		editorWindow.Close();
+		var labelRect = new Rect(iconRect.xMax + 2f, rowRect.y, rowRect.width - 26f, rowRect.height);
+
+		if (function.IsToggle)
+		{
+			var toggleRect = new Rect(rowRect.xMax - 20f, rowRect.y, 18f, rowRect.height);
+			labelRect.width -= 20f;
+			bool active = function.GetActive();
+			bool newActive = GUI.Toggle(toggleRect, active, GUIContent.none);
+			if (GUI.Button(labelRect, new GUIContent(function.Name, function.Tooltip), s_rowStyle))
+				newActive = !active;
+			if (newActive != active)
+			{
+				function.SetActive(newActive);
+				editorWindow.Repaint();
+			}
+			return;
+		}
+
+		if (GUI.Button(labelRect, new GUIContent(function.Name, function.Tooltip), s_rowStyle))
+		{
+			// Sub-popups open to the right of this menu: (win.width, y) in GUI space lands at the
+			// menu's right edge in screen space.
+			Rect win = editorWindow != null ? editorWindow.position : new Rect(200, 300, k_Width, 200);
+			function.Activate(new Rect(win.width, rowRect.y, 0f, 0f));
+			if (function.Id != "material-check")
+				editorWindow.Close();
+		}
 	}
 }
 
 /// <summary>
-/// Settings popup for QuickTransform. Shows editable fields backed by EditorPrefs.
+/// Material Check: previews one material on every opaque scene renderer through
+/// <see cref="SceneMaterialOverride"/>. The material lives in <see cref="EditoolsSettings"/>;
+/// the on/off state is session-scoped so it survives a domain reload.
 /// </summary>
-class QuickTransformPopup : PopupWindowContent
+static class MaterialCheck
 {
-	static readonly GUIContent k_EdgeHoverLabel = new GUIContent(
-		"Edge Detection (px)",
-		"Pixel distance threshold for detecting edge hover in the Scene View.");
-	static readonly GUIContent k_CircleRadLabel = new GUIContent(
-		"Rotation Circle Size",
-		"Size multiplier for the rotation feedback circle shown during rotation.");
-	static readonly GUIContent k_RotSnapLabel = new GUIContent(
-		"Rotation Snap (\u00B0)",
-		"Angle increment in degrees when holding Ctrl during rotation.");
-	static readonly GUIContent k_LinearRotLabel = new GUIContent(
-		"Linear Rotation",
-		"Use horizontal mouse movement instead of radial motion for rotation control.");
-	static readonly GUIContent k_LinearSensLabel = new GUIContent(
-		"  Sensitivity (\u00B0/px)",
-		"Degrees of rotation per pixel of horizontal mouse movement.");
-	static readonly GUIContent k_ShowTooltipsLabel = new GUIContent(
-		"Scene View Tooltips",
-		"Show contextual action hints at the bottom-left of the Scene View when a mode key is held.");
-
-	public override Vector2 GetWindowSize()
-	{
-		int rows = QuickTransform.LinearRotation ? 7 : 6;
-		return new Vector2(240, rows * 22);
-	}
-
-	public override void OnGUI(Rect rect)
-	{
-		float hover = QuickTransform.EdgeHoverPx;
-		float newHover = EditorGUILayout.FloatField(k_EdgeHoverLabel, hover);
-		if (!Mathf.Approximately(newHover, hover))
-			QuickTransform.EdgeHoverPx = newHover;
-
-		float rad = QuickTransform.CircleRadius;
-		float newRad = EditorGUILayout.FloatField(k_CircleRadLabel, rad);
-		if (!Mathf.Approximately(newRad, rad))
-			QuickTransform.CircleRadius = newRad;
-
-		float snap = QuickTransform.RotSnapAngle;
-		float newSnap = EditorGUILayout.FloatField(k_RotSnapLabel, snap);
-		if (!Mathf.Approximately(newSnap, snap))
-			QuickTransform.RotSnapAngle = newSnap;
-
-		bool linear = QuickTransform.LinearRotation;
-		bool newLinear = EditorGUILayout.Toggle(k_LinearRotLabel, linear);
-		if (newLinear != linear)
-		{
-			QuickTransform.LinearRotation = newLinear;
-			editorWindow.Repaint(); // resize popup
-		}
-
-		if (QuickTransform.LinearRotation)
-		{
-			float sens = QuickTransform.LinearRotSensitivity;
-			float newSens = EditorGUILayout.FloatField(k_LinearSensLabel, sens);
-			if (!Mathf.Approximately(newSens, sens))
-				QuickTransform.LinearRotSensitivity = newSens;
-		}
-
-		bool tooltips = QuickTransform.ShowTooltips;
-		bool newTooltips = EditorGUILayout.Toggle(k_ShowTooltipsLabel, tooltips);
-		if (newTooltips != tooltips)
-			QuickTransform.ShowTooltips = newTooltips;
-	}
-}
-
-/// <summary>
-/// Settings popup for Snap To Surface. Three checkboxes selecting which surface
-/// types are eligible snap targets, backed by EditorPrefs on SnapToSurface.
-/// </summary>
-class SnapToSurfaceSettingsPopup : PopupWindowContent
-{
-	static readonly GUIContent k_SkinnedLabel = new GUIContent(
-		"Skinned Meshes",
-		"Snap to SkinnedMeshRenderer surfaces (characters, mechs). The current posed " +
-		"mesh is baked on snap entry so the raycast hits what you see in the viewport.");
-	static readonly GUIContent k_NonStaticLabel = new GUIContent(
-		"Non Static",
-		"By default only objects flagged Static (GameObject.isStatic) are snap targets. " +
-		"Turn this on to also snap to non-static objects. Orthogonal to the mesh-type masks.");
-	static readonly GUIContent k_TransparentLabel = new GUIContent(
-		"Transparent Meshes",
-		"Also snap to surfaces whose material doesn't write depth (ZWrite Off) — " +
-		"glow / additive / transparent shaders. Off by default, so these are skipped.");
-	static readonly GUIContent k_AlignZLabel = new GUIContent(
-		"Align Z To Surface",
-		"Align the object's Z+ (forward) axis to the surface normal instead of the " +
-		"default Y+ (up) axis. Useful for objects authored facing down their Z axis.");
-	static readonly GUIContent k_OffsetLabel = new GUIContent(
-		"Surface Offset",
-		"Distance to push the snapped object off the surface along its normal. " +
-		"0 sits flush; positive lifts it away from the surface, negative sinks it in.");
-
-	public override Vector2 GetWindowSize() => new Vector2(220, 5 * 22 + 4);
-
-	public override void OnGUI(Rect rect)
-	{
-		bool skinned = SnapToSurface.SnapSkinnedMeshes;
-		bool newSkinned = EditorGUILayout.Toggle(k_SkinnedLabel, skinned);
-		if (newSkinned != skinned)
-			SnapToSurface.SnapSkinnedMeshes = newSkinned;
-
-		bool nonStatic = SnapToSurface.SnapNonStatic;
-		bool newNonStatic = EditorGUILayout.Toggle(k_NonStaticLabel, nonStatic);
-		if (newNonStatic != nonStatic)
-			SnapToSurface.SnapNonStatic = newNonStatic;
-
-		bool transparent = SnapToSurface.SnapTransparentMeshes;
-		bool newTransparent = EditorGUILayout.Toggle(k_TransparentLabel, transparent);
-		if (newTransparent != transparent)
-			SnapToSurface.SnapTransparentMeshes = newTransparent;
-
-		bool alignZ = SnapToSurface.AlignZToSurface;
-		bool newAlignZ = EditorGUILayout.Toggle(k_AlignZLabel, alignZ);
-		if (newAlignZ != alignZ)
-			SnapToSurface.AlignZToSurface = newAlignZ;
-
-		float offset = SnapToSurface.SurfaceOffset;
-		float newOffset = EditorGUILayout.FloatField(k_OffsetLabel, offset);
-		if (newOffset != offset)
-			SnapToSurface.SurfaceOffset = newOffset;
-	}
-}
-
-/// <summary>
-/// Small popup shown from the Material Check toolbar dropdown.
-/// Allows assigning a material and toggling the override on/off.
-/// State (material + active flag) is static so it persists across popup opens.
-/// </summary>
-class MaterialCheckPopup : PopupWindowContent
-{
-	const string k_MaterialGuidKey = "AdvancedVisuals_MaterialCheck_GUID";
+	const string k_ModeName = "MaterialCheck";
 	const string k_IsOnSessionKey = "AV_MaterialCheck_IsOn";
 
-	static Material s_material;
 	static bool s_isOn;
-	static bool s_loaded;
 
-	public MaterialCheckPopup()
+	internal static bool Enabled => EditoolsSettings.Current.materialCheckEnabled;
+
+	/// <summary>True while the override is active. Another mode force-exiting us clears it.</summary>
+	internal static bool IsOn
 	{
-		EnsureLoaded();
-
-		// Sync with actual state in case another mode force-exited us
-		if (s_isOn && !SceneMaterialOverride.IsModeActive("MaterialCheck"))
-			s_isOn = false;
-	}
-
-	static void EnsureLoaded()
-	{
-		if (s_loaded) return;
-		s_loaded = true;
-
-		string guid = EditorPrefs.GetString(k_MaterialGuidKey, "");
-		if (!string.IsNullOrEmpty(guid))
+		get
 		{
-			string path = AssetDatabase.GUIDToAssetPath(guid);
-			if (!string.IsNullOrEmpty(path))
-				s_material = AssetDatabase.LoadAssetAtPath<Material>(path);
+			if (s_isOn && !SceneMaterialOverride.IsModeActive(k_ModeName)) s_isOn = false;
+			return s_isOn;
 		}
 	}
 
-	internal static void SetMaterial(Material mat)
+	internal static Material Material
 	{
-		s_material = mat;
-		SaveMaterialPref(mat);
+		get => EditoolsSettings.Current.materialCheckMaterial;
+		set
+		{
+			var settings = EditoolsSettings.Current;
+			if (settings.materialCheckMaterial == value) return;
+			Undo.RecordObject(settings, "Set Material Check Material");
+			settings.materialCheckMaterial = value;
+			settings.SaveAndNotify();
+		}
 	}
 
-	/// <summary>
-	/// Called from the overlay after domain reload to re-enter MaterialCheck
-	/// if it was active before the reload.
-	/// </summary>
+	internal static void TurnOn()
+	{
+		var mat = Material;
+		if (mat == null)
+		{
+			Debug.LogError("[Editools] Material Check: assign a material before turning it on.");
+			return;
+		}
+		SceneMaterialOverride.Enter(mat, k_ModeName, () => s_isOn = false);
+		s_isOn = true;
+		SessionState.SetBool(k_IsOnSessionKey, true);
+	}
+
+	internal static void TurnOff()
+	{
+		if (!IsOn) return;
+		SceneMaterialOverride.Exit();
+		s_isOn = false;
+		SessionState.SetBool(k_IsOnSessionKey, false);
+	}
+
+	internal static void ApplyPermanently()
+	{
+		if (!IsOn) return;
+		SceneMaterialOverride.ApplyPermanently();
+		s_isOn = false;
+		SessionState.SetBool(k_IsOnSessionKey, false);
+	}
+
+	/// <summary>Re-enters the mode after a domain reload when it was on before it. Called from the overlay.</summary>
 	internal static void RestoreAfterReload()
 	{
 		if (!SessionState.GetBool(k_IsOnSessionKey, false)) return;
-
-		EnsureLoaded();
-		if (s_material != null && !SceneMaterialOverride.IsModeActive("MaterialCheck"))
-		{
-			EditorApplication.delayCall += () =>
-			{
-				SceneMaterialOverride.Enter(s_material, "MaterialCheck", () => s_isOn = false);
-				s_isOn = true;
-			};
-		}
+		if (!Enabled || Material == null || SceneMaterialOverride.IsModeActive(k_ModeName)) return;
+		EditorApplication.delayCall += TurnOn;
 	}
 
-	static void SaveMaterialPref(Material mat)
+	/// <summary>Leaves the mode when the function is turned off.</summary>
+	internal static void Sync()
 	{
-		if (mat != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mat, out string guid, out long _))
-			EditorPrefs.SetString(k_MaterialGuidKey, guid);
-		else
-			EditorPrefs.DeleteKey(k_MaterialGuidKey);
+		if (!Enabled && IsOn) TurnOff();
 	}
+}
 
+/// <summary>
+/// Popup behind the Material Check toolbar dropdown: material slot and On / Off / Apply.
+/// </summary>
+class MaterialCheckPopup : PopupWindowContent
+{
 	public override Vector2 GetWindowSize() => new Vector2(220, 80);
 
 	public override void OnGUI(Rect rect)
 	{
-		var newMat = (Material)EditorGUILayout.ObjectField(s_material, typeof(Material), false);
-		if (newMat != s_material)
-		{
-			s_material = newMat;
-			SaveMaterialPref(s_material);
-		}
+		var current = MaterialCheck.Material;
+		var next = (Material)EditorGUILayout.ObjectField(current, typeof(Material), false);
+		if (next != current)
+			MaterialCheck.Material = next;
+
+		bool isOn = MaterialCheck.IsOn;
 
 		EditorGUILayout.BeginHorizontal();
-
-		using (new EditorGUI.DisabledScope(s_material == null || s_isOn))
+		using (new EditorGUI.DisabledScope(current == null || isOn))
 		{
 			if (GUILayout.Button("On"))
-			{
-				SceneMaterialOverride.Enter(s_material, "MaterialCheck", () => s_isOn = false);
-				s_isOn = true;
-				SessionState.SetBool(k_IsOnSessionKey, true);
-			}
+				MaterialCheck.TurnOn();
 		}
-
-		using (new EditorGUI.DisabledScope(!s_isOn))
+		using (new EditorGUI.DisabledScope(!isOn))
 		{
 			if (GUILayout.Button("Off"))
-			{
-				SceneMaterialOverride.Exit();
-				s_isOn = false;
-				SessionState.SetBool(k_IsOnSessionKey, false);
-			}
+				MaterialCheck.TurnOff();
 		}
-
 		EditorGUILayout.EndHorizontal();
 
-		using (new EditorGUI.DisabledScope(!s_isOn))
+		using (new EditorGUI.DisabledScope(!isOn))
 		{
 			if (GUILayout.Button("Apply"))
-			{
-				SceneMaterialOverride.ApplyPermanently();
-				s_isOn = false;
-				SessionState.SetBool(k_IsOnSessionKey, false);
-			}
+				MaterialCheck.ApplyPermanently();
 		}
 	}
 }

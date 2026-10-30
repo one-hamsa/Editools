@@ -7,31 +7,31 @@ using UnityEngine;
 /// the cursor instead of the GameObject. I + Shift + left-click adds the material
 /// to the current selection. First material slot is used when the renderer has
 /// multiple materials. Shows an eyedropper cursor while I is held.
-/// Toggle via Editools Settings.
+/// Gated by Editools Settings; hooked into the Scene View only while enabled and the overlay is displayed.
 /// </summary>
-[InitializeOnLoad]
 static class SelectMaterial
 {
-    const string k_EnabledPref = "Editools_SelectMaterial_Enabled";
-
-    static bool s_enabled;
-    static bool s_loaded;
+    static bool s_subscribed;
     static bool s_iHeld;
     static bool s_cursorOverridden;
     static Texture2D s_eyedropperCursor;
 
-    static SelectMaterial()
-    {
-        EnsureLoaded();
-        if (s_enabled)
-            SceneView.duringSceneGui += OnSceneGUI;
-    }
+    internal static bool Enabled => EditoolsSettings.Current.selectMaterialEnabled;
 
-    static void EnsureLoaded()
+    /// <summary>Hooks the Scene View while enabled and the overlay is active; unhooks otherwise.</summary>
+    internal static void Sync()
     {
-        if (s_loaded) return;
-        s_loaded = true;
-        s_enabled = EditorPrefs.GetBool(k_EnabledPref, true);
+        bool wanted = EditoolsOverlay.IsActive && Enabled;
+        if (wanted == s_subscribed) return;
+        s_subscribed = wanted;
+
+        if (wanted)
+            SceneView.duringSceneGui += OnSceneGUI;
+        else
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
+            s_iHeld = false;
+        }
     }
 
     static Texture2D EyedropperCursor
@@ -110,22 +110,6 @@ static class SelectMaterial
 
         Object.DestroyImmediate(readable);
         return cursor;
-    }
-
-    internal static bool Enabled
-    {
-        get { EnsureLoaded(); return s_enabled; }
-        set
-        {
-            if (value == s_enabled) return;
-            s_enabled = value;
-            EditorPrefs.SetBool(k_EnabledPref, value);
-
-            if (value)
-                SceneView.duringSceneGui += OnSceneGUI;
-            else
-                SceneView.duringSceneGui -= OnSceneGUI;
-        }
     }
 
     static void OnSceneGUI(SceneView sceneView)

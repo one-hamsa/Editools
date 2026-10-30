@@ -18,8 +18,8 @@ using UnityEngine;
 /// Control grammar (shared across all three types):
 ///   LMB = manipulate · Ctrl = alternative coordinates · MMB = remove/reset · RMB = add/create · Shift = axis lock; Alt = special action
 ///
-/// The mode toggle and the tooltip flag are SessionState-backed, so they persist across
-/// selection changes for the whole editor session and reset on restart. The hook into
+/// The mode toggle is SessionState-backed, so it persists across selection changes for the whole
+/// editor session and resets on restart; the tooltip flag lives in EditoolsSettings. The hook into
 /// SceneView.duringSceneGui is owned by <see cref="GPWindowOverlay"/> (Subscribe/Unsubscribe),
 /// so there is no InitializeOnLoad side effect.
 /// </summary>
@@ -28,7 +28,6 @@ static partial class GPEdit
     // ─── Session state ──────────────────────────────────────────
 
     const string k_EnabledKey  = "GPEdit_Enabled";
-    const string k_TooltipsKey = "GPEdit_Tooltips";
 
     /// <summary>Session-wide Edit Mode toggle. Persists across GP selections, resets on editor restart.</summary>
     internal static bool Enabled
@@ -52,11 +51,14 @@ static partial class GPEdit
     /// <summary>Show the simplified Scene View tooltip while in Edit Mode.</summary>
     internal static bool ShowTooltips
     {
-        get => SessionState.GetBool(k_TooltipsKey, true);
+        get => EditoolsSettings.Current.greyEditModeTooltips;
         set
         {
             if (value == ShowTooltips) return;
-            SessionState.SetBool(k_TooltipsKey, value);
+            var settings = EditoolsSettings.Current;
+            Undo.RecordObject(settings, "Grey Primitive Edit Mode Tooltips");
+            settings.greyEditModeTooltips = value;
+            settings.SaveAndNotify();
             onStateChanged?.Invoke();
             SceneView.RepaintAll();
         }

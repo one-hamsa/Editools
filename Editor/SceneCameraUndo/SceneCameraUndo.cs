@@ -56,24 +56,21 @@ public static class SceneCameraUndo
     private static bool s_isRestoring;
     private static bool s_initialized;
 
-    internal static bool Enabled
-    {
-        get => EditorPrefs.GetBool("SceneCameraUndo_Enabled", true);
-        set => EditorPrefs.SetBool("SceneCameraUndo_Enabled", value);
-    }
+    internal static bool Enabled => EditoolsSettings.Current.sceneViewUndoEnabled;
 
-    [InitializeOnLoadMethod]
-    private static void Initialize()
+    /// <summary>Polls the Scene View cameras while enabled and the overlay is active; stops otherwise.</summary>
+    internal static void Sync()
     {
-        if (s_initialized) return;
-        s_initialized = true;
-        EditorApplication.update += OnUpdate;
+        bool wanted = EditoolsOverlay.IsActive && Enabled;
+        if (wanted == s_initialized) return;
+        s_initialized = wanted;
+        if (wanted) EditorApplication.update += OnUpdate;
+        else EditorApplication.update -= OnUpdate;
     }
 
     private static void OnUpdate()
     {
         if (s_isRestoring) return;
-        if (!EditoolsOverlay.IsActive || !Enabled) return;
 
         foreach (var view in SceneView.sceneViews)
         {
@@ -146,7 +143,7 @@ public static class SceneCameraUndo
     [Shortcut("Editools/Scene Camera Undo", KeyCode.Z, ShortcutModifiers.Shift)]
     private static void UndoCameraMove()
     {
-        if (!EditoolsOverlay.IsActive || !Enabled) return;
+        if (!s_initialized) return;
         SceneView view = SceneView.lastActiveSceneView;
         if (view == null) return;
 
@@ -168,7 +165,7 @@ public static class SceneCameraUndo
     [Shortcut("Editools/Scene Camera Redo", KeyCode.Y, ShortcutModifiers.Shift)]
     private static void RedoCameraMove()
     {
-        if (!EditoolsOverlay.IsActive || !Enabled) return;
+        if (!s_initialized) return;
         SceneView view = SceneView.lastActiveSceneView;
         if (view == null) return;
 

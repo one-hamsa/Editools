@@ -9,10 +9,9 @@ using Object = UnityEngine.Object;
 /// Alt + click without drag removes the selected object under the cursor.
 /// Box selection and Alt + drag camera orbit are untouched.
 /// </summary>
-[InitializeOnLoad]
 static class AltDeselection
 {
-	const string k_EnabledKey = "AltDeselection_Enabled";
+	static bool s_subscribed;
 
 	// Unity's modifier + click picking is a mouse shortcut that fires on release and sends this command
 	// to the Scene View; RectSelection toggles the selection when it receives it.
@@ -37,23 +36,31 @@ static class AltDeselection
 
 	static PendingClick s_click;
 
-	internal static bool Enabled
-	{
-		get => EditorPrefs.GetBool(k_EnabledKey, false);
-		set => EditorPrefs.SetBool(k_EnabledKey, value);
-	}
+	internal static bool Enabled => EditoolsSettings.Current.altDeselectionEnabled;
 
-	static AltDeselection()
+	/// <summary>Hooks the Scene View while enabled and the overlay is active; unhooks otherwise.</summary>
+	internal static void Sync()
 	{
-		SceneView.beforeSceneGui += OnBeforeSceneGUI;
-		SceneView.duringSceneGui += OnSceneGUI;
+		bool wanted = EditoolsOverlay.IsActive && Enabled;
+		if (wanted == s_subscribed) return;
+		s_subscribed = wanted;
+
+		if (wanted)
+		{
+			SceneView.beforeSceneGui += OnBeforeSceneGUI;
+			SceneView.duringSceneGui += OnSceneGUI;
+		}
+		else
+		{
+			SceneView.beforeSceneGui -= OnBeforeSceneGUI;
+			SceneView.duringSceneGui -= OnSceneGUI;
+			CancelClick();
+		}
 	}
 
 	// Records the click. Picking needs the Scene View camera, which is set up by the time this callback runs.
 	static void OnSceneGUI(SceneView view)
 	{
-		if (!EditoolsOverlay.IsActive || !Enabled) return;
-
 		Event e = Event.current;
 		if (e == null || e.rawType != EventType.MouseDown || e.button != 0) return;
 
@@ -129,11 +136,6 @@ static class AltDeselection
 	static void OnBeforeSceneGUI(SceneView view)
 	{
 		if (s_click.mode == ClickMode.None) return;
-		if (!EditoolsOverlay.IsActive || !Enabled)
-		{
-			CancelClick();
-			return;
-		}
 
 		Event e = Event.current;
 		if (e == null || view != s_click.view) return;

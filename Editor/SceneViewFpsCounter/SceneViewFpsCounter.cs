@@ -5,18 +5,42 @@ using UnityEngine;
 /// <summary>
 /// Displays a live FPS counter overlay in the top-left corner of each Scene View.
 /// Tracks frame timing independently per Scene View instance.
-/// Toggle via the Editools settings menu.
+/// Gated by Editools Settings; hooked into the Scene View only while enabled and the overlay is displayed.
 /// </summary>
-[InitializeOnLoad]
 static class SceneViewFpsCounter
 {
-    private const string k_EnabledKey = "SceneViewFpsCounter_Enabled";
     private const int k_SampleCount = 60;
 
-    internal static bool Enabled
+    static bool s_subscribed;
+
+    internal static bool Enabled => EditoolsSettings.Current.fpsCounterEnabled;
+
+    /// <summary>Whether the counter is drawn. Flipped by the toolbar toggle / settings menu row.</summary>
+    internal static bool Shown
     {
-        get => EditorPrefs.GetBool(k_EnabledKey, false);
-        set => EditorPrefs.SetBool(k_EnabledKey, value);
+        get => EditoolsSettings.Current.fpsCounterShown;
+        set
+        {
+            EditoolsSettings.SetBool(ref EditoolsSettings.Current.fpsCounterShown, value, "Toggle FPS Counter");
+            Sync();
+        }
+    }
+
+    /// <summary>Hooks the Scene View while enabled, shown and the overlay is active; unhooks otherwise.</summary>
+    internal static void Sync()
+    {
+        bool wanted = EditoolsOverlay.IsActive && Enabled && Shown;
+        if (wanted == s_subscribed) return;
+        s_subscribed = wanted;
+
+        if (wanted)
+            SceneView.duringSceneGui += OnSceneGUI;
+        else
+        {
+            SceneView.duringSceneGui -= OnSceneGUI;
+            s_perView.Clear();
+        }
+        SceneView.RepaintAll();
     }
 
     struct FrameData
@@ -31,14 +55,8 @@ static class SceneViewFpsCounter
 
     static GUIStyle s_style;
 
-    static SceneViewFpsCounter()
-    {
-        SceneView.duringSceneGui += OnSceneGUI;
-    }
-
     static void OnSceneGUI(SceneView sceneView)
     {
-        if (!EditoolsOverlay.IsActive || !Enabled) return;
         if (Event.current.type != EventType.Repaint) return;
 
         int id = sceneView.GetInstanceID();

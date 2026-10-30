@@ -25,7 +25,6 @@ using Object = UnityEngine.Object;
 /// </summary>
 static class ObjectDisplayToggle
 {
-	const string k_EnabledKey = "ObjectDisplayToggle_Enabled";
 	const string k_ShortcutId = "Editools/Object Display Toggle";
 	// Shortcut profile created when the read-only default profile is active and a binding must change.
 	const string k_ProfileId = "Editools";
@@ -86,15 +85,13 @@ static class ObjectDisplayToggle
 	static bool s_subscribed;
 	static bool s_claimScheduled;
 
-	internal static bool Enabled
+	internal static bool Enabled => EditoolsSettings.Current.objectDisplayToggleEnabled;
+
+	/// <summary>Claims the Y binding while enabled and the overlay is active; returns every object to Normal otherwise.</summary>
+	internal static void Sync()
 	{
-		get => EditorPrefs.GetBool(k_EnabledKey, true);
-		set
-		{
-			EditorPrefs.SetBool(k_EnabledKey, value);
-			if (value) ClaimShortcutBinding();
-			else ClearAll();
-		}
+		if (EditoolsOverlay.IsActive && Enabled) ScheduleClaimShortcutBinding();
+		else ClearAll();
 	}
 
 	// ─── Shortcut ────────────────────────────────────────────────
@@ -104,7 +101,7 @@ static class ObjectDisplayToggle
 	/// mixed selection lands on one state.
 	/// </summary>
 	[Shortcut(k_ShortcutId, KeyCode.Y)]
-	static void CycleSelection()
+	internal static void CycleSelection()
 	{
 		if (!EditoolsOverlay.IsActive || !Enabled) return;
 
@@ -141,7 +138,7 @@ static class ObjectDisplayToggle
 	/// </summary>
 	internal static void ClaimShortcutBinding()
 	{
-		if (!Enabled) return;
+		if (!EditoolsOverlay.IsActive || !Enabled) return;
 
 		IShortcutManager manager = ShortcutManager.instance;
 		ShortcutBinding ours = manager.GetShortcutBinding(k_ShortcutId);

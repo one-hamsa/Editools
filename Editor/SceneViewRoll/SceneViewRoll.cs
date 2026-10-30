@@ -5,34 +5,39 @@ using UnityEditor;
 /// Adds camera roll control to the Scene View.
 /// Ctrl + Alt + middle-mouse drag rolls the camera (left/right movement).
 /// Ctrl + Alt + middle-mouse click (no drag) resets the roll to zero.
+/// Hooked into the Scene View only while enabled in Editools Settings and the overlay is displayed.
 /// </summary>
-[InitializeOnLoad]
 static class SceneViewRoll
 {
-	private const string k_EnabledKey = "SceneViewRoll_Enabled";
 	private const float k_DragThreshold = 3f;
 	private const float k_Sensitivity = 0.5f;
 
+	private static bool s_subscribed;
 	private static bool s_dragging;
 	private static Vector2 s_mouseStart;
 	private static float s_rollStart;
 	private static bool s_movedPastThreshold;
 
-	internal static bool Enabled
-	{
-		get => EditorPrefs.GetBool(k_EnabledKey, true);
-		set => EditorPrefs.SetBool(k_EnabledKey, value);
-	}
+	internal static bool Enabled => EditoolsSettings.Current.sceneViewRollEnabled;
 
-	static SceneViewRoll()
+	/// <summary>Subscribes to the Scene View while enabled and the overlay is active; unsubscribes otherwise.</summary>
+	internal static void Sync()
 	{
-		SceneView.duringSceneGui += OnSceneGUI;
+		bool wanted = EditoolsOverlay.IsActive && Enabled;
+		if (wanted == s_subscribed) return;
+		s_subscribed = wanted;
+
+		if (wanted)
+			SceneView.duringSceneGui += OnSceneGUI;
+		else
+		{
+			SceneView.duringSceneGui -= OnSceneGUI;
+			s_dragging = false;
+		}
 	}
 
 	static void OnSceneGUI(SceneView sceneView)
 	{
-		if (!EditoolsOverlay.IsActive || !Enabled) return;
-
 		Event e = Event.current;
 		if (e == null) return;
 

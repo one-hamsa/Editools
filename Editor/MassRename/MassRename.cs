@@ -23,16 +23,9 @@ using UnityEngine;
 /// </summary>
 public class MassRename : EditorWindow
 {
-    // ─── EditorPrefs toggle ─────────────────────────────────────
+    // ─── Gate (Editools Settings) ───────────────────────────────
 
-    const string k_Pref = "MassRename_";
-    const string k_EnabledPref = k_Pref + "Enabled";
-
-    internal static bool Enabled
-    {
-        get => EditorPrefs.GetBool(k_EnabledPref, true);
-        set => EditorPrefs.SetBool(k_EnabledPref, value);
-    }
+    internal static bool Enabled => EditoolsOverlay.IsActive && EditoolsSettings.Current.massRenameEnabled;
 
     // ─── State ──────────────────────────────────────────────────
 

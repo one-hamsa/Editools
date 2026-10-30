@@ -117,6 +117,30 @@ public class QuickAccess : EditorWindow
 
 	internal static bool IsOpen => Resources.FindObjectsOfTypeAll<QuickAccess>().Length > 0;
 
+	// Editools Settings gate: on keeps the window open and the shortcuts live, off closes the window.
+	internal static bool GateOn => EditoolsSettings.Current.quickAccessEnabled;
+	internal static bool Enabled => EditoolsOverlay.IsActive && GateOn;
+
+	static bool s_quitting;
+
+	/// <summary>Opens the window while the gate is on, closes it while off.</summary>
+	internal static void Sync()
+	{
+		bool open = IsOpen;
+		if (GateOn && !open) ShowWindow();
+		else if (!GateOn && open) ToggleWindow();
+	}
+
+	static void OnQuitting() => s_quitting = true;
+
+	// Closing the window by hand turns the gate off, so it does not reopen on the next Sync.
+
+	void OnDestroy()
+	{
+		if (s_quitting || !GateOn) return;
+		EditoolsSettings.SetBool(ref EditoolsSettings.Current.quickAccessEnabled, false, "Close Quick Access");
+	}
+
 	public static QuickAccess ShowWindow()
 	{
 		var win = GetWindow<QuickAccess>();
@@ -261,6 +285,7 @@ public class QuickAccess : EditorWindow
 
 	void OnEnable()
 	{
+		EditorApplication.quitting += OnQuitting;
 		s_instance = this;
 
 		rootVisualElement.styleSheets.Add(Resources.Load<StyleSheet>("QuickAccess"));
@@ -278,6 +303,7 @@ public class QuickAccess : EditorWindow
 
 	void OnDisable()
 	{
+		EditorApplication.quitting -= OnQuitting;
 		// Flush before tear-down — catches data that lived only in memory
 		// across a domain reload or window close. Synchronous: delayCall
 		// would not fire after the window is gone.
@@ -677,6 +703,7 @@ public class QuickAccess : EditorWindow
 	/// the window is open (falls back to reading the active scene's sidecar).</summary>
 	static void DoRecallAnchor(int index)
 	{
+		if (!Enabled) return;
 		var anchors = s_instance != null ? s_instance.viewAnchors : LoadAnchorsForActiveScene();
 		if (anchors == null || index < 0 || index >= anchors.Count) return;
 
@@ -1178,6 +1205,7 @@ public class QuickAccess : EditorWindow
 
 	static void DoSaveSelectionGroup(int slot)
 	{
+		if (!Enabled) return;
 		// When the Project window's folder tree (left column) has focus,
 		// Selection.objects contains the right-pane assets, not the folder.
 		// Detect this and override with the actual folder the user clicked.
@@ -1279,6 +1307,7 @@ public class QuickAccess : EditorWindow
 
 	static void DoRecallSelectionGroup(int slot)
 	{
+		if (!Enabled) return;
 		List<string> itemIds = null;
 
 		if (s_instance != null)

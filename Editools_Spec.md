@@ -21,8 +21,14 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Runtime/Editools.asmdef` — runtime assembly, all platforms
 
 ### Editor
-- `Editor/Overlay/EditoolsOverlay.cs` — toolbar overlay, screenshot capture, button strip
-- `Editor/Greybox/GreyboxSettings.cs` — per-project default material pref + GameObject/3D Object/Greybox menu item + settings popup
+- `Editor/Overlay/EditoolsOverlay.cs` — toolbar overlay (buttons chosen in settings), screenshot capture, settings menu, Material Check
+- `Editor/Settings/EditoolsSettings.cs` — per-user `ScriptableSingleton` (`UserSettings/EditoolsSettings.asset`): function gates, overlay membership, every function's parameters; one-shot EditorPrefs migration
+- `Editor/Settings/EditoolsFunctions.cs` — the function registry (`EditoolsFunction` entries: category, gate, settings drawer, overlay button) + `SyncAll`
+- `Editor/Settings/EditoolsSettingsEditor.cs` — the settings inspector (categories, gate checkbox, foldout, Overlay checkbox)
+- `Editor/Settings/EditoolsIcons.cs` — built-in and `Editor/Icons/*.png` toolbar icons (black glyphs recolored for the dark skin)
+- `Editor/Settings/SelectShadowOnly.cs` — selects every Shadows Only renderer
+- `Editor/Greybox/GreyPrimitiveSettings.cs` — Grey Primitives gate + shared creation defaults (read from `EditoolsSettings`) + `PlacePrimitive`
+- `Editor/Greybox/GreyboxSettings.cs` — Greybox default scale + GameObject/3D Object/Greybox menu item + Ctrl+G shortcut
 - `Editor/Greyquad/GreyquadSettings.cs` — Greyquad default size pref + menu item + Ctrl+Q creation shortcut
 - `Editor/HierarchyHeatmap/HierarchyHeatmap.cs` — recent-selection heatmap in Hierarchy
 - `Editor/QuickTransform/QuickTransform.cs` — hold W/E/R + drag whole-object transform tool
@@ -43,6 +49,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/DistanceSelect/DistanceSelect.cs` — Ctrl+= grow selection by distance + settings panel overlay
 - `Editor/AltDeselection/AltDeselection.cs` — Ctrl+click add-only / Alt+click remove-only Scene View selection
 - `Editor/ObjectDisplayToggle/ObjectDisplayToggle.cs` — Y cycles selected objects between Normal / Bounding Box / Greybox / Outline display (session-only, draws with Gizmos off, lines are click-selectable)
+- `Editor/SelectionUndo/SelectionUndo.cs` - Alt+Z/Y object selection undo/redo (scene objects and project assets)
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -83,35 +90,70 @@ then enter the new one. This prevents debug mode conflicts.
 - `AODebugMode` → enters with `Hidden/AO/Debug`
 - `EditoolsMaterialCheckButton` → enters with user-dragged material ("MaterialCheck" mode)
 
-### 2. EditoolsOverlay (Editor, ToolbarOverlay)
+### 2. EditoolsOverlay (Editor, `Overlay` + `ICreateHorizontalToolbar`)
 
-A `ToolbarOverlay` docked in SceneView. Contains multiple toolbar elements:
+A toolbar overlay docked in the SceneView (id `editools-toolbar`). Its content is built from
+`EditoolsFunctions.All`: every function that is enabled and selected for the overlay gets its own
+button, in registry order, with the Scene Capture strip always first and the settings menu last.
+The toolbar is rebuilt in place on `EditoolsSettings.Changed`.
 
-**EditoolsLayoutCleaner** (`[InitializeOnLoad]`):
-- Runs on startup, removes stale/duplicate overlay entries from `.dwlt` layout files
-- Prevents `ToolbarOverlay` from accumulating duplicate instances across editor restarts
-- Ensures the toolbar displays in toolbar mode (not panel/popup)
+**`IsActive`** - cached bool, true while at least one instance is displayed. Recomputed on create /
+destroy / `displayedChanged`, and every change runs `EditoolsFunctions.SyncAll()` so tools are
+subscribed to editor events only while the overlay is displayed and the function is enabled.
 
-**Screenshot Capture System:**
-- Captures scene view screenshots (up to 10 stored)
-- Persists across domain reloads via Library/ PNG files + `SessionState` metadata
-- Screenshot strip shows thumbnails; click to view full-size comparison
-- View/Compare popup: side-by-side current view vs captured screenshot
-- Comment system: optional text annotations on screenshots
+**EditoolsLayoutCleaner** (`[InitializeOnLoad]`): removes stale overlay entries from `.dwlt`
+layout files on startup and keeps the overlay in horizontal toolbar mode.
 
-**EditoolsMaterialCheckButton:**
-- Drag-and-drop material slot + On/Off toggle
-- When toggled on: calls `SceneMaterialOverride.Enter` with "MaterialCheck" mode
-- Allows artists to preview any material applied to all scene geometry
+**Scene Capture** (gated, default on): captures Scene View screenshots (up to 10, persisted across
+domain reloads via `Library/` PNGs + `SessionState`), numbered strip, click to overlay the capture
+on the view, right-click for comment / delete.
 
-**EditoolsHeatmapButton:**
-- Toggle + dropdown for Hierarchy Heatmap settings
+**Material Check** (`MaterialCheck` static + `EditoolsMaterialCheckButton` dropdown): previews one
+material on every opaque renderer through `SceneMaterialOverride`. The material is
+`EditoolsSettings.materialCheckMaterial`; the on/off state is `SessionState`.
 
-**EditoolsQuickTransformButton:**
-- Toggle + dropdown popup for QuickTransform settings
-- Shows current configuration (edge hover threshold, rotation snap, linear mode)
+**Settings menu** (`EditoolsSettingsButton` -> `EditoolsSettingsMenuPopup`): one row per enabled
+function that supports a toolbar button but is not selected for the overlay (clicking runs it; toggle
+functions show a checkbox with their on/off state), then a bold **Settings** row that selects
+`EditoolsSettings` in the Inspector.
 
-### 3. HierarchyHeatmap (Editor, `[InitializeOnLoad]`)
+**Right-click** on any toolbar button opens the settings in the Inspector (panel-root trickle-down
+watcher, since the Scene View consumes right mouse before toolbar elements see it). Elements with
+their own context menu opt out with the `editools-own-context-menu` USS class (the screenshot strip,
+the Gamma Corrector swatch).
+
+### 2a. EditoolsSettings (Editor, `ScriptableSingleton`)
+
+Per-user settings file `UserSettings/EditoolsSettings.asset` (git-ignored). Holds:
+
+- a bool gate per function (`*Enabled`), the overlay membership list (`overlayFunctionIds`), and
+  every function's parameters (QuickTransform, Snap To Surface, Grey Primitives, Heatmap, Material
+  Check material, Trigger Debug whitelist).
+- `version` - a fresh file (0) migrates the old `EditorPrefs` keys once (`EditoolsSettingsMigration`).
+- `Current` - cached accessor for hot paths; `Changed` - raised after `SaveAndNotify()`.
+- `OpenInInspector()` - selects the object; `hideFlags` are reset to `DontSave` in `OnEnable` so the
+  inspector is editable.
+
+**Inspector** (`EditoolsSettingsEditor`): four categories - Scene Tools, Helpers, Controls, Editor
+Tools. Each row: gate checkbox, name (a foldout when the function has settings, default closed,
+`SessionState`-persisted), and an **Overlay** checkbox for functions with a toolbar button. Settings
+are drawn through `SerializedObject` (undo, tooltips, drag handles); gate and overlay changes go
+through `EditoolsFunction.SetEnabled` / `EditoolsSettings.SetInOverlay` (undoable, then `SyncAll`).
+
+**Registry** (`EditoolsFunctions`): one `EditoolsFunction` per function - `Id`, `Category`,
+`GetEnabled` / `SetEnabled`, optional `GetActive` / `SetActive`, optional `DrawSettings`,
+`ShortcutIds` / `ShortcutText` (shown in grey brackets after the name), `OverlayKind` (`None` /
+`Element` / `Toggle`), `Icon`, `CreateOverlayElement`, `Activate`. The gate says whether the function
+exists for the editor; a `Toggle` function (FPS Counter, Vertex Counter, Change Orientation, Trigger
+Debug, Select And Replace Material) additionally has an active / shown state flipped by its toolbar
+toggle or menu row (`*Shown` fields for the first three). `SyncAll()` calls every tool's `Sync()`.
+
+**Zero cost when off**: a tool with a gate exposes `static void Sync()` that subscribes its editor
+events only while `EditoolsOverlay.IsActive && Enabled` and unsubscribes otherwise (no
+`[InitializeOnLoad]` subscriptions, no `EditorPrefs` reads per event). Shortcut-only tools check the
+cached gate at the top of the shortcut.
+
+### 3. HierarchyHeatmap (Editor)
 
 Color-codes Hierarchy and Project window items based on recency of selection.
 
@@ -128,10 +170,11 @@ Most recently selected items are brightest.
 - When a child item has heat/marks but its parent is collapsed, the heat color
   propagates up to the parent row so hot items remain visible
 
-**Settings:** `HeatmapSettingsWindow` provides configuration for colors, tier
-durations, and enable/disable toggles. All stored in `EditorPrefs`.
+**Settings:** colors, alphas and limits are `EditoolsSettings.heatmap*`, drawn in the Hierarchy
+Heatmap foldout of the settings inspector (with a Reset Recent History button). The Hierarchy /
+Project window hooks are subscribed only while enabled (`Sync`).
 
-### 4. QuickTransform (Editor, `[InitializeOnLoad]`)
+### 4. QuickTransform (Editor)
 
 Hold W/E/R + drag anywhere in Scene View to move/rotate/scale without gizmo handles.
 Standard tool switching (tap W/E/R) still works normally — the hold-and-drag only
@@ -182,7 +225,7 @@ does on any other object.
 
 **Shift + W/E/R:** Duplicate selection first, then transform the duplicates.
 
-**Settings (EditorPrefs-backed):**
+**Settings (`EditoolsSettings.quickTransform*`, QuickTransform foldout):**
 
 | Setting | Key | Default |
 |---|---|---|
@@ -230,7 +273,7 @@ under the cursor (first material slot). The material is pinged in the Project wi
 - `I + Shift + LMB` — add material to current selection
 - Custom white eyedropper cursor with black outline shown while I is held
 - Uses `HandleUtility.PickGameObject` (GPU picking, no mesh raycasting)
-- Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `Editools_SelectMaterial_Enabled`, default true)
+- Gate: `EditoolsSettings.selectMaterialEnabled` (default true); the Scene View hook is held only while enabled
 
 ### 7. SceneCameraUndo (Editor, `Shift+Z` / `Shift+Y`)
 
@@ -286,9 +329,13 @@ both find and replace fields. If no shared prefix exists, both fields start empt
 operation via `Undo.CollapseUndoOperations`. Asset renames use
 `AssetDatabase.RenameAsset` wrapped in `StartAssetEditing/StopAssetEditing`.
 
-**EditorPrefs:** `MassRename_Enabled` (default: true). Toggle in Editools overlay.
+**Gate:** `EditoolsSettings.massRenameEnabled` (default true).
 
 ### 10. QuickAccess (EditorWindow)
+
+Gate: `EditoolsSettings.quickAccessEnabled` (default false). On keeps the window open and the
+shortcuts live; off closes it. Closing the window by hand turns the gate off (`OnDestroy`, skipped
+while the editor quits).
 
 User-curated quick-access panel for frequently used scene objects and project assets.
 Opens via `Tools > Editools > Quick Access`.
@@ -357,7 +404,7 @@ items to the new scene's prefs key.
 - `Editor/QuickAccess/QuickAccess.cs`
 - `Editor/QuickAccess/Resources/QuickAccess.uss`
 
-### 11. SceneViewFpsCounter (Editor, `[InitializeOnLoad]`)
+### 11. SceneViewFpsCounter (Editor)
 
 Live FPS overlay in the top-left corner of each Scene View.
 
@@ -365,7 +412,7 @@ Live FPS overlay in the top-left corner of each Scene View.
 - Per-SceneView state via `Dictionary<int, FrameData>` keyed by `sceneView.GetInstanceID()`
 - Rolling average over 60 samples, displays average FPS and frame time (ms)
 - Rendered as IMGUI label inside `Handles.BeginGUI()` with semi-transparent black background
-- Toggle on/off via Editools Settings checkbox (`EditorPrefs`: `SceneViewFpsCounter_Enabled`, default false)
+- Gate: `EditoolsSettings.fpsCounterEnabled` (default true); drawn while `fpsCounterShown` (toolbar toggle / menu row)
 - Continuously calls `sceneView.Repaint()` to keep the counter updating
 
 ### 11a. SceneViewVertexCounter (Editor)
@@ -377,11 +424,11 @@ GPU vertex count readout under the FPS counter in each Scene View: whole scene, 
 - View count also skips objects hidden by Scene Visibility. In a Prefab Stage only the prefab contents are counted.
 - Driven from `EditoolsOverlay`'s scene GUI while the overlay is displayed. Recounts lazily: hierarchy / object changes, undo, selection, prefab stage and play mode changes mark it dirty; camera changes are detected on repaint and throttled to 10 Hz.
 - `EditoolsOverlay.CaptureSceneView` calls `DrawToCapture` to burn the readout into captured screenshots.
-- Toggle via Editools Settings checkbox (`EditorPrefs`: `SceneViewVertexCounter_Enabled`, default false)
+- Gate: `EditoolsSettings.vertexCounterEnabled` (default true); drawn while `vertexCounterShown` (toolbar toggle / menu row)
 
 ### 11b. DistanceSelect (Editor)
 
-Adds GameObjects near the selection to the selection. Activated by `[Shortcut("Editools/Distance Select")]` (Ctrl+=) or the Editools Settings row; activation also shows the `DistanceSelectOverlay` panel (From / To / Interval / Aggregate, Select, Close).
+Adds GameObjects near the selection to the selection. Activated by `[Shortcut("Editools/Distance Select")]` (Ctrl+=) or the Editools toolbar button / settings menu row; activation also shows the `DistanceSelectOverlay` panel (From / To / Interval / Aggregate, Select, Close).
 
 - Distance modes for From (selected objects) and To (candidates): Pivot, Bounding Box (own `Renderer.bounds`), Mesh (own MeshFilter / SkinnedMeshRenderer surface, skinned meshes baked). Objects missing the needed data are skipped.
 - Candidates: every active GameObject in the loaded scenes (or the open Prefab Stage) not hidden from the Hierarchy and not already selected.
@@ -391,9 +438,9 @@ Adds GameObjects near the selection to the selection. Activated by `[Shortcut("E
 - Reset Selection (panel button): selects only the search's origin objects (the selection when the search started, in either mode) and ends the search. Enabled while a search has origins on record.
 - Settings in `EditorPrefs` (`Editools_DistanceSelect_*`); interval defaults to 0.5.
 
-### 11c. AltDeselection (Editor, `[InitializeOnLoad]`)
+### 11c. AltDeselection (Editor)
 
-Separates Scene View click selection into an add modifier and a remove modifier. Off by default; Editools Settings row (`EditorPrefs`: `AltDeselection_Enabled`).
+Separates Scene View click selection into an add modifier and a remove modifier. Off by default (`EditoolsSettings.altDeselectionEnabled`); Scene View hooks held only while enabled.
 
 - `Ctrl + LMB` (no drag) — adds the first *unselected* object under the cursor (selection base, i.e. prefab root). Selected hierarchies are passed to `PickGameObject` as `ignore`, so a selected object in front does not block the click. Unity's own Ctrl+click toggle is suppressed.
 - `Alt + LMB` (no drag) — removes the first *selected* object under the cursor: picks front to back with a growing `ignore` list until a selected hierarchy is hit, then removes that object and every selected ancestor. Alt+drag orbit, box selection and Shift+click are untouched.
@@ -403,7 +450,7 @@ Separates Scene View click selection into an add modifier and a remove modifier.
 
 ### 11d. ObjectDisplayToggle (Editor)
 
-`Y` cycles the selected objects through display states: Normal → Bounding Box → Greybox (Greybox objects only) → Outline → Normal. On by default; Editools Settings row (`EditorPrefs`: `ObjectDisplayToggle_Enabled`). Turning the row off returns every object to Normal.
+`Y` cycles the selected objects through display states: Normal → Bounding Box → Greybox (Greybox objects only) → Outline → Normal. On by default (`EditoolsSettings.objectDisplayToggleEnabled`). Turning it off returns every object to Normal. The overlay button cycles the selection like `Y`.
 
 - Bounding Box: geometry hidden; the enclosing box of every child `MeshFilter` / `SkinnedMeshRenderer` (mesh-local bounds, in root-local space) drawn as 12 lines that follow the root transform.
 - Greybox: only offered when the object has a `Greybox` component; geometry hidden; the Greybox's 12 corner edges drawn (`GetWorldCorners` read each Layout, so edits show live).
@@ -415,6 +462,16 @@ Separates Scene View click selection into an add modifier and a remove modifier.
 - A mixed selection moves to the state after the active object's state, so one press lands every selected object on the same state; an object the state does not apply to (non-Greybox asked for Greybox) takes the next applicable state.
 - `[Shortcut("Editools/Object Display Toggle", KeyCode.Y)]` is global (a Scene View context only fired while the Scene View had focus / the cursor; elsewhere Unity's `Y` switched to the Transform tool). `ClaimShortcutBinding` unbinds every other shortcut that shares the tool's binding (Unity's `Tools/Transform`) in the active shortcut profile; the default profile is read-only, so an `Editools` profile is created and activated when needed. It runs from `EditoolsOverlay.OnCreated` (one-shot `EditorApplication.update`) and when the settings row is turned on; each unbind is logged. Disabling the tool does not restore the unbound shortcuts (Edit ▸ Shortcuts).
 - No `[InitializeOnLoad]`: the shortcut and the overlay are the entry points; the `duringSceneGui` hook, `beforeAssemblyReload` and `playModeStateChanged` are subscribed only while at least one object is in a non-Normal state.
+
+### 11e. SelectionUndo (Editor, `Alt+Z` / `Alt+Y`)
+
+Undo/redo for object selection only, separate from Unity's action undo stack. On by default (`EditoolsSettings.selectionUndoEnabled`); `Selection.selectionChanged` is subscribed only while enabled and the overlay is displayed.
+
+- `Alt+Z` - restore the previous selection; `Alt+Y` - restore the next one. Global `[Shortcut]`s (`Editools/Selection Undo`, `Editools/Selection Redo`) so they fire with the Project window focused as well.
+- Every `Selection.selectionChanged` is recorded as a snapshot of `Selection.objects` (scene objects or assets; an empty selection counts, so Alt+Z restores after deselect-all). Max 64 entries; a new change clears the redo list.
+- A restore is detected by comparing the reported selection with the history top (set equality), not by a timing flag, so it is never recorded and never clears redo.
+- Objects deleted since the snapshot are dropped on restore; the history top is replaced with what was actually applied.
+- History is static memory: lost on domain reload. Unity's own Ctrl+Z restoring a selection is recorded as a new entry.
 
 ### 12. Greybox (Runtime + Editor)
 
@@ -442,11 +499,11 @@ manager. The manager and primitive share the creation Undo step.
   - Dirty embedded meshes are written to disk only on scene/prefab save (`GreyPrimitiveSaveHook`, hooks both `sceneSaved` and `PrefabStage.prefabSaved`; a prefab stage save carries them with the file) — inspector drags never hit the disk per tick
 
 **Editor (`GreyboxSettings.cs`):**
-- `GreyboxSettings.DefaultMaterial` — per-project `EditorPrefs` material (GUID key: `Editools_Greybox_DefaultMatGUID`)
+- `GreyPrimitiveSettings.DefaultMaterial` — `EditoolsSettings.greyDefaultMaterial` (Grey Primitives foldout)
 - `GreyboxSettingsPopup` — single material field, accessible from Editools Settings ▸ Greybox
 - `GreyboxSettings.PlaceGreybox(pos, rot, parent)` — shared creation helper used by both menu item and shortcut
 - Menu item (`GameObject > 3D Object > Greybox`) — creates at origin with identity rotation
-- **Ctrl+G shortcut** (`GreyboxCreationShortcut`, `[InitializeOnLoad]`, context = `SceneView`):
+- **Ctrl+G shortcut** (`GreyboxCreationShortcut`, context = `SceneView`, gated by `GreyPrimitiveSettings.CanCreate`):
   - Tracks the last scene-view mouse ray each frame via `SceneView.duringSceneGui` (`MouseMove`/`MouseDrag` events)
   - On Ctrl+G: fires Möller–Trumbore ray against all active scene `MeshFilter`s (skips existing Greyboxes); on hit, places pivot at surface point with Y aligned to interpolated surface normal and forward derived from world-up projection (same logic as SnapToSurface)
   - Fallback (no surface hit): places at view-pivot depth along the stored ray, identity rotation
@@ -627,7 +684,7 @@ Existing box-only compound references and legacy hierarchy ownership remain read
 - `GPEditCoordinates.cs` - coordinate frames, common drag/axis-lock behavior and hover arrows
 - `GPEditShared.cs` — shared hover math, colors, and lookup tables; deliberately independent of QuickTransform
 - `GPEditTooltip.cs` — Scene View tooltip listing the actions for the selected primitive type
-- `GPWindowOverlay.cs` — floating Scene View panel, shown only for a single-type Grey Primitive selection; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe), so there is no `[InitializeOnLoad]` side effect
+- `GPWindowOverlay.cs` — floating Scene View panel, shown only for a single-type Grey Primitive selection; owns the `SceneView.duringSceneGui` subscription (Subscribe/Unsubscribe, held only while Grey Primitives are enabled in Editools Settings), so there is no `[InitializeOnLoad]` side effect
 
 **Migration note:** This system replaced QuickTransform's former Special (Q-held) mode and its
 Greybox edge/extrude special-casing. The Greypipe girth and Greyroad width quick-adjust drags
@@ -662,7 +719,7 @@ two debug modes from fighting over scene materials.
 temporarily restore original materials during save. Without this, debug materials would
 be serialized into the scene file.
 
-**QuickTransform key handling:** The tool uses `[InitializeOnLoad]` + `SceneView.duringSceneGui`
+**QuickTransform key handling:** The tool subscribes `SceneView.duringSceneGui` while enabled (`Sync`)
 to intercept W/E/R key events. It distinguishes between tap (tool switch, let through)
 and hold+drag (QuickTransform operation, consumed). The `ModeKeyDelaySec` of 0.1s prevents
 accidental activation during normal tool switching. The `suppressKeyUpFor` field prevents
@@ -688,7 +745,7 @@ warping to avoid DPI/window-offset conversion issues.
 ## What This System Does NOT Do
 
 - Does not modify gameplay code — purely editor tooling
-- Does not persist any state in scene files (all state in EditorPrefs/SessionState)
+- Does not persist any state in scene files (settings in `UserSettings/EditoolsSettings.asset`, tool state in EditorPrefs/SessionState)
 - SceneMaterialOverride does not handle particles, UI, or terrain — only MeshRenderer
   and SkinnedMeshRenderer
 - QuickTransform does not support custom pivot points — uses selection center (single)
@@ -713,13 +770,14 @@ Conventions observed across Editools tools. Follow these when adding new feature
 
 ### Static Tools (non-window)
 
-- Register via `[InitializeOnLoad]` on the class or `[InitializeOnLoadMethod]` on a static method.
-- Hook into `SceneView.duringSceneGui` for scene-view input handling.
+- Add an `EditoolsFunction` to `EditoolsFunctions` (gate field on `EditoolsSettings`, category, tooltip, optional settings drawer and overlay button).
+- Expose `static void Sync()` that hooks `SceneView.duringSceneGui` (or other editor events) only while `EditoolsOverlay.IsActive && Enabled`, and call it from `EditoolsFunctions.SyncAll`. No `[InitializeOnLoad]`.
 - Keyboard shortcuts via `[Shortcut("Editools/Tool Name", KeyCode.X, ShortcutModifiers.Y)]`.
 
 ### Local Persistence
 
-- **EditorPrefs** for all local state. Key with `Application.dataPath` prefix for per-project
+- **EditoolsSettings** for user-facing settings (gates, overlay membership, tool parameters).
+- **EditorPrefs** for tool state (marks, panel lists, last colors). Key with `Application.dataPath` prefix for per-project
   isolation: `Application.dataPath + "ToolName_Setting"`.
 - Complex lists stored as comma-separated (or semicolon-separated) ID strings.
 - **SessionState** for transient state that should survive domain reloads but not editor restarts.

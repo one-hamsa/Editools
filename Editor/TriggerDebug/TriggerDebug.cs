@@ -47,17 +47,27 @@ static class TriggerDebug
 
 	internal static bool IsActive => SceneMaterialOverride.IsModeActive(k_ModeName);
 
+	/// <summary>Gate from Editools Settings. Turning it off exits the mode.</summary>
+	internal static bool Enabled => EditoolsSettings.Current.triggerDebugEnabled;
+
 	static TriggerDebug()
 	{
 		// Re-enter after a domain reload if we were active before it (SceneMaterialOverride
 		// force-exits on assembly reload; the session flag survives so we can restore).
 		if (SessionState.GetBool(k_SessionKey, false))
-			EditorApplication.delayCall += () => SetEnabled(true);
+			EditorApplication.delayCall += () => { if (Enabled) SetActive(true); };
 	}
 
-	internal static void SetEnabled(bool on)
+	internal static void Sync()
+	{
+		if (!Enabled && IsActive) Disable();
+	}
+
+	/// <summary>Enters or exits the mode. The gate must be on to enter.</summary>
+	internal static void SetActive(bool on)
 	{
 		if (on == IsActive) return;
+		if (on && !Enabled) return;
 		if (on) Enable();
 		else Disable();
 	}
@@ -233,27 +243,23 @@ static class TriggerDebug
 
 /// <summary>
 /// Scene View toolbar toggle for <see cref="TriggerDebug"/>. Stays in sync with the
-/// underlying mode (e.g. when another override force-exits it). Right-click opens the
-/// material whitelist window; drag-dropping materials onto the button whitelists them.
+/// underlying mode (e.g. when another override force-exits it). Drag-dropping materials onto the
+/// button whitelists them; right-click opens the Editools settings like every toolbar button.
 /// </summary>
-[EditorToolbarElement(k_Id, typeof(SceneView))]
 class EditoolsTriggerDebugButton : EditorToolbarToggle
 {
-	public const string k_Id = "Editools/TriggerDebug";
-
 	public EditoolsTriggerDebugButton()
 	{
 		icon = EditorGUIUtility.IconContent("d_BoxCollider Icon").image as Texture2D;
 		tooltip = "Trigger Debug — paints the scene gray and tints anything inside the " +
 			"selected box/sphere colliders (selection + children), plus any registered debug " +
 			"volumes (e.g. baker bounds). Selection can change live.\n" +
-			"Right-click: material whitelist — extra materials (e.g. transparent ones, " +
-			"normally skipped) that get painted too. Drag a material here to add it.";
+			"Right-click: open Editools Settings (material whitelist - extra materials, e.g. transparent " +
+			"ones normally skipped, that get painted too). Drag a material here to whitelist it.";
 
 		SetValueWithoutNotify(TriggerDebug.IsActive);
 		this.RegisterValueChangedCallback(OnToggled);
 
-		RegisterCallback<ContextClickEvent>(OnContextClick);
 		RegisterCallback<DragEnterEvent>(_ => AcceptMaterialDrag());
 		RegisterCallback<DragUpdatedEvent>(_ => AcceptMaterialDrag());
 		RegisterCallback<DragPerformEvent>(OnDragPerform);
@@ -266,41 +272,16 @@ class EditoolsTriggerDebugButton : EditorToolbarToggle
 	{
 		TriggerDebug.StateChanged += OnExternalStateChanged;
 		SetValueWithoutNotify(TriggerDebug.IsActive);
-
-		// Right-click watcher at the panel root, trickle-down: the Scene View consumes
-		// right mouse for camera/context handling before it reaches toolbar elements,
-		// so a callback on this element alone never sees it. The root sees it first.
-		evt.destinationPanel?.visualTree.RegisterCallback<PointerDownEvent>(
-			OnPanelPointerDown, TrickleDown.TrickleDown);
 	}
 
 	void OnDetachFromPanel(DetachFromPanelEvent evt)
 	{
 		TriggerDebug.StateChanged -= OnExternalStateChanged;
-		evt.originPanel?.visualTree.UnregisterCallback<PointerDownEvent>(
-			OnPanelPointerDown, TrickleDown.TrickleDown);
 	}
 
-	void OnPanelPointerDown(PointerDownEvent evt)
-	{
-		if (evt.button != 1) return;
-		if (!worldBound.Contains(new Vector2(evt.position.x, evt.position.y))) return;
-
-		TriggerDebugWhitelistWindow.Open();
-		evt.StopImmediatePropagation();
-	}
-
-	void OnToggled(UnityEngine.UIElements.ChangeEvent<bool> evt) => TriggerDebug.SetEnabled(evt.newValue);
+	void OnToggled(UnityEngine.UIElements.ChangeEvent<bool> evt) => TriggerDebug.SetActive(evt.newValue);
 
 	void OnExternalStateChanged(bool on) => SetValueWithoutNotify(on);
-
-	// Fallback for panels where right-click does reach the element — the panel-root
-	// watcher above already opened the window and stopped propagation in that case.
-	void OnContextClick(ContextClickEvent evt)
-	{
-		TriggerDebugWhitelistWindow.Open();
-		evt.StopPropagation();
-	}
 
 	static void AcceptMaterialDrag()
 	{
@@ -316,8 +297,8 @@ class EditoolsTriggerDebugButton : EditorToolbarToggle
 			if (obj is Material mat)
 				TriggerDebugWhitelist.Add(mat);
 
-		// Visible confirmation — a bare drop otherwise gives no feedback at all.
-		TriggerDebugWhitelistWindow.Open();
+		// Visible confirmation - a bare drop otherwise gives no feedback at all.
+		EditoolsSettings.OpenInInspector();
 	}
 
 	static bool DragContainsMaterial()

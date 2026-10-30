@@ -4,123 +4,81 @@ using UnityEditor;
 using UnityEngine;
 
 /// <summary>
-/// Per-user material whitelist for Trigger Debug — ADDITIVE to the default paint set.
+/// Per-user material whitelist for Trigger Debug - ADDITIVE to the default paint set.
 /// The mode always paints every opaque renderer; whitelisted materials are painted
 /// on top of that even when they'd normally be excluded (renderers with transparent
-/// materials are skipped by default). Stored locally in EditorPrefs as material GUIDs,
-/// so it survives asset moves/renames and never touches version control.
-///
-/// Manage it from the Trigger Debug toolbar button: right-click opens the manager
-/// window, drag-dropping materials onto the button adds them.
+/// materials are skipped by default). The list is <see cref="EditoolsSettings.triggerDebugWhitelist"/>,
+/// edited in the Editools settings inspector or by dropping materials on the Trigger Debug
+/// toolbar button.
 /// </summary>
 static class TriggerDebugWhitelist
 {
-	const string k_Pref = "Editools_TriggerDebug_MaterialWhitelist";
-	const char k_Separator = ';';
+	/// <summary>Raised whenever the list changes (any settings change counts). TriggerDebug re-applies its override.</summary>
+	internal static event System.Action Changed
+	{
+		add => EditoolsSettings.Changed += value;
+		remove => EditoolsSettings.Changed -= value;
+	}
 
-	static List<string> s_guids;
+	static List<Material> List => EditoolsSettings.Current.triggerDebugWhitelist;
 
-	/// <summary>Raised whenever the list changes. TriggerDebug re-applies its override; the window rebuilds.</summary>
-	internal static event System.Action Changed;
-
-	internal static int Count { get { EnsureLoaded(); return s_guids.Count; } }
+	internal static int Count => List.Count;
 	internal static bool IsEmpty => Count == 0;
 
-	static void EnsureLoaded()
-	{
-		if (s_guids != null) return;
-		s_guids = new List<string>();
-		string raw = EditorPrefs.GetString(k_Pref, string.Empty);
-		foreach (string guid in raw.Split(k_Separator))
-			if (!string.IsNullOrEmpty(guid))
-				s_guids.Add(guid);
-	}
+	internal static bool Contains(Material mat) => mat != null && List.Contains(mat);
 
-	static void Save()
-	{
-		EditorPrefs.SetString(k_Pref, string.Join(k_Separator, s_guids));
-		Changed?.Invoke();
-	}
-
-	internal static bool Contains(Material mat)
-	{
-		if (mat == null) return false;
-		EnsureLoaded();
-		return s_guids.Contains(GuidOf(mat));
-	}
-
-	/// <summary>Adds a material (asset materials only — scene/runtime instances have no GUID). Returns true if it was actually added.</summary>
+	/// <summary>Adds a material (asset materials only - scene/runtime instances cannot be saved). Returns true if it was actually added.</summary>
 	internal static bool Add(Material mat)
 	{
 		if (mat == null) return false;
-		string guid = GuidOf(mat);
-		if (string.IsNullOrEmpty(guid))
+		if (!EditorUtility.IsPersistent(mat))
 		{
-			Debug.LogError($"[TriggerDebug] '{mat.name}' is not an asset material — only project materials can be whitelisted.");
+			Debug.LogError($"[TriggerDebug] '{mat.name}' is not an asset material - only project materials can be whitelisted.");
 			return false;
 		}
 
-		EnsureLoaded();
-		if (s_guids.Contains(guid)) return false;
-		s_guids.Add(guid);
-		Save();
+		var settings = EditoolsSettings.Current;
+		if (settings.triggerDebugWhitelist.Contains(mat)) return false;
+		Undo.RecordObject(settings, "Add Trigger Debug Whitelist Material");
+		settings.triggerDebugWhitelist.Add(mat);
+		settings.SaveAndNotify();
 		return true;
 	}
 
 	internal static void Remove(Material mat)
 	{
 		if (mat == null) return;
-		EnsureLoaded();
-		if (s_guids.Remove(GuidOf(mat)))
-			Save();
+		var settings = EditoolsSettings.Current;
+		if (!settings.triggerDebugWhitelist.Contains(mat)) return;
+		Undo.RecordObject(settings, "Remove Trigger Debug Whitelist Material");
+		settings.triggerDebugWhitelist.Remove(mat);
+		settings.SaveAndNotify();
 	}
 
 	internal static void Clear()
 	{
-		EnsureLoaded();
-		if (s_guids.Count == 0) return;
-		s_guids.Clear();
-		Save();
+		var settings = EditoolsSettings.Current;
+		if (settings.triggerDebugWhitelist.Count == 0) return;
+		Undo.RecordObject(settings, "Clear Trigger Debug Whitelist");
+		settings.triggerDebugWhitelist.Clear();
+		settings.SaveAndNotify();
 	}
 
-	/// <summary>
-	/// Resolves the stored GUIDs to loaded materials. Entries whose asset no longer
-	/// exists (deleted material) are pruned silently — stale local prefs, not an error.
-	/// </summary>
+	/// <summary>Copies the whitelist into <paramref name="results"/>, skipping empty slots and deleted materials.</summary>
 	internal static void GetMaterials(List<Material> results)
 	{
-		EnsureLoaded();
 		results.Clear();
-
-		bool pruned = false;
-		for (int i = s_guids.Count - 1; i >= 0; i--)
-		{
-			string path = AssetDatabase.GUIDToAssetPath(s_guids[i]);
-			var mat = string.IsNullOrEmpty(path) ? null : AssetDatabase.LoadAssetAtPath<Material>(path);
-			if (mat == null)
-			{
-				s_guids.RemoveAt(i);
-				pruned = true;
-				continue;
-			}
-			results.Insert(0, mat);
-		}
-
-		// Persist the prune without firing Changed — the effective list is unchanged
-		// (those materials no longer exist), and notifying here would re-enter callers.
-		if (pruned)
-			EditorPrefs.SetString(k_Pref, string.Join(k_Separator, s_guids));
+		foreach (var mat in List)
+			if (mat != null) results.Add(mat);
 	}
 
 	/// <summary>Snapshot of the whitelist as a set, for per-slot lookups during a material swap. Empty set when the whitelist is empty.</summary>
 	internal static HashSet<Material> BuildSet()
 	{
-		var mats = new List<Material>(Count);
-		GetMaterials(mats);
-		return new HashSet<Material>(mats);
+		var set = new HashSet<Material>();
+		foreach (var mat in List)
+			if (mat != null) set.Add(mat);
+		return set;
 	}
-
-	static string GuidOf(Material mat) =>
-		AssetDatabase.TryGetGUIDAndLocalFileIdentifier(mat, out string guid, out long _) ? guid : null;
 }
 #endif

@@ -11,11 +11,10 @@ using UnityEngine.Rendering;
 /// using the submesh's vertex range), only for renderers that actually draw: enabled,
 /// not Shadows Only, and in the LOD the Scene View camera shows.
 /// Drawn under the FPS counter and into Editools scene captures.
-/// Toggle via the Editools settings menu.
+/// Gated by Editools Settings.
 /// </summary>
 static class SceneViewVertexCounter
 {
-    private const string k_EnabledKey = "SceneViewVertexCounter_Enabled";
     private const double k_RecountInterval = 0.1;
     private const float k_Margin = 6f;
     private const float k_RowSpacing = 2f;
@@ -25,15 +24,27 @@ static class SceneViewVertexCounter
 
     static readonly Color k_BackgroundColor = new Color(0f, 0f, 0f, 0.55f);
 
-    internal static bool Enabled
+    internal static bool Enabled => EditoolsSettings.Current.vertexCounterEnabled;
+
+    /// <summary>Whether the counter is drawn. Flipped by the toolbar toggle / settings menu row.</summary>
+    internal static bool Shown
     {
-        get => EditorPrefs.GetBool(k_EnabledKey, false);
+        get => EditoolsSettings.Current.vertexCounterShown;
         set
         {
-            EditorPrefs.SetBool(k_EnabledKey, value);
-            if (!value) Unsubscribe();
-            SceneView.RepaintAll();
+            EditoolsSettings.SetBool(ref EditoolsSettings.Current.vertexCounterShown, value, "Toggle Vertex Counter");
+            Sync();
         }
+    }
+
+    /// <summary>True while the counter draws: enabled, shown and the overlay is active.</summary>
+    internal static bool IsDrawing => EditoolsOverlay.IsActive && Enabled && Shown;
+
+    /// <summary>Drops the change-tracking subscriptions when not drawing; drawing re-subscribes.</summary>
+    internal static void Sync()
+    {
+        if (!IsDrawing) Unsubscribe();
+        SceneView.RepaintAll();
     }
 
     class ViewState
@@ -77,7 +88,7 @@ static class SceneViewVertexCounter
     /// <summary>Called from <see cref="EditoolsOverlay"/>'s scene GUI while the overlay is displayed.</summary>
     internal static void OnSceneGUI(SceneView sceneView)
     {
-        if (!Enabled) return;
+        if (!IsDrawing) return;
         if (Event.current.type != EventType.Repaint) return;
 
         Subscribe();
@@ -89,7 +100,7 @@ static class SceneViewVertexCounter
 
         var size = s_style.CalcSize(state.label);
         float y = k_Margin;
-        if (SceneViewFpsCounter.Enabled)
+        if (SceneViewFpsCounter.Enabled && SceneViewFpsCounter.Shown)
             y += size.y + 2f + k_RowSpacing;
 
         EditorGUI.DrawRect(new Rect(k_Margin, y, size.x + 2, size.y + 2), k_BackgroundColor);

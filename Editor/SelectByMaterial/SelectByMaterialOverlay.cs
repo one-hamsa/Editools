@@ -76,6 +76,14 @@ static class SelectByMaterial
         }
     }
 
+    internal static bool Enabled => EditoolsSettings.Current.selectByMaterialEnabled;
+
+    /// <summary>Hides the panel when the function is turned off.</summary>
+    internal static void Sync()
+    {
+        if (!Enabled && Shown) Shown = false;
+    }
+
     /// <summary>True when either list holds at least one non-null entry; otherwise every material matches.</summary>
     internal static bool HasIdentityFilter
     {
