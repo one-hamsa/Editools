@@ -90,6 +90,8 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 	public bool hierarchyHeatmapEnabled;
 	[Tooltip("SDF Generator window: bakes a texture into a signed distance field.")]
 	public bool sdfGeneratorEnabled = true;
+	[Tooltip("FBX Export: bakes the selected renderers (current pose, world space) to one binary FBX file.")]
+	public bool fbxExportEnabled = true;
 
 	[Tooltip("Functions shown as their own button in the Scene View toolbar overlay, by function id.")]
 	public List<string> overlayFunctionIds = new List<string>
@@ -181,6 +183,13 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 
 	[Tooltip("Material that Material Check applies to every opaque scene renderer while it is on.")]
 	public Material materialCheckMaterial;
+
+	// ─── FBX Export ──────────────────────────────────────────────
+
+	[Tooltip("Merge adjacent coplanar triangle pairs into quads in the exported FBX. Off exports the triangles as they are.")]
+	public bool fbxExportQuads = true;
+	[Tooltip("Largest angle in degrees between the face normals of two adjacent triangles that still merges them into a quad.")]
+	[Range(0f, 90f)] public float fbxExportQuadMaxAngle = 40f;
 
 	// ─── Trigger Debug ───────────────────────────────────────────
 

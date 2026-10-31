@@ -168,6 +168,17 @@ static class EditoolsFunctions
 		Field(so, nameof(EditoolsSettings.materialCheckMaterial), "Material");
 	}
 
+	static void DrawFbxExportSettings(SerializedObject so)
+	{
+		Field(so, nameof(EditoolsSettings.fbxExportQuads), "Export Quads");
+		if (so.FindProperty(nameof(EditoolsSettings.fbxExportQuads)).boolValue)
+		{
+			EditorGUI.indentLevel++;
+			Field(so, nameof(EditoolsSettings.fbxExportQuadMaxAngle), "Quad Max Angle (deg)");
+			EditorGUI.indentLevel--;
+		}
+	}
+
 	static void DrawTriggerDebugSettings(SerializedObject so)
 	{
 		EditorGUILayout.HelpBox(
@@ -446,6 +457,18 @@ static class EditoolsFunctions
 			Icon = () => EditoolsIcons.Custom("gradient"),
 			Activate = _ => SdfGeneratorWindow.ShowWindow(),
 		}, s => s.sdfGeneratorEnabled, (s, v) => s.sdfGeneratorEnabled = v));
+
+		list.Add(Gate(new EditoolsFunction
+		{
+			Id = "fbx-export", Name = "FBX Export", Category = EditoolsCategory.EditorTools,
+			Tooltip = "Bakes every MeshRenderer / SkinnedMeshRenderer under the selection (current pose, world space, " +
+				"vertices welded) to one binary FBX file. Opens a popup to pick triangles or quads before exporting.",
+			OverlayKind = EditoolsOverlayKind.Element,
+			Icon = () => EditoolsIcons.Builtin("d_PrefabModel Icon"),
+			CreateOverlayElement = _ => new EditoolsFbxExportButton(),
+			Activate = rect => UnityEditor.PopupWindow.Show(rect, new FbxExportPopup()),
+			DrawSettings = DrawFbxExportSettings,
+		}, s => s.fbxExportEnabled, (s, v) => s.fbxExportEnabled = v));
 
 		// Default toolbar buttons for functions that declared none: a state toggle or an action button.
 		foreach (var f in list)

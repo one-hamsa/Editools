@@ -50,6 +50,8 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/AltDeselection/AltDeselection.cs` — Ctrl+click add-only / Alt+click remove-only Scene View selection
 - `Editor/ObjectDisplayToggle/ObjectDisplayToggle.cs` — Y cycles selected objects between Normal / Bounding Box / Greybox / Outline display (session-only, draws with Gizmos off, lines are click-selectable)
 - `Editor/SelectionUndo/SelectionUndo.cs` - Alt+Z/Y object selection undo/redo (scene objects and project assets)
+- `Editor/FbxExport/FbxExport.cs` - FBX Export function: options popup (triangles / quads, quad max angle) + toolbar dropdown
+- `Editor/FbxExport/FbxMeshExporter.cs` - hand-written binary FBX 7.4 writer: bakes selected renderers to world space, welds vertices, optional quad merge
 - `Editor/Editools.Editor.asmdef` — editor assembly, references Editools runtime
 
 ### Integration (outside submodule)
@@ -472,6 +474,16 @@ Undo/redo for object selection only, separate from Unity's action undo stack. On
 - A restore is detected by comparing the reported selection with the history top (set equality), not by a timing flag, so it is never recorded and never clears redo.
 - Objects deleted since the snapshot are dropped on restore; the history top is replaced with what was actually applied.
 - History is static memory: lost on domain reload. Unity's own Ctrl+Z restoring a selection is recorded as a new entry.
+
+### 11f. FBX Export (Editor)
+
+Bakes every `MeshFilter`+`MeshRenderer` and `SkinnedMeshRenderer` under the selection (inactive included, skinned in their current pose) to one **binary FBX 7.4** file chosen in a save dialog. Gate `EditoolsSettings.fbxExportEnabled`; toolbar dropdown / settings-menu row open `FbxExportPopup` (topology, quad max angle, Export button). Options `fbxExportQuads` / `fbxExportQuadMaxAngle` are also in the settings inspector foldout.
+
+- Pure C# writer (`FbxMeshExporter`), no SDK or native DLL. Geometry is baked to world space with X mirrored and winding flipped (Unity's own exporter convention); every Model node sits at identity, no hierarchy, no skinning, no materials. Units are meters (`UnitScaleFactor` 100).
+- Vertices are welded by local position so the mesh imports as one connected object; normals, tangents, vertex colors and every populated UV channel are written per polygon corner, which keeps the seams.
+- Quads: adjacent triangle pairs are merged when the shared diagonal is not a UV / normal seam and the quad is convex with face normals within the max angle; the rest stay triangles. Non-triangle submeshes and non-readable meshes are skipped with an error.
+- Document layout matches the Autodesk SDK so 3ds Max / Maya accept the file: `FBXHeaderExtension` with `SceneInfo`, top-level `FileId` / `CreationTime` / `Creator` (the fixed, mutually consistent set Blender's exporter uses), `GlobalSettings`, `Documents`, `References`, `Definitions` with `FbxNode` / `FbxMesh` property templates, `Objects`, `Connections`, `Takes`, and the SDK footer (footer code, pad to 16, version, magic). Empty nodes get a null record like nested lists do.
+- A file saved inside `Assets/` is imported and revealed afterwards.
 
 ### 12. Greybox (Runtime + Editor)
 

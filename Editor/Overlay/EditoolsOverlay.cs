@@ -1059,7 +1059,7 @@ class EditoolsSettingsMenuPopup : PopupWindowContent
 			// menu's right edge in screen space.
 			Rect win = editorWindow != null ? editorWindow.position : new Rect(200, 300, k_Width, 200);
 			function.Activate(new Rect(win.width, rowRect.y, 0f, 0f));
-			if (function.Id != "material-check")
+			if (function.Id != "material-check" && function.Id != "fbx-export")
 				editorWindow.Close();
 		}
 	}
