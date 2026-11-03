@@ -336,8 +336,10 @@ operation via `Undo.CollapseUndoOperations`. Asset renames use
 ### 10. QuickAccess (EditorWindow)
 
 Gate: `EditoolsSettings.quickAccessEnabled` (default false). On keeps the window open and the
-shortcuts live; off closes it. Closing the window by hand turns the gate off (`OnDestroy`, skipped
-while the editor quits).
+shortcuts live; off closes it. The window opens and closes on the next editor update, never inside
+the overlay, undo or settings callback that changed the gate. Closing the window by hand turns the
+gate off: `OnDestroy` checks on the next editor update and turns it off only when no instance is
+left and no window is maximized, so layout loads, maximize and editor quit keep it on.
 
 User-curated quick-access panel for frequently used scene objects and project assets.
 Opens via `Tools > Editools > Quick Access`.

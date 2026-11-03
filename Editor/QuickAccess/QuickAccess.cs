@@ -123,22 +123,51 @@ public class QuickAccess : EditorWindow
 
 	static bool s_quitting;
 
+	// Sync is called from overlay lifecycle, undo and settings callbacks, some of which run while
+	// Unity is loading a layout. Opening or closing a docked window there leaves the dock area with
+	// a tab whose window is gone (NRE in HostView.GetExtraButtonsWidth on the next click), so the
+	// open/close runs on the next editor update instead.
 	/// <summary>Opens the window while the gate is on, closes it while off.</summary>
 	internal static void Sync()
 	{
+		EditorApplication.update -= ApplyGate;
+		EditorApplication.update += ApplyGate;
+	}
+
+	static void ApplyGate()
+	{
+		EditorApplication.update -= ApplyGate;
+		if (s_quitting) return;
+
 		bool open = IsOpen;
-		if (GateOn && !open) ShowWindow();
-		else if (!GateOn && open) ToggleWindow();
+		// A maximized window hides the rest of the layout; the window comes back on unmaximize.
+		if (GateOn && !open && !AnyWindowMaximized()) ShowWindow();
+		else if (!GateOn && open) CloseAll();
 	}
 
 	static void OnQuitting() => s_quitting = true;
 
-	// Closing the window by hand turns the gate off, so it does not reopen on the next Sync.
-
+	// Layout loads and maximize destroy the window as well, so the gate turns off only when no
+	// instance exists once the editor settles: that is a close by hand.
 	void OnDestroy()
 	{
-		if (s_quitting || !GateOn) return;
+		if (s_quitting) return;
+		EditorApplication.update -= GateOffIfClosedByHand;
+		EditorApplication.update += GateOffIfClosedByHand;
+	}
+
+	static void GateOffIfClosedByHand()
+	{
+		EditorApplication.update -= GateOffIfClosedByHand;
+		if (s_quitting || !GateOn || IsOpen || AnyWindowMaximized()) return;
 		EditoolsSettings.SetBool(ref EditoolsSettings.Current.quickAccessEnabled, false, "Close Quick Access");
+	}
+
+	static bool AnyWindowMaximized()
+	{
+		foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+			if (window.maximized) return true;
+		return false;
 	}
 
 	public static QuickAccess ShowWindow()
@@ -149,13 +178,16 @@ public class QuickAccess : EditorWindow
 		return win;
 	}
 
+	static void CloseAll()
+	{
+		foreach (var window in Resources.FindObjectsOfTypeAll<QuickAccess>())
+			window.Close();
+	}
+
 	internal static void ToggleWindow()
 	{
-		var existing = Resources.FindObjectsOfTypeAll<QuickAccess>();
-		if (existing.Length > 0)
-			existing[0].Close();
-		else
-			ShowWindow();
+		if (IsOpen) CloseAll();
+		else ShowWindow();
 	}
 
 	// ─── One-time EditorPrefs → Files Migration ───────────────
