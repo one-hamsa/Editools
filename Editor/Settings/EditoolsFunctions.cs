@@ -295,6 +295,18 @@ static class EditoolsFunctions
 			ShortcutIds = new[] { "Editools/Copy Transform", "Editools/Paste Transform", "Editools/Reset Transform" },
 		}, s => s.copyPasteTransformEnabled, (s, v) => s.copyPasteTransformEnabled = v));
 
+		list.Add(Gate(new EditoolsFunction
+		{
+			Id = "select-cousins", Name = "Select Cousins", Category = EditoolsCategory.SceneTools,
+			Tooltip = "Alt+S adds the cousins of the selected objects to the selection: for each one, its single counterpart " +
+				"under each of its parent's siblings, by exact name or else by position among similar names (Door, Door (1), " +
+				"Door_02 are one name). When a level finds nothing new the search climbs one ancestor, up to the scene roots.",
+			ShortcutIds = new[] { "Editools/Select Cousins" },
+			OverlayKind = EditoolsOverlayKind.Element,
+			Icon = () => EditoolsIcons.Builtin("d_UnityEditor.SceneHierarchyWindow"),
+			Activate = _ => SelectCousins.Run(),
+		}, s => s.selectCousinsEnabled, (s, v) => s.selectCousinsEnabled = v));
+
 		// ── Helpers ──
 
 		list.Add(Gate(new EditoolsFunction

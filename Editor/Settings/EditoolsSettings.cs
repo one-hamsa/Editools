@@ -58,6 +58,8 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 	public bool selectShadowOnlyEnabled = true;
 	[Tooltip("Alt+Ctrl+C / V / X copy, paste and reset the local transform of the selection.")]
 	public bool copyPasteTransformEnabled = true;
+	[Tooltip("Alt+S adds the cousins of the selected objects to the selection: one counterpart per uncle, by name and position.")]
+	public bool selectCousinsEnabled = true;
 	[Tooltip("Trigger Debug: paints the scene grey and tints the inside of the selected trigger volumes.")]
 	public bool triggerDebugEnabled = true;
 	[Tooltip("Vertex counter in the top-left of each Scene View (scene / view / selection).")]

@@ -47,6 +47,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/SceneViewFpsCounter/SceneViewFpsCounter.cs` — per-SceneView FPS overlay
 - `Editor/SceneViewVertexCounter/SceneViewVertexCounter.cs` — per-SceneView GPU vertex count overlay (total / view / selected)
 - `Editor/DistanceSelect/DistanceSelect.cs` — Ctrl+= grow selection by distance + settings panel overlay
+- `Editor/SelectCousins/SelectCousins.cs` — Alt+S adds the cousins of the selection: one counterpart per uncle, by exact name then by position among similar names; climbs when a level finds nothing new
 - `Editor/AltDeselection/AltDeselection.cs` — Ctrl+click add-only / Alt+click remove-only Scene View selection
 - `Editor/ObjectDisplayToggle/ObjectDisplayToggle.cs` — Y cycles selected objects between Normal / Bounding Box / Greybox / Outline display (session-only, draws with Gizmos off, lines are click-selectable)
 - `Editor/SelectionUndo/SelectionUndo.cs` - Alt+Z/Y object selection undo/redo (scene objects and project assets)
@@ -486,6 +487,16 @@ Bakes every `MeshFilter`+`MeshRenderer` and `SkinnedMeshRenderer` under the sele
 - Quads: adjacent triangle pairs are merged when the shared diagonal is not a UV / normal seam and the quad is convex with face normals within the max angle; the rest stay triangles. Non-triangle submeshes and non-readable meshes are skipped with an error.
 - Document layout matches the Autodesk SDK so 3ds Max / Maya accept the file: `FBXHeaderExtension` with `SceneInfo`, top-level `FileId` / `CreationTime` / `Creator` (the fixed, mutually consistent set Blender's exporter uses), `GlobalSettings`, `Documents`, `References`, `Definitions` with `FbxNode` / `FbxMesh` property templates, `Objects`, `Connections`, `Takes`, and the SDK footer (footer code, pad to 16, version, magic). Empty nodes get a null record like nested lists do.
 - A file saved inside `Assets/` is imported and revealed afterwards.
+
+### 11g. SelectCousins (Editor, `Alt+S`)
+
+Adds the cousins of the selected scene objects to the selection: for each selected object, its one counterpart under each of its parent's siblings. For a row of houses each with a Door child, Alt+S on one Door selects the Door of every other house. On by default (`EditoolsSettings.selectCousinsEnabled`); global `[Shortcut("Editools/Select Cousins")]` plus an optional toolbar button / settings menu row that runs the same thing.
+
+- Per selected object: the path from an ancestor down to the object is followed from each of that ancestor's siblings, never the ancestor itself, so the object's own siblings are not cousins and an uncle contributes at most one object per selected object. Level 1 is the parent; when a level finds no object outside the current selection the search climbs one ancestor and tries the longer path. It stops after the level whose uncles are the other scene roots. A root object has no parent and so no cousins.
+- One step of the path: the child with the exact name is taken (the n-th of them when the original is the n-th among its exact-name siblings); otherwise the child at the same position among the similarly named ones. No match at any step means no counterpart under that uncle.
+- Similar name: the name with its duplicate suffix stripped, compared case-insensitively. Stripped: any number of trailing ` (n)` groups, or a trailing number with its separator (`Door (1)`, `Door_02`, `Door.003`, `Door2` are all `door`). A name that is only a number keeps itself.
+- Inactive objects are matched; objects hidden from the Hierarchy are skipped and not counted. The search stays in the object's own scene (prefab stage included). Project assets in the selection are ignored.
+- Additive: the current selection stays, counterparts are appended; nothing is replaced. No state between presses: a second press, with the first level now entirely selected, climbs naturally. Logs the number of objects added.
 
 ### 12. Greybox (Runtime + Editor)
 
