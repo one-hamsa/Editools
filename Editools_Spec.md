@@ -263,7 +263,7 @@ Enters a modal snap mode for placing objects on surfaces.
 1. Select object(s), press `Alt+A`
 2. Mouse tracking begins — cursor raycasts against all scene `MeshFilter` geometry
 3. Uses Möller–Trumbore triangle intersection (not Physics raycasts) for precision
-4. Object preview follows the mouse, aligned to surface normal
+4. Object preview follows the mouse, aligned to surface normal. With several objects selected, the active object snaps and the others keep their position and rotation relative to it (one undo step for all)
 5. Press LMB to place; hold and drag left/right to rotate around the placed Y axis (Z with Align Z enabled). Hold Ctrl during rotation to snap to 15-degree increments; release LMB to finish
 6. Right-click cancels (performs `Undo.PerformUndo` to revert)
 

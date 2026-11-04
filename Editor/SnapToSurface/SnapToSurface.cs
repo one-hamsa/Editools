@@ -20,6 +20,15 @@ public class SnapToSurface : EditorWindow
     private static Vector3 s_rotationAxis;
     private static float s_rotationAngle;
 
+    // Other selected objects, carried with the snapped object at their pose relative to it.
+    struct SnapFollower
+    {
+        public Transform  transform;
+        public Vector3    localPosition;
+        public Quaternion localRotation;
+    }
+    private static readonly List<SnapFollower> s_followers = new();
+
     /// <summary>True while an object is being placed (Snap To Surface, or the snap that follows a
     /// Ctrl+G create). Grey Primitive Edit Mode reads this to stop intercepting the scene LMB, so the
     /// confirm-click lands on the placement instead of grabbing a face/edge under the cursor.</summary>
@@ -151,15 +160,20 @@ public class SnapToSurface : EditorWindow
             originalPosition = selectedObject.transform.position;
             originalRotation = selectedObject.transform.rotation;
 
-            // Record undo so the snap can be reverted with Ctrl+Z
-            Undo.RegisterCompleteObjectUndo(selectedObject.transform, "Snap To Surface");
+            CollectFollowers();
 
-            // Build list of objects to ignore (selected object and all children)
+            // Record undo so the snap can be reverted with Ctrl+Z
+            var undoTargets = new Object[s_followers.Count + 1];
+            undoTargets[0] = selectedObject.transform;
+            for (int i = 0; i < s_followers.Count; i++)
+                undoTargets[i + 1] = s_followers[i].transform;
+            Undo.RegisterCompleteObjectUndo(undoTargets, "Snap To Surface");
+
+            // Build list of objects to ignore (selected objects and all their children)
             ignoredObjects.Clear();
-            ignoredObjects.Add(selectedObject);
-            foreach (Transform child in selectedObject.GetComponentsInChildren<Transform>(true)) {
-                ignoredObjects.Add(child.gameObject);
-            }
+            AddIgnoredHierarchy(selectedObject.transform);
+            foreach (var follower in s_followers)
+                AddIgnoredHierarchy(follower.transform);
 
             BuildSnapMeshCache();
 
@@ -168,6 +182,42 @@ public class SnapToSurface : EditorWindow
             SnapModeChanged?.Invoke();
             SceneView.RepaintAll();
         }
+    }
+
+    /// <summary>
+    /// Fill <see cref="s_followers"/> with the other top-level selected objects and their pose in the
+    /// snapped object's space. Ancestors of the snapped object are skipped: they would move it too.
+    /// </summary>
+    private static void CollectFollowers() {
+        s_followers.Clear();
+        Transform primary = selectedObject.transform;
+        Quaternion inverseRotation = Quaternion.Inverse(primary.rotation);
+        foreach (Transform t in Selection.GetTransforms(SelectionMode.TopLevel | SelectionMode.Editable)) {
+            if (t == primary || primary.IsChildOf(t))
+                continue;
+            s_followers.Add(new SnapFollower {
+                transform     = t,
+                localPosition = inverseRotation * (t.position - primary.position),
+                localRotation = inverseRotation * t.rotation,
+            });
+        }
+    }
+
+    /// <summary>Move every follower to keep its pose relative to the snapped object.</summary>
+    private static void ApplyFollowers() {
+        Transform primary = selectedObject.transform;
+        foreach (var follower in s_followers) {
+            if (follower.transform == null) continue;
+            follower.transform.SetPositionAndRotation(
+                primary.position + primary.rotation * follower.localPosition,
+                primary.rotation * follower.localRotation);
+            EditorUtility.SetDirty(follower.transform);
+        }
+    }
+
+    private static void AddIgnoredHierarchy(Transform root) {
+        foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+            ignoredObjects.Add(child.gameObject);
     }
 
     /// <summary>
@@ -450,6 +500,7 @@ public class SnapToSurface : EditorWindow
         float angle = snapAngle ? Mathf.Round(s_rotationAngle / 15f) * 15f : s_rotationAngle;
         selectedObject.transform.rotation = Quaternion.AngleAxis(angle, s_rotationAxis) * s_rotationStart;
         EditorUtility.SetDirty(selectedObject);
+        ApplyFollowers();
     }
 
     private static void UpdateObjectPosition(Vector2 mousePosition) {
@@ -528,6 +579,7 @@ public class SnapToSurface : EditorWindow
             : Quaternion.LookRotation(tangent, alignNormal);
 
         EditorUtility.SetDirty(selectedObject);
+        ApplyFollowers();
     }
 
     /// <summary>
@@ -565,6 +617,7 @@ public class SnapToSurface : EditorWindow
         s_suppressModifierCancel = false;
         SceneView.duringSceneGui -= OnSceneGUI;
         ignoredObjects.Clear();
+        s_followers.Clear();
         ReleaseSnapMeshCache();
         selectedObject = null;
         lastHitSurfaceObject = null;
