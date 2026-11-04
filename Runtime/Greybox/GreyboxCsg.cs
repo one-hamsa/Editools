@@ -18,6 +18,11 @@ sealed class CsgPlane
 {
     public const float Epsilon = 1e-5f;
 
+    // Classification tolerance per unit of vertex coordinate magnitude (~8 float steps). Float spacing
+    // grows with distance from the origin, so a fixed Epsilon alone misclassifies verts of geometry far
+    // out (level geometry sits ~100 m away): shared edges split inconsistently and the solid opens up.
+    const float RelativeEpsilon = 5e-7f;
+
     public Vector3 normal;
     public float w;
 
@@ -63,7 +68,8 @@ sealed class CsgPlane
         for (int i = 0; i < count; i++)
         {
             float t = Vector3.Dot(normal, verts[i]) - w;
-            int type = (t < -Epsilon) ? Back : (t > Epsilon) ? Front : Coplanar;
+            float eps = Epsilon + RelativeEpsilon * Mathf.Max(Mathf.Abs(verts[i].x), Mathf.Max(Mathf.Abs(verts[i].y), Mathf.Abs(verts[i].z)));
+            int type = (t < -eps) ? Back : (t > eps) ? Front : Coplanar;
             polygonType |= type;
             types[i] = type;
         }

@@ -356,12 +356,20 @@ public class GreyBooleanResult : GreyPrimitive
         int frozenLevel = keepSubjectFaceTags ? k_CutLevelBase + CutCount(src) + levelOffset : 0;
         var solid = src.GetOrComputeSolid();
         bool reverse = ReversesWinding(src.transform);
+        Matrix4x4 toLocal = transform.worldToLocalMatrix * src.transform.localToWorldMatrix;
+        Matrix4x4 normalToLocal = toLocal.inverse.transpose;
         foreach (var p in solid.polygons)
         {
             var verts = new List<Vector3>(p.verts.Count);
             for (int i = 0; i < p.verts.Count; i++)
-                verts.Add(transform.InverseTransformPoint(src.transform.TransformPoint(p.verts[i])));
+                verts.Add(toLocal.MultiplyPoint3x4(p.verts[i]));
             if (reverse) verts.Reverse();
+
+            // XXX: the source plane is carried over, not refit from the moved verts. Fragments are full of
+            // near-coincident verts, so a refit from 3 of them can tilt the plane by metres, and the wrong
+            // plane cracks the next subtraction's BSP and keeps cutter faces outside the subject.
+            Vector3 normal = normalToLocal.MultiplyVector(p.plane.normal).normalized;
+            var plane = new CsgPlane(normal, Vector3.Dot(normal, toLocal.MultiplyPoint3x4(p.plane.normal * p.plane.w)));
 
             int tag;
             if (!keepSubjectFaceTags)
@@ -375,8 +383,7 @@ public class GreyBooleanResult : GreyPrimitive
             else
                 tag = frozenLevel;                                    // src's own Operator -> freeze its level
 
-            if (TryPlaneFromVerts(verts, out var plane))
-                dst.Add(new CsgPolygon(verts, tag, plane));
+            dst.Add(new CsgPolygon(verts, tag, plane));
         }
     }
 
@@ -406,17 +413,6 @@ public class GreyBooleanResult : GreyPrimitive
         }
         else if (node is GreyboxCompound compound)
             foreach (var part in compound.Parts) if (part != null) CollectCutMaterials(part, materials);
-    }
-
-    // Recomputes a polygon's plane after a space change; false for a fully degenerate sliver
-    // (skipped — it contributes nothing to the solid).
-    static bool TryPlaneFromVerts(List<Vector3> verts, out CsgPlane plane)
-    {
-        for (int i = 1; i < verts.Count - 1; i++)
-            if (CsgPlane.TryFromPoints(verts[0], verts[i], verts[i + 1], out plane))
-                return true;
-        plane = null;
-        return false;
     }
 
     // The input at the bottom of a Subject chain (Result -> Result -> ... -> input).
