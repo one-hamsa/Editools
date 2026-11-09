@@ -483,9 +483,11 @@ public abstract class GreyPrimitive : MonoBehaviour
         return true;
     }
 
-    // The primitives a scene-embedded mesh can be shared with: the open prefab stage's contents, or
-    // every primitive in the loaded scenes.
-    static GreyPrimitive[] LoadedPrimitives(GameObject context)
+    /// <summary>
+    /// Every primitive in the open prefab stage when <paramref name="context"/> is inside one,
+    /// otherwise every primitive in the loaded scenes. Includes inactive objects.
+    /// </summary>
+    public static GreyPrimitive[] LoadedPrimitives(GameObject context)
     {
         var stage = PrefabStageUtility.GetPrefabStage(context);
         return stage != null

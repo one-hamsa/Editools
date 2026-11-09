@@ -93,9 +93,11 @@ static class FbxMeshExporter
 				// Legitimate filters: a MeshFilter with no mesh, or without a MeshRenderer, has nothing visible to export.
 				if (mf.sharedMesh == null) continue;
 				if (mf.GetComponent<MeshRenderer>() == null) continue;
-				if (!mf.sharedMesh.isReadable)
+				// Edit mode can read most meshes without Read/Write; skip only when the data really comes back empty.
+				Mesh mesh = mf.sharedMesh;
+				if (!mesh.isReadable && mesh.vertexCount > 0 && mesh.vertices.Length == 0)
 				{
-					Debug.LogError($"[FbxMeshExporter] Mesh '{mf.sharedMesh.name}' on '{mf.name}' is not Read/Write enabled - skipping. " +
+					Debug.LogError($"[FbxMeshExporter] Mesh '{mesh.name}' on '{mf.name}' could not be read - skipping. " +
 						"Enable Read/Write in the model's import settings to export it.", mf);
 					continue;
 				}

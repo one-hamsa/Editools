@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEngine;
 using UnityEngine.Pool;
 
 [CustomEditor(typeof(GreyPrimitiveManager))]
@@ -12,6 +13,12 @@ public class GreyPrimitiveManagerEditor : Editor
     // meshes were built from pre-undo manager values — so we re-push, but only when the undo actually
     // changed this manager. Each selected manager's density signature is cached so an undo elsewhere
     // is a cheap O(1) comparison instead of a fan-out over every descendant.
+    static readonly GUIContent s_rebuildAllLabel = new GUIContent(
+        "Rebuild All",
+        "Regenerate every grey primitive in the open scenes (or the open prefab), including primitives " +
+        "under other managers. Each primitive uses its own manager's settings. Boolean Results re-bake " +
+        "after their inputs.");
+
     int[] _lastSignatures;
     static readonly Dictionary<int, GreyPrimitiveManager> s_managers = new Dictionary<int, GreyPrimitiveManager>();
     static readonly Dictionary<int, GreyPrimitiveManager> s_primaries = new Dictionary<int, GreyPrimitiveManager>();
@@ -119,5 +126,17 @@ public class GreyPrimitiveManagerEditor : Editor
                     _lastSignatures[i] = signature;
                 }
         }
+
+        EditorGUILayout.Space();
+        if (GUILayout.Button(s_rebuildAllLabel))
+            RebuildAllLoadedPrimitives(((GreyPrimitiveManager)target).gameObject);
+    }
+
+    // RebuildChanged rebuilds each primitive once, inputs before the Boolean Results and compounds that use them.
+    static void RebuildAllLoadedPrimitives(GameObject context)
+    {
+        using var scope = ListPool<GreyPrimitive>.Get(out var primitives);
+        primitives.AddRange(GreyPrimitive.LoadedPrimitives(context));
+        GreyBooleanOrchestrator.RebuildChanged(primitives);
     }
 }
