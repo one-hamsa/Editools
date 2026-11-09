@@ -184,7 +184,7 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 	readonly List<ViewCompScreenshot> _screenshots = new();
 
 	int _activeIndex = -1;
-	Vector2 _lastViewportSize;
+	Vector2 _lastWindowSize;
 
 	VisualElement _displayRoot;
 	IMGUIContainer _displayIMGUI;
@@ -449,8 +449,6 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 		}
 
 		_screenshots.Add(new ViewCompScreenshot { texture = tex, comment = "" });
-		// Baseline for CheckViewportSize is taken on the next Scene GUI, after the toolbar has laid out the new strip button.
-		_lastViewportSize = Vector2.zero;
 
 		_screenshotStrip?.Rebuild();
 	}
@@ -509,7 +507,7 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 		}
 		_screenshots.Clear();
 		_activeIndex = -1;
-		_lastViewportSize = Vector2.zero;
+		_lastWindowSize = Vector2.zero;
 
 		HideScreenshotDisplay();
 		_screenshotStrip?.Rebuild();
@@ -525,8 +523,8 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 
 		SessionState.SetInt(k_Session + "Count", _screenshots.Count);
 		SessionState.SetInt(k_Session + "ActiveIndex", _activeIndex);
-		SessionState.SetFloat(k_Session + "ViewportW", _lastViewportSize.x);
-		SessionState.SetFloat(k_Session + "ViewportH", _lastViewportSize.y);
+		SessionState.SetFloat(k_Session + "WindowW", _lastWindowSize.x);
+		SessionState.SetFloat(k_Session + "WindowH", _lastWindowSize.y);
 
 		for (int i = 0; i < _screenshots.Count; i++)
 		{
@@ -550,9 +548,9 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 		var dir = ScreenshotDir;
 		if (!Directory.Exists(dir)) return;
 
-		_lastViewportSize = new Vector2(
-			SessionState.GetFloat(k_Session + "ViewportW", 0f),
-			SessionState.GetFloat(k_Session + "ViewportH", 0f));
+		_lastWindowSize = new Vector2(
+			SessionState.GetFloat(k_Session + "WindowW", 0f),
+			SessionState.GetFloat(k_Session + "WindowH", 0f));
 
 		for (int i = 0; i < count; i++)
 		{
@@ -588,17 +586,19 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 		}
 	}
 
-	void CheckViewportSize(SceneView sceneView)
+	// Screenshots are cleared when the Scene View window is resized. The window size is used instead of
+	// cameraViewport, which also changes when docked overlays (including this strip) change size.
+	void CheckWindowSize(SceneView sceneView)
 	{
 		if (_screenshots.Count == 0) return;
 
-		Vector2 currentSize = sceneView.cameraViewport.size;
-		if (_lastViewportSize == Vector2.zero)
+		Vector2 currentSize = sceneView.position.size;
+		if (_lastWindowSize == Vector2.zero)
 		{
-			_lastViewportSize = currentSize;
+			_lastWindowSize = currentSize;
 			return;
 		}
-		if (_lastViewportSize != currentSize)
+		if (_lastWindowSize != currentSize)
 			ClearAllScreenshots();
 	}
 
@@ -615,7 +615,7 @@ public class EditoolsOverlay : Overlay, ICreateHorizontalToolbar, ICreateVertica
 			overlay.CaptureSceneView(sceneView);
 		}
 
-		overlay.CheckViewportSize(sceneView);
+		overlay.CheckWindowSize(sceneView);
 
 		if (overlay.displayed)
 			SceneViewVertexCounter.OnSceneGUI(sceneView);
