@@ -513,7 +513,9 @@ manager. The manager and primitive share the creation Undo step.
 - Corner encoding: `bit0=+X, bit1=+Y, bit2=+Z` (matches QuickTransform's box convention)
 - **Pivot at center-bottom**: default Y range `[0, 1]`, XZ range `[-0.5, 0.5]`
 - Auto-requires `MeshFilter`, `MeshRenderer`, `MeshCollider`
-- `RebuildMesh()` — 6 quads × 2 triangles = 12 tris; per-face vertices for flat normals; UVs 0–1 per face; updates both `MeshFilter.sharedMesh` and `MeshCollider.sharedMesh`
+- `RebuildMesh()` — 6 quads × 2 triangles = 12 tris; per-face vertices for flat normals; updates both `MeshFilter.sharedMesh` and `MeshCollider.sharedMesh`
+- UVs: per-face, scaled by `_uvTileScale` (default 0). At 0 the render mesh has no UVs, unless a Planar UV projection is set (then 0 acts as 1). A boolean result follows its subject Greybox's scale
+- Collider twin (Greybox, boolean result, compound): positions and one triangle list only — no normals, UVs or submeshes, vertices welded by position
 - `GetWorldCorners()` — returns 8 corners transformed to world space (used by QuickTransform)
 - **Mesh persistence** (`GreyPrimitive.PrepareBakeTargets` / `PersistBakedMeshes`, all push-based at bake time — nothing rebuilds on load or domain reload):
   - Scene-owned (plain scene object, prefab instance in a scene, unpacked instance) → meshes serialized scene-embedded and rewritten in place on rebake; a duplicated or pasted object splits off its own meshes when it is created (`GreyPrimitive.SplitSharedSceneEmbeddedMeshes`, from the `CreateGameObjectHierarchy` change event), and any primitive whose mesh another primitive still references splits off on its next rebake

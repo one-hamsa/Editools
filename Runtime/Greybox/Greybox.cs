@@ -135,14 +135,15 @@ public class Greybox : GreyPrimitive
 
     [SerializeField]
     [Tooltip("UV tiling scale. 1 = one texture repeat per meter of world-space face extent. " +
-             "Higher values tile the texture more tightly.")]
-    float _uvTileScale = 1f;
+             "Higher values tile the texture more tightly. 0 = the mesh has no UVs, unless a Planar UV " +
+             "projection is set (then 0 acts as 1).")]
+    float _uvTileScale = 0f;
 
     public float UvTileScale => _uvTileScale;
 
     // When a planar UV projection is active (see GreyPrimitive.PlanarUv), the tile scale multiplies
     // the normalized projection — so >1 tiles it — instead of scaling the per-face UVs in GenerateMesh.
-    protected override float PlanarUvMultiplier => _uvTileScale;
+    protected override float PlanarUvMultiplier => _uvTileScale == 0f ? 1f : _uvTileScale;
 
     public override bool UsesColliderMesh => true; // bakes a low-poly collider twin
 
@@ -326,9 +327,10 @@ public class Greybox : GreyPrimitive
             totalTris  += (faceRows[face] - 1) * (faceCols[face] - 1) * 2;
         }
 
+        bool writeUvs = _uvTileScale != 0f;
         var verts   = new Vector3[totalVerts];
         var normals = new Vector3[totalVerts];
-        var uvs     = new Vector2[totalVerts];
+        var uvs     = writeUvs ? new Vector2[totalVerts] : null;
         var tris    = new int[totalTris * 3];
 
         int vBase = 0, tBase = 0;
@@ -363,8 +365,9 @@ public class Greybox : GreyPrimitive
                     Vector3 p = SampleFace(fixedComp, fixedVal, sComp, tComp, s, t);
                     verts[vi]   = p;
                     normals[vi] = faceNormal;
-                    uvs[vi]     = new Vector2(p[sComp] * sScale * _uvTileScale,
-                                             p[tComp] * tScale * _uvTileScale);
+                    if (writeUvs)
+                        uvs[vi] = new Vector2(p[sComp] * sScale * _uvTileScale,
+                                              p[tComp] * tScale * _uvTileScale);
                 }
             }
 
@@ -390,10 +393,11 @@ public class Greybox : GreyPrimitive
             vBase += rows * cols;
         }
 
-        mesh.Clear();
+        // Clear(false) drops the vertex layout, so a UV channel from an earlier bake doesn't stay serialized.
+        mesh.Clear(false);
         mesh.vertices  = verts;
         mesh.normals   = normals;
-        mesh.uv        = uvs;
+        if (writeUvs) mesh.uv = uvs;
         mesh.triangles = tris;
 
         _builtInputSignature = ComputeMeshInputSignature();

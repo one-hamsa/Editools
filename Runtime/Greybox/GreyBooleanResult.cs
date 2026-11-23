@@ -466,11 +466,13 @@ public class GreyBooleanResult : GreyPrimitive
             EmitSurface(group, polys, localToWorld, density, uvScale, verts, normals, uvs, slotTris[slot]);
         }
 
-        mesh.Clear();
+        // Clear(false) drops the vertex layout, so a UV channel from an earlier bake doesn't stay serialized.
+        mesh.Clear(false);
         if (verts.Count > 65535) mesh.indexFormat = IndexFormat.UInt32;
         mesh.SetVertices(verts);
         mesh.SetNormals(normals);
-        mesh.SetUVs(0, uvs);
+        // A 0 UV tile scale on the subject Greybox means no UVs (a Planar UV projection still adds them).
+        if (uvScale != 0f) mesh.SetUVs(0, uvs);
         mesh.subMeshCount = slotTris.Length;
         for (int i = 0; i < slotTris.Length; i++)
             mesh.SetTriangles(slotTris[i], i);

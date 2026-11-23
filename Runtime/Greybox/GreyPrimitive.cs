@@ -250,6 +250,7 @@ public abstract class GreyPrimitive : MonoBehaviour
             _suppressSubdivision = false;
             _colliderMesh.RecalculateBounds();
             ApplyFaceFlip(_colliderMesh);
+            StripToCollisionData(_colliderMesh);
             colliderMesh = _colliderMesh;
         }
 
@@ -375,6 +376,47 @@ public abstract class GreyPrimitive : MonoBehaviour
         for (int i = 0; i < normals.Length; i++)
             normals[i] = -normals[i];
         mesh.normals = normals;
+    }
+
+    // ─── Collider data ───────────────────────────────────────────
+
+    /// <summary>
+    /// Reduces a collider mesh to the data a MeshCollider reads: positions and one triangle list.
+    /// Normals, UVs and submesh slots are dropped, and vertices at the same position share one index.
+    /// </summary>
+    static void StripToCollisionData(Mesh mesh)
+    {
+        var verts = mesh.vertices;
+        var remap = new int[verts.Length];
+        using var weldedScope = UnityEngine.Pool.ListPool<Vector3>.Get(out var welded);
+        using var indexScope = UnityEngine.Pool.DictionaryPool<Vector3, int>.Get(out var indexOfPosition);
+        for (int i = 0; i < verts.Length; i++)
+        {
+            if (!indexOfPosition.TryGetValue(verts[i], out int index))
+            {
+                index = welded.Count;
+                indexOfPosition.Add(verts[i], index);
+                welded.Add(verts[i]);
+            }
+            remap[i] = index;
+        }
+
+        using var trisScope = UnityEngine.Pool.ListPool<int>.Get(out var tris);
+        using var subMeshScope = UnityEngine.Pool.ListPool<int>.Get(out var subMeshTris);
+        for (int sm = 0; sm < mesh.subMeshCount; sm++)
+        {
+            mesh.GetTriangles(subMeshTris, sm);
+            foreach (int vi in subMeshTris) tris.Add(remap[vi]);
+        }
+
+        // Clear(false) drops the vertex layout too, so no empty normal/UV channels stay serialized.
+        mesh.Clear(false);
+        mesh.indexFormat = welded.Count > 65535
+            ? UnityEngine.Rendering.IndexFormat.UInt32
+            : UnityEngine.Rendering.IndexFormat.UInt16;
+        mesh.SetVertices(welded);
+        mesh.subMeshCount = 1;
+        mesh.SetTriangles(tris, 0);
     }
 
     // ─── Abstract ────────────────────────────────────────────────
