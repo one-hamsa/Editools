@@ -34,7 +34,9 @@ public enum PlanarUvProjection
 /// Mesh persistence: a primitive on a plain scene object keeps its meshes scene-embedded (serialized
 /// into the scene file). A primitive baked inside a prefab (prefab stage, or directly on the asset)
 /// embeds its meshes inside the prefab file itself, as sub-assets — no external mesh files; the
-/// prefab and its instances reference that embedded bake. Rebaking a prefab instance in a scene
+/// prefab and its instances reference that embedded bake. Prefab Mode loads those sub-assets as
+/// stage-owned copies; GreyPrimitiveSaveHook points the stage back at the file's meshes when it
+/// opens, so a stage save keeps them. Rebaking a prefab instance in a scene
 /// never touches the prefab: the bake forks to a fresh scene-embedded mesh and the changed
 /// references serialize as regular prefab instance overrides — revert restores the prefab's bake,
 /// and applying the overrides re-bakes the prefab (see GreyPrimitiveApplyGuard).
@@ -743,5 +745,35 @@ public abstract class GreyPrimitive : MonoBehaviour
     /// reference itself (e.g. the apply guard's orphan sweep keep-set), independent of what the
     /// MeshFilter currently shows.</summary>
     public Mesh BakedRenderMesh => _mesh;
+
+    /// <summary>
+    /// Points this prefab stage primitive's mesh references (baked render/collider fields,
+    /// MeshFilter, MeshCollider) back at the meshes the prefab file holds, taken from
+    /// <paramref name="source"/>, the same primitive on the prefab asset. Prefab Mode loads the
+    /// prefab's Mesh sub-assets as stage-owned copies, and a stage save writes references to those
+    /// copies as null. Only non-persistent references are replaced, so a mesh baked in this stage
+    /// session (already embedded) is kept. Does not dirty the stage.
+    /// </summary>
+    public void RelinkStageMeshes(GreyPrimitive source)
+    {
+        _mesh = PersistentCounterpart(_mesh, source._mesh);
+        _colliderMesh = PersistentCounterpart(_colliderMesh, source._colliderMesh);
+
+        var mf = GetComponent<MeshFilter>();
+        var filterMesh = PersistentCounterpart(mf.sharedMesh, source.GetComponent<MeshFilter>().sharedMesh);
+        if (filterMesh != mf.sharedMesh) mf.sharedMesh = filterMesh;
+
+        // Legitimate filter: the MeshCollider is optional on every grey type.
+        if (TryGetComponent<MeshCollider>(out var mc))
+        {
+            var colliderMesh = PersistentCounterpart(mc.sharedMesh, source.GetComponent<MeshCollider>().sharedMesh);
+            if (colliderMesh != mc.sharedMesh) mc.sharedMesh = colliderMesh;
+        }
+    }
+
+    static Mesh PersistentCounterpart(Mesh stageMesh, Mesh assetMesh) =>
+        stageMesh != null && !EditorUtility.IsPersistent(stageMesh) && assetMesh != null && EditorUtility.IsPersistent(assetMesh)
+            ? assetMesh
+            : stageMesh;
 #endif
 }
