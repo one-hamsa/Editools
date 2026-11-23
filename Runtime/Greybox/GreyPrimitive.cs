@@ -783,6 +783,50 @@ public abstract class GreyPrimitive : MonoBehaviour
         return true;
     }
 
+    // Serialized fields that bind this primitive to its baked meshes. A local bake on a prefab
+    // instance overrides exactly these; none of them is a geometry parameter.
+    static readonly string[] s_meshBindingFields =
+        { nameof(_mesh), nameof(_colliderMesh), nameof(_meshOwnerId), nameof(_colliderMeshOwnerId), nameof(_meshOwnerGuid) };
+
+    /// <summary>
+    /// Makes this prefab instance show the prefab's bake again when its local bake no longer differs
+    /// from it: when this component overrides nothing but its mesh references, those overrides are
+    /// reverted here and on the MeshFilter / MeshCollider. Returns false, changing nothing, when any
+    /// other property of this component is still overridden.
+    /// </summary>
+    public bool RevertLocalBakeIfUnmodified()
+    {
+        using var serialized = new SerializedObject(this);
+        var property = serialized.GetIterator();
+        while (property.Next(enterChildren: true))
+        {
+            if (!property.prefabOverride) continue;
+            string path = property.propertyPath;
+            int dot = path.IndexOf('.');
+            if (System.Array.IndexOf(s_meshBindingFields, dot < 0 ? path : path.Substring(0, dot)) < 0)
+                return false;
+        }
+
+        foreach (var field in s_meshBindingFields)
+            RevertPropertyOverride(serialized.FindProperty(field));
+        RevertMeshOverride(GetComponent<MeshFilter>());
+        // Legitimate filter: the MeshCollider is optional on every grey type.
+        if (TryGetComponent<MeshCollider>(out var mc)) RevertMeshOverride(mc);
+        return true;
+    }
+
+    static void RevertMeshOverride(Component meshHolder)
+    {
+        using var serialized = new SerializedObject(meshHolder);
+        RevertPropertyOverride(serialized.FindProperty("m_Mesh"));
+    }
+
+    static void RevertPropertyOverride(SerializedProperty property)
+    {
+        if (property.prefabOverride)
+            PrefabUtility.RevertPropertyOverride(property, InteractionMode.UserAction);
+    }
+
     /// <summary>Render mesh of the last bake — for editor tooling that needs the serialized
     /// reference itself (e.g. the apply guard's orphan sweep keep-set), independent of what the
     /// MeshFilter currently shows.</summary>
