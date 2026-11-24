@@ -19,6 +19,7 @@ static partial class GPEdit
         ("MMB", "click face to hide / show"),
         ("RMB", "drag face to extrude linked / click edge to split"),
         ("RMB + Alt", "drag face to extrude unlinked"),
+        ("Alt while dragging", "symmetrical: opposite face / edge follows"),
     };
 
     static readonly (string input, string output)[] k_PipeHints =
@@ -29,6 +30,7 @@ static partial class GPEdit
         ("LMB + Alt", "reshape spline from endpoint"),
         ("MMB", "click to delete vertex / reset handle"),
         ("RMB", "drag endpoint to extend / click spline to insert"),
+        ("Alt while dragging", "symmetrical: mirrored vertex follows"),
     };
 
     static readonly (string input, string output)[] k_RoadHints = k_PipeHints;

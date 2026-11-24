@@ -17,6 +17,7 @@ using UnityEngine;
 ///
 /// Control grammar (shared across all three types):
 ///   LMB = manipulate · Ctrl = alternative coordinates · MMB = remove/reset · RMB = add/create · Shift = axis lock; Alt = special action
+///   Alt pressed during a drag = symmetry: the drag also acts on the opposite element
 ///
 /// The mode toggle is SessionState-backed, so it persists across selection changes for the whole
 /// editor session and resets on restart; the tooltip flag lives in EditoolsSettings. The hook into

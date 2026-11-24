@@ -2,7 +2,8 @@
 using UnityEditor;
 using UnityEngine;
 
-/// <summary>Shared spline controls: Ctrl changes coordinates, Shift locks an axis, Alt reshapes from an endpoint.</summary>
+/// <summary>Shared spline controls: Ctrl changes coordinates, Shift locks an axis, Alt reshapes from an endpoint,
+/// Alt pressed during a drag mirrors it onto the vertex at the mirrored index.</summary>
 static partial class GPEdit
 {
     enum SpDrag { None, VertexMove, Bezier, Banking, Extend }
@@ -27,6 +28,16 @@ static partial class GPEdit
     static int      s_spExtendEdge;
     static Vector3[] s_spReshape;
     static bool     s_spDoReshape;
+
+    // Symmetry (Alt pressed during a drag, see CoordinateDrag.symmetric)
+    static Vector3  s_spMirrorAxis;       // world main axis at drag start; normal of the mirror plane
+    static int      s_spMirrorVertex = -1; // vertex at the mirrored index; -1 = the dragged vertex is the middle one
+    static Vector3  s_spMirrorStartLocalPos;
+    static Vector3  s_spMirrorStartHandleDirLocal;
+    static float    s_spMirrorStartHandleLength;
+    static float    s_spMirrorStartBankingAngle;
+    static bool     s_spMirrorApplied;    // the last event wrote mirrored values to s_spMirrorVertex
+    static bool     s_spMirrorExtended;   // a symmetric extend holds a vertex at the other end
 
     static readonly GPSplinePipe s_pipeAdapter = new GPSplinePipe();
     static readonly GPSplineRoad s_roadAdapter = new GPSplineRoad();
@@ -249,6 +260,7 @@ static partial class GPEdit
         s_spDrag = SpDrag.VertexMove;
         s_spVertex = vertex;
         s_spStartLocalPos = sp.GetLocalVertexPos(vertex);
+        CaptureSplineMirror(sp, vertex);
         s_spCoordinates.Begin(sp.GetWorldVertexPos(vertex), mousePos, SplineCoordinates(sp, vertex, false), SplineCoordinates(sp, vertex, true));
         bool isEnd = vertex == 0 || vertex == sp.Count - 1;
         s_spDoReshape = isEnd && sp.Count > 2 && reshape;
@@ -262,6 +274,7 @@ static partial class GPEdit
         s_spVertex = vertex;
         s_spSide = side;
         s_spBezierStartEndpoint = sp.GetHandleWorldPosition(vertex, side);
+        CaptureSplineMirror(sp, vertex);
         s_spCoordinates.Begin(s_spBezierStartEndpoint, mousePos, SplineCoordinates(sp, vertex, false), SplineCoordinates(sp, vertex, true));
     }
 
@@ -272,6 +285,7 @@ static partial class GPEdit
         s_spVertex = vertex;
         s_spSide = side;
         s_spBankingStartAngle = sp.GetBankingAngle(vertex);
+        CaptureSplineMirror(sp, vertex);
         s_spBankingPoint = sp.GetWorldVertexPos(vertex);
         s_spBezierStartEndpoint = sp.GetBankingHandleWorld(vertex, side);
         sp.ComputeBankingAxis(vertex, out Vector3 up, out Vector3 right);
@@ -289,6 +303,7 @@ static partial class GPEdit
 
         s_spDrag = SpDrag.Extend;
         s_spExtendEdge = edge;
+        s_spMirrorAxis = sp.MainAxisWorld;
         Vector3 edgeWorld = sp.GetWorldVertexPos(edge);
         var global = SplineCoordinates(sp, edge, false);
         var local = SplineCoordinates(sp, edge, true);
@@ -297,6 +312,32 @@ static partial class GPEdit
         s_spStartLocalPos = sp.GetLocalVertexPos(s_spVertex);
 
         s_spCoordinates.Begin(edgeWorld, mousePos, global, local);
+    }
+
+    /// <summary>Snapshots the vertex at the mirrored index, which a symmetric drag changes along with <paramref name="vertex"/>.</summary>
+    static void CaptureSplineMirror(GPSpline sp, int vertex)
+    {
+        s_spMirrorAxis = sp.MainAxisWorld;
+        int mirror = sp.Count - 1 - vertex;
+        s_spMirrorVertex = mirror == vertex ? -1 : mirror;
+        if (s_spMirrorVertex < 0) return;
+        s_spMirrorStartLocalPos = sp.GetLocalVertexPos(mirror);
+        s_spMirrorStartHandleDirLocal = sp.Transform.InverseTransformDirection(sp.GetHandleDirWorld(mirror));
+        s_spMirrorStartHandleLength = sp.GetHandleLength(mirror);
+        s_spMirrorStartBankingAngle = sp.GetBankingAngle(mirror);
+    }
+
+    /// <summary>
+    /// True when this event must write the mirror vertex: with mirrored values while the drag is
+    /// symmetric, or back to its start values on the first event after symmetry is switched off.
+    /// </summary>
+    static bool SplineMirrorNeedsWrite()
+    {
+        // Legitimate filter: the middle vertex of an odd count is its own mirror.
+        if (s_spMirrorVertex < 0) return false;
+        bool write = s_spCoordinates.symmetric || s_spMirrorApplied;
+        s_spMirrorApplied = s_spCoordinates.symmetric;
+        return write;
     }
 
     static void BeginSplineUndo(GPSpline sp, string name)
@@ -395,6 +436,7 @@ static partial class GPEdit
             DrawSpline(s_sp, s_spDrag == SpDrag.VertexMove || s_spDrag == SpDrag.Extend ? s_spVertex : -1,
                 s_spDrag == SpDrag.Bezier ? s_spVertex : -1, s_spSide,
                 s_spDrag == SpDrag.Banking ? s_spVertex : -1, s_spSide, false, default);
+            DrawSplineSymmetryHighlight();
         }
     }
 
@@ -415,6 +457,10 @@ static partial class GPEdit
         var xform = s_sp.Transform;
         Vector3 newLocal = xform.InverseTransformPoint(xform.TransformPoint(s_spStartLocalPos) + delta);
         s_sp.SetLocalVertexPos(s_spVertex, newLocal);
+        if (SplineMirrorNeedsWrite())
+            s_sp.SetLocalVertexPos(s_spMirrorVertex, s_spCoordinates.symmetric
+                ? xform.InverseTransformPoint(xform.TransformPoint(s_spMirrorStartLocalPos) + Vector3.Reflect(delta, s_spMirrorAxis))
+                : s_spMirrorStartLocalPos);
         if (s_spDoReshape && s_spReshape != null) ApplyReshape(s_sp, s_spReshape);
     }
 
@@ -430,6 +476,20 @@ static partial class GPEdit
         Vector3 localHandle = s_sp.Transform.InverseTransformVector(worldDir);
         s_sp.SetHandleDirLocal(s_spVertex, localHandle.normalized);
         s_sp.SetHandleLength(s_spVertex, Mathf.Max(0.001f, localHandle.magnitude));
+
+        if (!SplineMirrorNeedsWrite()) return;
+        if (s_spCoordinates.symmetric)
+        {
+            // Vertex order runs the other way on the mirrored side, so the reflected handle is reversed.
+            Vector3 mirrorHandle = s_sp.Transform.InverseTransformVector(-Vector3.Reflect(worldDir, s_spMirrorAxis));
+            s_sp.SetHandleDirLocal(s_spMirrorVertex, mirrorHandle.normalized);
+            s_sp.SetHandleLength(s_spMirrorVertex, Mathf.Max(0.001f, mirrorHandle.magnitude));
+        }
+        else
+        {
+            s_sp.SetHandleDirLocal(s_spMirrorVertex, s_spMirrorStartHandleDirLocal);
+            s_sp.SetHandleLength(s_spMirrorVertex, s_spMirrorStartHandleLength);
+        }
     }
 
     static void ApplySplineBanking(Vector2 mousePos)
@@ -442,19 +502,52 @@ static partial class GPEdit
         if (from.sqrMagnitude < 0.000001f || to.sqrMagnitude < 0.000001f) return;
         float angle = Vector3.SignedAngle(from, to, s_spBankingTangent);
         s_sp.SetBankingAngle(s_spVertex, s_spBankingStartAngle + angle * Mathf.Deg2Rad);
+        // The reversed vertex order and the reflection cancel out: the same angle change banks
+        // the mirror vertex toward the same world side.
+        if (SplineMirrorNeedsWrite())
+            s_sp.SetBankingAngle(s_spMirrorVertex,
+                s_spMirrorStartBankingAngle + (s_spCoordinates.symmetric ? angle * Mathf.Deg2Rad : 0f));
     }
 
     static void ApplySplineExtend(Vector2 mousePos)
     {
-        var xform = s_sp.Transform;
-        Vector3 newWorld = xform.TransformPoint(s_spStartLocalPos) + s_spCoordinates.Update(mousePos);
-        Vector3 newLocal = xform.InverseTransformPoint(newWorld);
-        s_sp.SetLocalVertexPos(s_spVertex, newLocal);
+        Vector3 delta = s_spCoordinates.Update(mousePos);
+        SyncSplineMirrorExtend();
+        MoveExtendedSplineVertex(s_spVertex, s_spStartLocalPos, delta);
+        if (s_spMirrorExtended)
+            MoveExtendedSplineVertex(SplineMirrorExtendVertex, s_spMirrorStartLocalPos, Vector3.Reflect(delta, s_spMirrorAxis));
+    }
 
-        if ((newLocal - s_spStartLocalPos).sqrMagnitude > 0.001f)
+    static void MoveExtendedSplineVertex(int vertex, Vector3 startLocalPos, Vector3 worldDelta)
+    {
+        var xform = s_sp.Transform;
+        Vector3 newLocal = xform.InverseTransformPoint(xform.TransformPoint(startLocalPos) + worldDelta);
+        s_sp.SetLocalVertexPos(vertex, newLocal);
+
+        if ((newLocal - startLocalPos).sqrMagnitude > 0.001f)
         {
-            s_sp.ResetHandle(s_spVertex);
+            s_sp.ResetHandle(vertex);
         }
+    }
+
+    /// <summary>Index of the vertex a symmetric extend holds at the end opposite the dragged one.</summary>
+    static int SplineMirrorExtendVertex => s_spExtendEdge == 0 ? s_sp.Count - 1 : 0;
+
+    /// <summary>Keeps an extra vertex at the other end exactly while an extend drag is symmetric.</summary>
+    static void SyncSplineMirrorExtend()
+    {
+        if (s_spCoordinates.symmetric == s_spMirrorExtended) return;
+        if (s_spMirrorExtended)
+            s_sp.RemoveVertex(SplineMirrorExtendVertex);
+        else
+        {
+            int otherEnd = SplineMirrorExtendVertex;
+            s_spMirrorStartLocalPos = s_sp.GetLocalVertexPos(otherEnd);
+            s_sp.ExtendFromEdge(otherEnd, s_spMirrorStartLocalPos);
+        }
+        s_spMirrorExtended = !s_spMirrorExtended;
+        // Adding or removing a vertex at index 0 shifts the dragged end vertex.
+        s_spVertex = s_spExtendEdge == 0 ? 0 : s_sp.Count - 1;
     }
 
     static void FinishSplineDrag()
@@ -480,6 +573,9 @@ static partial class GPEdit
         s_sp = null;
         s_spReshape = null;
         s_spDoReshape = false;
+        s_spMirrorVertex = -1;
+        s_spMirrorApplied = false;
+        s_spMirrorExtended = false;
     }
 
     // ─── Edge-vertex reshape (interior vertices follow the moved end) ────
@@ -602,6 +698,32 @@ static partial class GPEdit
             if (s_spDrag != SpDrag.None && s_sp != null && s_sp.Obj == sp.Obj)
                 s_spCoordinates.Draw(point);
             else DrawCoordinates(point, SplineCoordinates(sp, hovered, Tools.pivotRotation == PivotRotation.Local));
+        }
+    }
+
+    /// <summary>Marks the vertex or handle a symmetric drag changes along with the dragged one.</summary>
+    static void DrawSplineSymmetryHighlight()
+    {
+        if (!s_spCoordinates.symmetric) return;
+        if (s_spDrag == SpDrag.Extend)
+        {
+            if (s_spMirrorExtended)
+                GPEditShared.DrawDot(s_sp.GetWorldVertexPos(SplineMirrorExtendVertex), GPEditShared.Create, 0.07f);
+            return;
+        }
+        // Legitimate filter: the middle vertex of an odd count is its own mirror.
+        if (s_spMirrorVertex < 0) return;
+        switch (s_spDrag)
+        {
+            case SpDrag.VertexMove:
+                GPEditShared.DrawDot(s_sp.GetWorldVertexPos(s_spMirrorVertex), GPEditShared.VertexHover, 0.07f);
+                break;
+            case SpDrag.Bezier: // vertex order is reversed on the mirrored side, so the handle side flips
+                GPEditShared.DrawDot(s_sp.GetHandleWorldPosition(s_spMirrorVertex, -s_spSide), GPEditShared.VertexHover, 0.06f);
+                break;
+            case SpDrag.Banking:
+                GPEditShared.DrawDot(s_sp.GetBankingHandleWorld(s_spMirrorVertex, s_spSide), GPEditShared.VertexHover, 0.05f);
+                break;
         }
     }
 

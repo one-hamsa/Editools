@@ -26,10 +26,15 @@ static partial class GPEdit
         public EditCoordinates global, local;
         public Vector3 anchor, delta;
         public int lockAxis;
+        /// <summary>True while Alt, pressed after the drag began, asks the drag to also act on the opposite element.</summary>
+        public bool symmetric;
         GPEditShared.PlaneDragFrame frame;
         Vector3 offset;
         Vector2 press, lastMouse;
         bool alternate, localMode;
+        // Alt already down at mouse-down selects that press's special action (unlinked extrude,
+        // endpoint reshape), so it only means symmetry after being released once.
+        bool altHeldSincePress;
 
         public void Begin(Vector3 point, Vector2 mouse, EditCoordinates globalCoordinates, EditCoordinates localCoordinates)
         {
@@ -38,6 +43,8 @@ static partial class GPEdit
             anchor = point;
             delta = offset = Vector3.zero;
             lastMouse = mouse;
+            altHeldSincePress = Event.current.alt;
+            symmetric = false;
             Capture(mouse);
         }
 
@@ -58,6 +65,8 @@ static partial class GPEdit
                 offset = delta;
                 Capture(lastMouse);
             }
+            if (!Event.current.alt) altHeldSincePress = false;
+            symmetric = Event.current.alt && !altHeldSincePress;
             var movement = mouse - press;
             lockAxis = DominantCoordinateAxis(frame, movement, Event.current.shift, lockAxis);
             frame.Solve(movement, lockAxis, out float a, out float b, out _, out _);

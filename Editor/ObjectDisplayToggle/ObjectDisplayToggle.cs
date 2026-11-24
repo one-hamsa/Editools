@@ -465,6 +465,8 @@ static class ObjectDisplayToggle
 			outline.pointCount = 0;
 			// Legitimate filter: the child may have been destroyed since the state was entered.
 			if (outline.transform == null) continue;
+			// Legitimate filter: an inactive child shows nothing, like its hidden geometry.
+			if (!outline.transform.gameObject.activeInHierarchy) continue;
 
 			Matrix4x4 localToWorld = outline.transform.localToWorldMatrix;
 			Matrix4x4 worldToLocal = outline.transform.worldToLocalMatrix;
@@ -556,6 +558,8 @@ static class ObjectDisplayToggle
 				PruneDestroyedRoots();
 				foreach (var entry in s_entries.Values)
 				{
+					// Legitimate filter: an inactive object shows nothing, like its hidden geometry.
+					if (!entry.root.activeInHierarchy) continue;
 					UpdateWorldLines(entry, view.camera);
 					HandleUtility.AddControl(entry.controlId, DistanceToLines(entry));
 				}
@@ -611,6 +615,8 @@ static class ObjectDisplayToggle
 	{
 		foreach (var entry in s_entries.Values)
 		{
+			// Legitimate filter: an inactive object shows nothing, like its hidden geometry.
+			if (!entry.root.activeInHierarchy) continue;
 			bool selected = IsSelected(entry.root);
 			Handles.color = (selected ? k_SelectedColor : StateColor(entry.state)) * new Color(1f, 1f, 1f, alpha);
 			float boxWidth = k_BoxLineWidth + (selected ? k_SelectedLineWidthAdd : 0f);

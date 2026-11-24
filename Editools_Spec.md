@@ -225,8 +225,19 @@ does on any other object.
 
 - Opposite face stays pinned via post-scale position correction
 - Scale mapped to best-matching local axis via `GetBestLocalAxis`
+- **Alt held during the drag = symmetrical scale.** The anchor becomes the bounds center
+  captured at press: in single-axis scale the dragged face still follows the mouse and the
+  opposite face moves the same distance the other way; uniform scale (RMB) grows around the
+  center. Alt can be pressed or released mid-drag; the result is recomputed from the
+  drag-start state each time, and both moving faces are highlighted
+- **Alt + Shift = symmetrical on both horizontal axes.** While Alt is held, Shift on an X or
+  Z face drag also scales the other horizontal bounds axis by the same factor around the
+  center (footprint proportions are kept; Y is unchanged), and all four side faces are
+  highlighted. A Y face drag has no second axis. Shift can be held from the press or pressed
+  mid-drag
 
-**Shift + W/E/R:** Duplicate selection first, then transform the duplicates.
+**Shift + W/E:** Duplicate selection first, then transform the duplicates. Scale (R) never
+duplicates; Shift is its second-axis modifier.
 
 **Settings (`EditoolsSettings.quickTransform*`, QuickTransform foldout):**
 
@@ -384,11 +395,10 @@ Save/Load Selection. Groups are stored directly in EditorPrefs (no probing, no u
 - Deleting a QuickAccess item also removes its selection group.
 
 **Persistence:**
-- `EditorPrefs` keyed with `Application.dataPath` prefix (per-project, per-machine, git-ignored)
-- Scene list key: `Application.dataPath + "QuickAccess_Scene_" + sceneName`
-- Project list key: `Application.dataPath + "QuickAccess_Project"`
-- Selection groups key: `Application.dataPath + "QuickAccess_SelectionGroups_V2"`
-  Format: `slot=itemId1\titemId2;slot=itemId3` (tab separates items per slot, semicolon between slots)
+- JSON files under `UserSettings/QuickAccess/` (per-project, per-machine, git-ignored), written
+  atomically by `QuickAccessStore`. Older EditorPrefs data is migrated once on load.
+- `<sceneGuid>.json`: scene item list, selection groups, view anchors.
+- `_project.json`: project item list.
 - Scene objects stored via `GlobalObjectId` (survives renames — uses scene GUID + local file ID).
   Falls back to path-based `gameObject:` format for unserialized objects. Project assets use
   `guid:` prefix (same as LRUAssets). Legacy `gameObject:` entries still resolve for backward compat.
@@ -462,6 +472,7 @@ Separates Scene View click selection into an add modifier and a remove modifier.
 - Outline: geometry hidden; the mesh silhouette drawn as lines: open boundary edges plus edges whose two faces differ in facing toward the Scene View camera (perspective or orthographic). Vertices are merged by position so split vertices (hard normals, UV seams) share one edge. Skinned meshes draw in bind pose. Adjacency is built once when the state is entered; facing is evaluated per Layout.
 - Lines are `Handles` drawn on `Repaint` in `duringSceneGui` in two passes: `zTest = LessEqual` at full opacity, then `zTest = Greater` at 50% opacity, so they show with Gizmos off and remain visible through other geometry. World-space lines are refreshed once per `Layout` and shared by the Repaint and the picking distance.
 - Click selection: each object's lines are a Scene View control (`HandleUtility.AddControl` with the pixel distance to the nearest line). A left click within pick distance captures `hotControl` on MouseDown, which also stops Unity's own picking for that click; the release selects the object (plain click sets, Shift adds, Ctrl/Cmd toggles; Alt is left to orbit). Unity's picking does not hit `forceRenderingOff` renderers, so this is the only way to click-select a toggled object in the Scene View.
+- Inactive objects: an object (or, in Outline, a child mesh) that is not `activeInHierarchy` draws nothing and cannot be click-selected, matching its hidden geometry. The Bounding Box is computed when the state is entered and still includes inactive children.
 - Selection display: lines of an object that is selected, or under a selected ancestor, draw in the selection color (orange) and, for box edges, one pixel wider.
 - Hiding uses `Renderer.forceRenderingOff` (not serialized, no scene dirtying, no prefab overrides). Renderers already hidden by another system are left alone and not restored. The state lasts until the scene is reloaded; it is dropped on domain reload and when entering Play mode (`forceRenderingOff` would otherwise carry into Play).
 - A mixed selection moves to the state after the active object's state, so one press lands every selected object on the same state; an object the state does not apply to (non-Greybox asked for Greybox) takes the next applicable state.
@@ -610,6 +621,23 @@ Extrusion follows the face's forward axis in the selected Local/Global frame, pr
 four base corners even on non-planar faces. Unlinked extrusions sit outside the linked/Boolean
 group. Alt retains Scene View navigation away from these specific special-action controls.
 
+**Symmetry (Alt pressed during a drag).** Pressing Alt after a drag has started makes the drag
+also act on the opposite element; releasing Alt returns that element to its start state. Alt
+that was already held at mouse-down keeps its special action (unlinked extrude, endpoint
+reshape) and only means symmetry after being released and pressed again. Deltas are mirrored,
+not positions, so an asymmetrical shape keeps its existing offset. The mirrored element is
+highlighted in the action color of the drag.
+
+| Drag | Symmetric result |
+|---|---|
+| Box face | Opposite face moves by the reversed delta (grow/shrink or skew around the box centre) |
+| Box edge | One partner edge mirrors the drag: across the box along the dominant movement axis, or the diagonally opposite edge (reversed delta) when the edge slides along itself. Picked when Alt is pressed, kept until it is released |
+| Box face extrude | A second extrusion of the same length grows from the opposite face (not from a welded face); removed again if Alt is released before mouse-up |
+| Spline vertex | The vertex at the mirrored index (`count - 1 - index`) moves by the delta reflected across the plane perpendicular to the main axis; the middle vertex of an odd count moves alone |
+| Bezier handle | The mirrored vertex gets the reflected handle direction and the same length |
+| Road banking | The mirrored vertex gets the same angle change |
+| Spline endpoint extend | The other end is extended by the reflected delta; the extra vertex is removed if Alt is released before mouse-up |
+
 Road **Spline Smoothing** (0-1, default 0.5) blends the authored Bezier path toward a
 smooth natural cubic through every vertex. It is available in the Inspector and as
 **Spline Smooth** in the Scene View panel. At 0 the authored curve is exact; at 1 the
@@ -638,6 +666,9 @@ The Grey Primitive window opens only while every selected object is a Grey Primi
 same type (one or more Greyboxes, Greypipes, Greyroads, ...). It stays closed when the
 selection mixes primitive types or includes any non-primitive object, and re-evaluates on
 every selection change.
+While floating, the window keeps the position the user last dragged it to (EditorPrefs
+`Editools_GPWindow_FloatingX/Y`, shared by every Scene View): Unity shows it at its default
+top-left spot when it reappears, so the saved position is put back on the next editor update.
 In Edit Mode, selecting a seam-linked greybox expands the selection to its entire connected
 group. Entering Edit Mode also expands the current selection. Outside Edit Mode, selection
 does not expand automatically.

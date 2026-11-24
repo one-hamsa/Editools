@@ -51,7 +51,7 @@ class GPWindowOverlay : Overlay
 
     public override VisualElement CreatePanelContent()
     {
-        var root = new VisualElement { style = { minWidth = 232 } };
+        var root = new VisualElement { style = { minWidth = 174 } };
         root.Add(new IMGUIContainer(DrawGUI));
         return root;
     }
@@ -61,13 +61,54 @@ class GPWindowOverlay : Overlay
     public override void OnCreated()
     {
         EditoolsSettings.Changed += SyncGate;
+        floatingPositionChanged += SavePosition;
+        displayedChanged += OnDisplayedChanged;
         SyncGate();
+        OnDisplayedChanged(displayed);
     }
 
     public override void OnWillBeDestroyed()
     {
         EditoolsSettings.Changed -= SyncGate;
+        floatingPositionChanged -= SavePosition;
+        displayedChanged -= OnDisplayedChanged;
+        EditorApplication.update -= RestorePosition;
         SetHooked(false);
+    }
+
+    // ─── Floating position ──────────────────────────────────────
+    //
+    // Unity shows the panel at its default top-left spot when it reappears, so the last position the
+    // user dragged it to is saved and put back on the editor update after each show.
+
+    const string k_PositionXPref = "Editools_GPWindow_FloatingX";
+    const string k_PositionYPref = "Editools_GPWindow_FloatingY";
+
+    // True from a show until the saved position is put back; position changes Unity makes in between are not saved.
+    bool _restorePending;
+
+    void OnDisplayedChanged(bool shown)
+    {
+        if (!shown || !floating || !EditorPrefs.HasKey(k_PositionXPref)) return;
+        _restorePending = true;
+        EditorApplication.update -= RestorePosition;
+        EditorApplication.update += RestorePosition;
+    }
+
+    void RestorePosition()
+    {
+        EditorApplication.update -= RestorePosition;
+        _restorePending = false;
+        // Legitimate filter: the user docked or hid the panel before the update ran.
+        if (!floating || !displayed) return;
+        floatingPosition = new Vector2(EditorPrefs.GetFloat(k_PositionXPref), EditorPrefs.GetFloat(k_PositionYPref));
+    }
+
+    void SavePosition(Vector3 position)
+    {
+        if (_restorePending || !displayed || !floating) return;
+        EditorPrefs.SetFloat(k_PositionXPref, position.x);
+        EditorPrefs.SetFloat(k_PositionYPref, position.y);
     }
 
     // The Edit Mode scene hook and the selection watch are held only while Grey Primitives are enabled.
@@ -123,7 +164,7 @@ class GPWindowOverlay : Overlay
         float previousLabelWidth = EditorGUIUtility.labelWidth;
         try
         {
-            EditorGUIUtility.labelWidth = 96f;
+            EditorGUIUtility.labelWidth = 72f;
 
             DrawEditToggle();
 
@@ -199,7 +240,7 @@ class GPWindowOverlay : Overlay
                 for (int col = 0; col < 2; col++)
                 {
                     int idx = row * 2 + col;
-                    bool v = EditorGUILayout.ToggleLeft(k_RoadFaces[idx], faces[idx], GUILayout.Width(96f));
+                    bool v = EditorGUILayout.ToggleLeft(k_RoadFaces[idx], faces[idx], GUILayout.Width(80f));
                     if (v != faces[idx])
                         Apply(road, "Greyroad Face", () => road.ActiveFaces[idx] = v);
                 }
@@ -216,21 +257,7 @@ class GPWindowOverlay : Overlay
         so.ApplyModifiedProperties();
         if (changed) GreyPrimitiveEditor.RebuildPrimitiveAndDependents(subject);
 
-        // Select A / B reach into a Boolean Result's nested inputs so its constituents are easy to grab
-        // through the result. They make sense only on the result itself — a Greybox that carries an
-        // operator is a Subject whose inputs now live under the result, so both are disabled there.
         var result = gp as GreyBooleanResult;
-        using (new EditorGUILayout.HorizontalScope())
-        {
-            using (new EditorGUI.DisabledScope(result == null || result.Subject == null))
-                if (GUILayout.Button(new GUIContent("Select A", "Select this Boolean Result's Subject: the object the Operator is cut out of.")))
-                    Selection.activeObject = result.Subject.gameObject;
-
-            using (new EditorGUI.DisabledScope(result == null || result.Operator == null))
-                if (GUILayout.Button(new GUIContent("Select B", "Select this Boolean Result's Operator: the object subtracted from the Subject.")))
-                    Selection.activeObject = result.Operator.gameObject;
-        }
-
         if (result != null && GUILayout.Button(GreyPrimitiveEditor.ExplodeLabel))
         {
             GreyBooleanOrchestrator.Explode(result);

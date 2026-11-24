@@ -28,9 +28,14 @@ using UnityEngine;
 ///                       Anchor = opposite face, stays fixed
 ///   RMB face         → uniform scale from opposite face center (all axes)
 ///   RMB outside box  → uniform scale from selection pivot (all axes)
+///   Alt held         → symmetrical: scale around the bounds center, so the opposite
+///                       face moves the same distance the other way
+///   Alt + Shift      → symmetrical on both horizontal axes: an X or Z face drag scales
+///                       X and Z by the same factor
 ///
 /// Modifiers:
-///   Shift + W/E/R    → duplicate selection, then transform the copies
+///   Shift + W/E      → duplicate selection, then transform the copies
+///                       (not in Scale, where Shift belongs to Alt + Shift)
 ///   Leaving the Scene View window during a drag commits the operation
 ///
 /// Toggle on/off via the Editools toolbar button.
@@ -169,6 +174,10 @@ static partial class QuickTransform
     static float   scaleStartMouseDist;
     static bool    scaleUniform;                // RMB = uniform scale
     static float   scaleUniformStartScreenDist; // starting screen-space distance from anchor to mouse
+    static Vector2 scaleUniformStartMouse;      // mouse position scaleUniformStartScreenDist was measured from
+    static Vector3 scaleCenterWorld;            // bounds center at press; anchor of a symmetrical (Alt) scale
+    static Vector3 scaleSecondNormalWorld;      // other horizontal bounds axis of an X/Z face drag; zero for a Y face
+    static bool    scaleBothHorizontal;         // the last scale event also scaled along scaleSecondNormalWorld
 
     // ─── Undo ─────────────────────────────────────────────────
 
@@ -555,6 +564,8 @@ static partial class QuickTransform
 
     static void InitScale(SceneView sv, Vector2 mousePos)
     {
+        scaleCenterWorld = boundsCenter;
+        scaleUniformStartMouse = mousePos;
         if (scaleUniform)
         {
             // RMB uniform scale — anchor is opposite face center (on face) or selection pivot (outside)
@@ -574,6 +585,7 @@ static partial class QuickTransform
         float sign = (face % 2 == 0) ? 1f : -1f;
 
         scaleNormalWorld = boundsAxes[axisIdx] * sign;
+        scaleSecondNormalWorld = axisIdx == 1 ? Vector3.zero : boundsAxes[2 - axisIdx];
         Vector3 faceCenter = boundsCenter + scaleNormalWorld * boundsExtents[axisIdx];
         scaleAnchorWorld   = boundsCenter - scaleNormalWorld * boundsExtents[axisIdx];
 
@@ -609,7 +621,8 @@ static partial class QuickTransform
                 Undo.IncrementCurrentGroup();
                 undoGroup = Undo.GetCurrentGroup();
 
-                if (shiftHeldOnPress && !didDuplicate)
+                // Scale never duplicates: Shift is its second-axis modifier (Alt + Shift).
+                if (shiftHeldOnPress && !didDuplicate && activeMode != Mode.Scale)
                     DuplicateAndSwapTargets();
 
                 // The snapshot is taken at drag release via CaptureDragForUndo so Unity records
@@ -631,6 +644,7 @@ static partial class QuickTransform
                 {
                     Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(scaleAnchorWorld);
                     scaleUniformStartScreenDist = Mathf.Max(Vector2.Distance(e.mousePosition, anchorScreen), 1f);
+                    scaleUniformStartMouse = e.mousePosition;
                 }
 
                 ApplyDrag(e, sv);
@@ -657,6 +671,13 @@ static partial class QuickTransform
     {
         if (e.type == EventType.MouseDrag && e.button == dragButton)
         { ApplyDrag(e, sv); e.Use(); return; }
+
+        // Alt and Shift switch symmetrical scaling; re-apply so the switch shows without mouse movement.
+        // The event is left unused so the Scene View keeps its own Alt key state.
+        if (activeMode == Mode.Scale && (e.type == EventType.KeyDown || e.type == EventType.KeyUp)
+            && (e.keyCode == KeyCode.LeftAlt || e.keyCode == KeyCode.RightAlt || e.keyCode == KeyCode.AltGr
+                || e.keyCode == KeyCode.LeftShift || e.keyCode == KeyCode.RightShift))
+        { ApplyDrag(e, sv); return; }
 
         if ((e.type == EventType.MouseUp && e.button == dragButton) || ModeKeyReleased())
         {
@@ -763,34 +784,56 @@ static partial class QuickTransform
         float mouseDist  = ProjectRayOntoLine(mouseRay, scaleAnchorWorld, scaleNormalWorld);
         float mouseDelta = mouseDist - scaleStartMouseDist;
 
+        // Symmetrical: anchored at the bounds center, so the dragged face still follows the
+        // mouse and the opposite face moves the same distance the other way.
+        bool symmetric = IsSymmetricScale;
+        Vector3 anchor = symmetric ? scaleCenterWorld : scaleAnchorWorld;
+        float faceDist = symmetric ? scaleStartFaceDist * 0.5f : scaleStartFaceDist;
+
+        // Alt + Shift on an X or Z face: the other horizontal axis scales by the same factor.
+        scaleBothHorizontal = symmetric && Event.current.shift && scaleSecondNormalWorld != Vector3.zero;
+
         float factor;
-        if (Mathf.Abs(scaleStartFaceDist) < 0.001f)
+        if (Mathf.Abs(faceDist) < 0.001f)
             factor = Mathf.Max(1f + mouseDelta, 0.01f);
         else
-            factor = Mathf.Max((scaleStartFaceDist + mouseDelta) / scaleStartFaceDist, 0.01f);
+            factor = Mathf.Max((faceDist + mouseDelta) / faceDist, 0.01f);
 
         for (int i = 0; i < dragTargets.Length; i++)
         {
             int localAxis = GetBestLocalAxis(startRotations[i], scaleNormalWorld);
             Vector3 s = startScales[i];
             s[localAxis] = startScales[i][localAxis] * factor;
-            dragTargets[i].localScale = s;
 
             // Reposition: scale axial distance from anchor, preserve lateral offset
-            Vector3 offset   = startPositions[i] - scaleAnchorWorld;
+            Vector3 offset   = startPositions[i] - anchor;
             float   axialDist = Vector3.Dot(offset, scaleNormalWorld);
-            dragTargets[i].position = scaleAnchorWorld
+            Vector3 position = anchor
                 + scaleNormalWorld * (axialDist * factor)
                 + (offset - scaleNormalWorld * axialDist);
+
+            if (scaleBothHorizontal)
+            {
+                int secondLocalAxis = GetBestLocalAxis(startRotations[i], scaleSecondNormalWorld);
+                if (secondLocalAxis != localAxis)
+                    s[secondLocalAxis] = startScales[i][secondLocalAxis] * factor;
+                float secondDist = Vector3.Dot(offset, scaleSecondNormalWorld);
+                position += scaleSecondNormalWorld * (secondDist * (factor - 1f));
+            }
+
+            dragTargets[i].localScale = s;
+            dragTargets[i].position = position;
         }
 
-        // ── Verify and correct: guarantee anchor face stays pixel-perfect ──
+        // ── Verify and correct: guarantee the anchor stays pixel-perfect ──
         ComputeBounds(dragTargets);
         int axisIdx = lockedIndex / 2;
         float signF = (lockedIndex % 2 == 0) ? 1f : -1f;
-        // The anchor is the face OPPOSITE to the locked face
-        Vector3 actualAnchor = boundsCenter - boundsAxes[axisIdx] * (signF * boundsExtents[axisIdx]);
-        Vector3 correction   = scaleAnchorWorld - actualAnchor;
+        // The anchor is the face OPPOSITE to the locked face, or the bounds center when symmetrical
+        Vector3 actualAnchor = symmetric
+            ? boundsCenter
+            : boundsCenter - boundsAxes[axisIdx] * (signF * boundsExtents[axisIdx]);
+        Vector3 correction   = anchor - actualAnchor;
         if (correction.sqrMagnitude > 0.00001f)
         {
             for (int i = 0; i < dragTargets.Length; i++)
@@ -800,19 +843,28 @@ static partial class QuickTransform
 
     static void ApplyUniformScale(SceneView sv, Vector2 mousePos)
     {
-        Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(scaleAnchorWorld);
+        // Symmetrical: anchored at the bounds center, measured from the same start mouse position.
+        bool symmetric = IsSymmetricScale;
+        Vector3 anchor = symmetric ? scaleCenterWorld : scaleAnchorWorld;
+        Vector2 anchorScreen = HandleUtility.WorldToGUIPoint(anchor);
+        float startDist = symmetric
+            ? Mathf.Max(Vector2.Distance(scaleUniformStartMouse, anchorScreen), 1f)
+            : scaleUniformStartScreenDist;
         float currentDist = Vector2.Distance(mousePos, anchorScreen);
-        float factor = Mathf.Max(currentDist / scaleUniformStartScreenDist, 0.01f);
+        float factor = Mathf.Max(currentDist / startDist, 0.01f);
 
         for (int i = 0; i < dragTargets.Length; i++)
         {
             dragTargets[i].localScale = startScales[i] * factor;
 
             // Reposition: scale distance from anchor uniformly
-            Vector3 offset = startPositions[i] - scaleAnchorWorld;
-            dragTargets[i].position = scaleAnchorWorld + offset * factor;
+            Vector3 offset = startPositions[i] - anchor;
+            dragTargets[i].position = anchor + offset * factor;
         }
     }
+
+    /// <summary>True while Alt asks a scale drag to act around the bounds center instead of its anchor.</summary>
+    static bool IsSymmetricScale => Event.current.alt;
 
     // ─── Helpers: Plane & Ray ───────────────────────────────────
 
@@ -1653,6 +1705,7 @@ static partial class QuickTransform
         movePlaneNormal = Vector3.up;
         moveAlongNormal = false;
         scaleUniform = false;
+        scaleBothHorizontal = false;
         dragButton = 0;
         shiftHeldOnPress    = false;
         didDuplicate        = false;
@@ -1793,6 +1846,17 @@ static partial class QuickTransform
 
             case HoverKind.Face:
                 DrawFaceHighlight(corners, index, mode);
+                // A symmetrical single-axis scale also moves the opposite face.
+                if (mode == Mode.Scale && phase == Phase.Dragging && !scaleUniform && IsSymmetricScale)
+                {
+                    DrawFaceHighlight(corners, index ^ 1, mode);
+                    if (scaleBothHorizontal)
+                    {
+                        int secondFace = (2 - index / 2) * 2;
+                        DrawFaceHighlight(corners, secondFace, mode);
+                        DrawFaceHighlight(corners, secondFace + 1, mode);
+                    }
+                }
                 break;
 
             case HoverKind.Edge:
@@ -2081,6 +2145,7 @@ static partial class QuickTransform
         AddSub(lines, "Outside");
         AddAct(lines, "RMB — uniform scale (anchor = selection pivot)");
         AddSub(lines, "Any");
-        AddAct(lines, "Shift + drag — duplicate then transform");
+        AddAct(lines, "Alt — symmetrical (anchor = bounds center)");
+        AddAct(lines, "Alt + Shift — symmetrical on X and Z");
     }
 }
