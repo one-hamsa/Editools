@@ -110,44 +110,14 @@ static class GreyPrimitiveApplyGuard
             rebakedPaths.Add(AssetDatabase.GetAssetPath(source));
         }
 
+        // The prefab's previous embedded bake becomes unreferenced the moment the applied fields
+        // overwrite the references.
+        using var orphansScope = ListPool<Mesh>.Get(out var orphans);
         foreach (var path in rebakedPaths)
-            SweepOrphanGreyMeshes(path);
-    }
-
-    // Removes grey bake meshes stranded in the prefab file by the apply — the prefab's previous
-    // embedded bake becomes unreferenced the moment the applied fields overwrite the references.
-    // Scoped to grey-named meshes that nothing under the prefab root references; other systems'
-    // mesh sub-assets in the same file (legacy Kanbass embeds, hand-added meshes) are never touched.
-    static void SweepOrphanGreyMeshes(string prefabPath)
-    {
-        var root = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
-        var referenced = new HashSet<Mesh>();
-        foreach (var mf in root.GetComponentsInChildren<MeshFilter>(includeInactive: true))
-            if (mf.sharedMesh != null) referenced.Add(mf.sharedMesh);
-        foreach (var mc in root.GetComponentsInChildren<MeshCollider>(includeInactive: true))
-            if (mc.sharedMesh != null) referenced.Add(mc.sharedMesh);
-        foreach (var gp in root.GetComponentsInChildren<GreyPrimitive>(includeInactive: true))
         {
-            if (gp.BakedRenderMesh != null) referenced.Add(gp.BakedRenderMesh);
-            if (gp.ColliderMesh != null) referenced.Add(gp.ColliderMesh);
-        }
-
-        bool removedAny = false;
-        foreach (var rep in AssetDatabase.LoadAllAssetRepresentationsAtPath(prefabPath))
-        {
-            // Every grey bake mesh is named "<Type> Mesh"/"<Type> Collider" and all grey types
-            // start with "Grey" — the name gate is what keeps this sweep off foreign meshes.
-            if (rep is not Mesh mesh) continue;
-            if (!mesh.name.StartsWith("Grey")) continue;
-            if (referenced.Contains(mesh)) continue;
-            AssetDatabase.RemoveObjectFromAsset(mesh);
-            removedAny = true;
-        }
-
-        if (removedAny)
-        {
-            EditorUtility.SetDirty(root);
-            AssetDatabase.SaveAssetIfDirty(root);
+            orphans.Clear();
+            GreyMeshOrphanSweep.CollectUnreferencedGreyMeshes(path, orphans);
+            GreyMeshOrphanSweep.RemoveAndSave(path, orphans);
         }
     }
 }
