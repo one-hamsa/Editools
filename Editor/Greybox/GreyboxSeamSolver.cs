@@ -42,6 +42,7 @@ static class GreyboxSeamSolver
 
     static void OnSelectionChanged()
     {
+        GreyroadLinkWatcher.OnSelectionChanged();
         s_lastMatrix.Clear();
         s_scaleAtGrab.Clear();
         RequestLinkedSelectionExpansion();
@@ -91,6 +92,9 @@ static class GreyboxSeamSolver
 
     static void OnSceneGui(SceneView sv)
     {
+        // Linked roads follow transform moves the same way welded boxes do (below).
+        GreyroadLinkWatcher.OnSceneGui(sv);
+
         // hotControl flips 0 -> non-zero on a tool grab and back on release. On grab: open a fresh
         // undo batch (so a drag's conform edits collapse into the move's own undo step) and snapshot
         // scales. On release: rebuild any grey primitive whose scale changed, refreshing size-derived

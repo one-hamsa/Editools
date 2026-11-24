@@ -31,6 +31,12 @@ class GPWindowOverlay : Overlay
         "Base height (thickness) of the road's box cross-section, in local units.");
     static readonly GUIContent k_SplineSmoothing = new GUIContent("Spline Smooth",
         "Smooth the road path through every vertex without narrowing it. 0 = authored Beziers; 1 = natural cubic.");
+    static readonly GUIContent k_LedgeLeft = new GUIContent("Left",
+        "Create a ledge along the whole left edge of this road. RMB-drag along an edge in Edit Mode for a partial one.");
+    static readonly GUIContent k_LedgeRight = new GUIContent("Right",
+        "Create a ledge along the whole right edge of this road. RMB-drag along an edge in Edit Mode for a partial one.");
+    static readonly GUIContent k_UnlinkLedge = new GUIContent("Unlink",
+        "Turn this ledge into a normal road on its current path. It stops following the source road.");
     static readonly GUIContent k_Boolean = new GUIContent("Operator",
         "Grey object to subtract from this one: a primitive, a linked group or a Boolean Result. Creates a " +
         "Boolean Result that holds both inputs. An Operator already used by another Boolean stays in place and is shared.");
@@ -217,12 +223,18 @@ class GPWindowOverlay : Overlay
                 if (EditorGUI.EndChangeCheck())
                     Apply(road, "Greyroad Size", () => { road.BaseWidth = width; road.BaseHeight = height; });
 
-                EditorGUI.BeginChangeCheck();
-                float smoothing = EditorGUILayout.Slider(k_SplineSmoothing, road.SplineSmoothing, 0f, 1f);
-                if (EditorGUI.EndChangeCheck())
-                    Apply(road, "Greyroad Spline Smoothing", () => road.SplineSmoothing = smoothing);
+                // A ledge takes its path from the source road, so it has no smoothing.
+                if (!road.IsLedge)
+                {
+                    EditorGUI.BeginChangeCheck();
+                    float smoothing = EditorGUILayout.Slider(k_SplineSmoothing, road.SplineSmoothing, 0f, 1f);
+                    if (EditorGUI.EndChangeCheck())
+                        Apply(road, "Greyroad Spline Smoothing", () => road.SplineSmoothing = smoothing);
+                }
 
-                DrawRoadFaces(road);
+                // A ledge hides and shows faces with MMB on its face handles.
+                if (!road.IsLedge) DrawRoadFaces(road);
+                DrawLedgeFunctions(road);
                 break;
         }
     }
@@ -244,6 +256,34 @@ class GPWindowOverlay : Overlay
                     if (v != faces[idx])
                         Apply(road, "Greyroad Face", () => road.ActiveFaces[idx] = v);
                 }
+            }
+        }
+    }
+
+    static void DrawLedgeFunctions(Greyroad road)
+    {
+        EditorGUILayout.LabelField(road.IsLedge ? "Ledge" : "Add Ledge", EditorStyles.miniBoldLabel);
+        if (road.IsLedge)
+        {
+            if (GUILayout.Button(k_UnlinkLedge))
+            {
+                GPEdit.UnlinkLedge(road);
+                GUIUtility.ExitGUI();
+            }
+            return;
+        }
+
+        using (new EditorGUILayout.HorizontalScope())
+        {
+            if (GUILayout.Button(k_LedgeLeft))
+            {
+                GPEdit.CreateFullLedge(road, -1);
+                GUIUtility.ExitGUI();
+            }
+            if (GUILayout.Button(k_LedgeRight))
+            {
+                GPEdit.CreateFullLedge(road, 1);
+                GUIUtility.ExitGUI();
             }
         }
     }

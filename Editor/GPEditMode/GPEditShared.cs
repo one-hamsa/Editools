@@ -18,6 +18,7 @@ static class GPEditShared
 
     public const float HoverPx  = 10f;  // edges / spline / vertices
     public const float HandlePx = 18f;  // face-center dot handles
+    public const float DragStartPx = 3f; // cursor travel that turns a press into a drag
 
     // ─── Edit gizmo colors ──────────────────────────────────────
 
@@ -27,6 +28,7 @@ static class GPEditShared
     public static readonly Color Create         = new Color(0.4f, 1f, 0.5f, 0.95f);
     public static readonly Color CreateFace     = new Color(0.4f, 1f, 0.5f, 0.045f);
     public static readonly Color CreateLoop     = new Color(0.4f, 1f, 0.5f, 0.14f);
+    public static readonly Color CreateEdge     = new Color(0.4f, 1f, 0.5f, 0.08f);  // road edges that accept a ledge drag
     public static readonly Color OutlineHover   = Manipulate;
     public static readonly Color HandleActive   = new Color(1f, 1f, 1f, 0.8f);
     public static readonly Color HandleInactive = new Color(1f, 0.3f, 0.3f, 0.7f);
@@ -38,6 +40,11 @@ static class GPEditShared
     public static readonly Color Banking        = new Color(0.7f, 0.4f, 1f, 0.95f);
     public static readonly Color DragPlane      = new Color(0.3f, 0.7f, 1f, 0.12f);
     public static readonly Color NewVertex      = Create;
+    // Sub-object selection: strong red, larger, unlike the pale small red of a hidden face's handle.
+    public static readonly Color Selected       = new Color(1f, 0.1f, 0.1f, 1f);
+    public static readonly Color SelectedFace   = new Color(1f, 0.1f, 0.1f, 0.22f);
+    // Vertex owned by another object (a branch road's start on its source road).
+    public static readonly Color Anchor         = new Color(1f, 0.85f, 0.2f, 0.95f);
 
     /// <summary>Occluded variant of an edit gizmo color: same hue, faded so geometry-hidden
     /// handles read as "behind something" instead of vanishing.</summary>

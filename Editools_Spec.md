@@ -17,7 +17,7 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Runtime/Greybox/Greybox.cs` — deformable box primitive; stores 8 local-space corners, rebuilds procedural mesh on change
 - `Runtime/Greypipe/Greypipe.cs` — spline-based tube/pipe grey primitive
 - `Runtime/Greyroad/Greyroad.cs` — spline-based road grey primitive (with banking)
-- `Runtime/Greyquad/Greyquad.cs` — flat quad grey primitive (center pivot, +Y normal, no shadows/collider)
+- `Runtime/Greyquad/Greyquad.cs` — flat quad grey primitive (center pivot, +Y normal, no collider)
 - `Runtime/Editools.asmdef` — runtime assembly, all platforms
 
 ### Editor
@@ -36,6 +36,9 @@ with screenshot capture, and a set of scene editing accelerators.
 - `Editor/GPEditMode/GPEdit.cs` — Grey Primitive Edit Mode: toggle (Alt+~; with no Grey Primitive selected the press goes to `[ToggleEditModeShortcutHandler]` methods, see `Runtime/ToggleEditModeShortcutHandlerAttribute.cs`) + per-frame dispatch by primitive type
 - `Editor/GPEditMode/GPEditGreybox.cs` — Greybox sub-element editing (faces, edges, extrude)
 - `Editor/GPEditMode/GPEditSpline.cs` — Greypipe/Greyroad spline editing (vertices, handles, banking, extend)
+- `Editor/GPEditMode/GPEditLedge.cs` — Greyroad ledges (create from an edge, end/face handles, split, unlink, folder)
+- `Editor/GPEditMode/GPEditSubSelection.cs` — sub-object selection (click-select, Ctrl add, press-to-drag threshold)
+- `Editor/GPEditMode/GPEditBranch.cs` — Greyroad branch roads (RMB drag out of a road's spline)
 - `Editor/GPEditMode/GPEditShared.cs` — shared hover math/colors (independent of QuickTransform)
 - `Editor/GPEditMode/GPEditTooltip.cs` — Scene View tooltip for the selected primitive type
 - `Editor/GPEditMode/GPWindowOverlay.cs` — floating Scene View panel + `duringSceneGui` hook lifecycle
@@ -564,9 +567,13 @@ manager. The manager and primitive share the creation Undo step.
   Greyquad, `Editools_Greyquad_DefaultSize[XZ]`)
 - Subdivides by the same rules as Greybox: `GreyPrimitiveManager.VertexDensity × SubdivisionMultiplier`
   applied to the world-space edge lengths per axis
-- **Never casts shadows and never gets a MeshCollider** — hardcoded at creation via
-  `PlacePrimitive` overrides, regardless of the shared prefs; material, static flag, and layer
-  follow the shared grey-primitive defaults
+- **Never gets a MeshCollider** — hardcoded at creation via a `PlacePrimitive` override,
+  regardless of the shared pref; material, static flag, and layer follow the shared
+  grey-primitive defaults
+- **Cast Shadows per type:** Editools Settings has a Cast Shadows default in each type's
+  section (Greybox, Greypipe, Greyroad on; Greyquad off), read by `PlacePrimitive<T>`
+  (`GreyPrimitiveSettings.DefaultShadowCasting<T>()`). Extrusions and splits use the Greybox
+  value; ledges and branch roads copy their source road's renderer
 - Created via `GameObject > 3D Object > Greyquad` or **Ctrl+Q** (spawns at scene-view pivot and
   enters the SnapToSurface flow, like the other creation shortcuts)
 - No Grey Primitive Edit Mode sub-elements — whole-object transforms only
@@ -587,6 +594,41 @@ across selection changes for the editor session and resets on restart.
 **Control grammar (shared across all three types):**
 `LMB` = move; `Ctrl` = alternative coordinates; `Shift` = dominant-axis lock;
 `MMB` = remove/reset; `RMB` = add/create; `Alt` = special action.
+
+**Sub-object selection (`GPEditSubSelection.cs`).** Box faces and edges, pipe / road
+vertices with their Bezier and banking handles, and ledge faces are selectable. Ledge end
+handles and a branch road's anchored start are not.
+
+- **Click:** LMB click selects one element (replacing the selection). Ctrl + LMB click adds or
+  removes an element of the same kind; a different kind is ignored. A plain LMB click on no
+  control clears the selection and is consumed (it does not pick another object); with an
+  empty selection clicks reach Unity as before. Clicks while a Quick Transform key is held are
+  left alone.
+- **Press vs drag:** an LMB press on a selectable element holds the Scene View control. Released
+  within 3 px it is the click; past 3 px it starts that element's drag (same drag as before,
+  measured from the press position). Ctrl held during a drag keeps its alternative-coordinates
+  meaning.
+- **One kind at a time**, across every selected primitive. Entries of deselected or deleted
+  primitives are dropped. Cuts, extrudes and vertex inserts / deletes / prepends clear the
+  selection. It is not part of undo.
+- **Look:** selected elements are strong red and larger (`GPEditShared.Selected`); a selected
+  box face is also filled red (`SelectedFace`).
+- **Actions on a selection:** an action started on a selected element runs on every selected
+  element of that kind; started on an unselected element it runs on that one alone and the
+  selection is unchanged.
+
+| Action on a selected element | Effect on the selection |
+|---|---|
+| Box face / edge LMB drag | Local: each moves along its own axes by the lead's distances, and offsets add up on shared corners. Global: all move by the lead's world offset. Shift lock, Ctrl and Alt symmetry apply per element |
+| Box face RMB drag (extrude) | Each face extrudes the lead's distance along its own forward axis. Linked extrusions of flush neighbours (same axis, shared edge) are welded side to side; faces at an angle stay separate |
+| Box face MMB | Every selected face gets the clicked face's new visibility |
+| Box edge RMB click (split) | Every selected edge's loop is cut at the same fraction; a loop already cut by this click is skipped |
+| Spline vertex LMB drag | Same Local / Global rule as boxes; other splines are rebuilt and recentered too |
+| Spline vertex MMB | All selected vertices are deleted |
+| Bezier / banking LMB drag | Handles follow by the same rule / get the same angle change |
+| Bezier / banking MMB | All selected are reset |
+| Ledge face LMB drag | Every selected ledge face moves by the same distance (tilt and end drags stay single) |
+| Ledge face MMB | Every selected face gets the clicked face's new visibility |
 
 Across all Grey Primitives, RMB/MMB click actions run only on release of the pressed button.
 This includes box edge splitting and face hide/show, road/pipe vertex insertion and deletion,
@@ -611,11 +653,18 @@ The Scene View Local/Global setting chooses the coordinate frame:
 | Box face | Original signed object axis for that face | Current face normal | Move in the corresponding face plane |
 | Box edge | Original two object axes across the edge | Current adjacent face normals | Move along the third axis |
 | Road vertex/handle | World XZ plane | Vertex Bezier tangent and banking axis | Move along the plane normal |
+| Road banking handle | World up | Vertex cross-section up | Move in the horizontal plane (Global: world XZ; Local: banking axis and tangent) |
 | Pipe vertex/handle | World XZ plane | Existing pipe main plane | Move along the plane normal |
 
 Spline endpoints move independently by default. Alt+LMB on an endpoint reshapes the interior
 vertices with it. Banking handles follow the chosen coordinates and derive the banking angle
 from the dragged position. MMB resets handles; inner vertices are smaller cubes than endpoints.
+**Vertex chamfer.** RMB-drag on an inner pipe / road vertex (not an end, which extends)
+splits it into two vertices that slide apart along the original curve toward the neighbouring
+vertices, by the distance the cursor has moved from the press (up to 90% of each segment). Both
+vertices' handles are refit to their neighbours on every drag event and their banking is
+blended toward the neighbour each one approaches. A press without a 3 px drag changes nothing.
+
 RMB on a box face creates a linked extrusion; Alt+RMB creates an independent unlinked box.
 Extrusion follows the face's forward axis in the selected Local/Global frame, preserving all
 four base corners even on non-planar faces. Unlinked extrusions sit outside the linked/Boolean
@@ -669,6 +718,73 @@ every selection change.
 While floating, the window keeps the position the user last dragged it to (EditorPrefs
 `Editools_GPWindow_FloatingX/Y`, shared by every Scene View): Unity shows it at its default
 top-left spot when it reappears, so the saved position is put back on the next editor update.
+**Ledges (Greyroad).** A ledge is a Greyroad that follows one edge of a source Greyroad over a
+range of the source's length. It is built from the source's own rings (so the two meshes line
+up), moved onto the edge, and is rebuilt every time the source is rebuilt (`GreyPrimitive.
+OnAfterRebuild`). Its stored vertices are overwritten with points on the derived path on each
+rebuild; its spline controls are not offered.
+
+| Value | Meaning | Default |
+|---|---|---|
+| Side | Source edge followed: left or right | edge dragged |
+| Start / End | Range on the source path, as segment index + fraction of that segment's length | dragged stretch |
+| Base Width | Ledge width, measured outward from its inner side | 1 |
+| Base Height | Ledge height, measured down from its top | 3 |
+| Inset | How far the inner side sits inside the source edge (0 = flush); inner face drag only | 0 |
+| Rise | Top above the source edge (0 = level); top face drag only | 0 |
+| Tilt | Lean of the cross-section, degrees, +/-85 (0 = vertical, + = top away from the road); Ctrl + top / bottom face drag only | 0 |
+| Faces | Visible faces | all |
+
+The cross-section stands vertical (world up) whatever the source road's banking; tilt leans it
+from there. Inset, Rise and Tilt have no fields; they are set by dragging.
+
+- **Create:** both top edges of a selected normal road show a very faint green line in Edit Mode.
+  The new ledge is selected after creation (drag or panel button).
+  RMB-drag along a top edge of a normal road in Edit Mode (green dot on hover); the
+  dragged stretch becomes the ledge. A press without a drag creates nothing. The panel's
+  **Add Ledge > Left / Right** makes one along the whole edge. A ledge cannot have ledges.
+- **Ledge controls (selected ledge):** two end handles slide along the source edge (LMB). A
+  handle per face: LMB drag moves that face (top: Rise + height, bottom: height, inner side:
+  Inset + width, outer side: width); Ctrl + LMB on the top handle tilts the ledge around its
+  bottom centre line, on the bottom handle around its top centre line (Tilt changes, and Inset
+  and Rise move so that line stays put; mode chosen at the press); MMB on a face or end handle
+  hides / shows that face. The panel has no face toggles for a ledge.
+- **Split:** RMB click on the ledge's top centre line cuts it there into two ledges with the
+  same size, offsets, tilt, faces and renderer settings. Both stay linked.
+- **Unlink:** panel button, or the Inspector's "Ledge of <source>" row. The ledge becomes a normal road on its current path (pivot
+  recentered) and leaves the folder. There is no relink.
+- **Hierarchy:** the source and its ledges are siblings in a component-less folder
+  `Linked Greyroads`, created in the source's place with the first ledge. A folder that holds
+  only that source and its ledges is reused; it is removed when the last ledge is unlinked. A
+  source inside a prefab instance is not reparented.
+- **Source edits:** inserting, deleting or prepending a source vertex shifts the ledges' ranges
+  so they stay on the same stretch (ledges are part of that undo step). Deleting the source
+  leaves each ledge as a normal road on its last path. A duplicated ledge follows the same
+  source.
+- **Transform moves** (`Editor/Greyroad/GreyroadLinkWatcher.cs`, driven by the seam solver's
+  Scene View hook, any tool, live during the drag): when a selected object moves, the ledges and
+  branch roads of every Greyroad in it are rebuilt from the new pose, and a moved ledge or branch
+  road is rebuilt back onto its source. An object moved while not selected (or by script)
+  follows on the next rebuild of its source.
+
+**Branch roads (Greyroad).** On a road (not a pipe), RMB on the spline still inserts a vertex
+when released without moving; dragging past 3 px instead pulls a new road out of that point and
+drags its end vertex (green), then selects it. While the button is held the press does not
+reach Scene View camera navigation. The new road copies the source's size, smoothing, face visibility and
+renderer settings. Its first vertex is anchored: it stays on the source spline at the same
+place along it (segment index + length fraction, shifted with source vertex inserts and
+deletes) and is moved there whenever the source is rebuilt. It is also matched to the
+source's surface there so the meshes meet flush: its banking follows the source's up, its
+Bezier handle is kept in the source's surface plane (only its horizontal direction and length
+are free) and Spline Smoothing does not bend it. The anchored vertex is drawn as a yellow
+sphere in a ring; LMB-drag slides it along the source spline only. Ctrl+LMB-drag (or Ctrl
+pressed mid-drag) moves it sideways instead, along the source's cross-section at that point,
+toward either edge (stored as an offset in source local units, kept when sliding; a blue arrow
+shows the axis while Ctrl is held). It has no other controls
+and is never mirrored or extended; everything else on the branch is a normal road. The
+Inspector shows "Branch of <source>" (or "Ledge of <source>") with an **Unlink** button that
+frees the road and keeps its shape. Deleting the source also frees the branch.
+
 In Edit Mode, selecting a seam-linked greybox expands the selection to its entire connected
 group. Entering Edit Mode also expands the current selection. Outside Edit Mode, selection
 does not expand automatically.
@@ -715,6 +831,24 @@ hierarchy change. Nested operations replace their input's membership entry; clea
 restores that entry without discarding outer operations. Released cutters leave the consuming
 tree. Empty redundant folders are removed, while unrelated children are preserved.
 
+**Face fallback.** A face whose outline cannot be rebuilt from its CSG fragments is drawn from
+the raw fragments, unsubdivided, with a `[GreyBoolean]` warning and a dump in
+`Library/GreyBooleanFailures/` (fragments, snap unit, grid targets: the inputs of
+`GreyFaceOutline.TryBuild` / `TryTriangulate`, replayable offline). Sliver removal keeps a
+hairline hole node that has faces nested in it (it only loses its contour): the union can
+report pieces that touch the main face along a seam as children of such a hole, and removing
+the node dropped them and failed the area check.
+
+**Simplify while dragging.** While an edit drag is in progress (any tool that defers
+persistence: moving inputs with any transform tool, Edit Mode drags), a Boolean Result is
+meshed with no subdivision (density 0: outline vertices only, the collider bake's path), when
+Editools Settings > Boolean Result > Simplify While Dragging is on (default). It must be zero,
+not a small density: the mesher merges outline corners closer than half a grid cell, so a very
+coarse grid bends cuts. The drag-end rebuild (`GreyPrimitive.EndDeferredPersist`) meshes at
+full subdivision and runs inputs before the compounds and Boolean Results built from them
+(`CollectGeometryInputs`), because a compound combines its parts' finished meshes. Other
+primitive types are not reduced.
+
 Explode Boolean (Inspector, and the Scene View panel on a Boolean Result) dissolves the whole
 tree containing the selection in one Undo step. Every input returns to the outermost result's
 parent with its renderer and collider enabled and its operator cleared. Results and compounds
@@ -741,6 +875,7 @@ Existing box-only compound references and legacy hierarchy ownership remain read
 - `GPEdit.cs` — toggle state, hotkey, and the `duringSceneGui` dispatch by primitive type
 - `GPEditGreybox.cs` — Greybox sub-element editing: face toggle, edge deform, face normal/skew, extrude
 - `GPEditSpline.cs` — Greypipe/Greyroad spline editing via a shared `GPSpline` adapter: vertex move, bezier handles, banking, extend-from-end, insert/delete vertex
+- `GPEditLedge.cs` — Greyroad ledges: creation from a road edge, end and face handles, split, unlink, `Linked Greyroads` folder
 - `GPEditCoordinates.cs` - coordinate frames, common drag/axis-lock behavior and hover arrows
 - `GPEditShared.cs` — shared hover math, colors, and lookup tables; deliberately independent of QuickTransform
 - `GPEditTooltip.cs` — Scene View tooltip listing the actions for the selected primitive type

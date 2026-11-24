@@ -37,6 +37,10 @@ public class GreyPrimitiveEditor : Editor
         "Move the pivot to the center of the box's bounding box, shifting the transform so the geometry " +
         "stays put.");
 
+    static readonly GUIContent s_unlinkRoadLabel = new GUIContent(
+        "Unlink",
+        "Stop following the source road. The road keeps its current shape and becomes a normal road.");
+
     internal static readonly GUIContent ExplodeLabel = new GUIContent(
         "Explode Boolean",
         "Undo the whole Boolean this object belongs to, including nested Booleans and groups. Every input returns " +
@@ -101,6 +105,25 @@ public class GreyPrimitiveEditor : Editor
             foreach (var t in targets)
                 if (t != null) GreyBooleanOrchestrator.Explode((GreyPrimitive)t);
             GUIUtility.ExitGUI();
+        }
+
+        if (targets.Length == 1 && prim is Greyroad road && (road.IsLedge || road.IsBranch))
+            DrawRoadLinkRow(road);
+    }
+
+    static void DrawRoadLinkRow(Greyroad road)
+    {
+        EditorGUILayout.Space();
+        using (new EditorGUILayout.HorizontalScope(EditorStyles.helpBox))
+        {
+            string text = road.IsLedge ? "Ledge of " + road.LedgeSource.name : "Branch of " + road.BranchSource.name;
+            EditorGUILayout.LabelField(text, EditorStyles.miniLabel);
+            if (GUILayout.Button(s_unlinkRoadLabel, GUILayout.Width(70f)))
+            {
+                if (road.IsLedge) GPEdit.UnlinkLedge(road);
+                else GPEdit.UnlinkBranch(road);
+                GUIUtility.ExitGUI();
+            }
         }
     }
 

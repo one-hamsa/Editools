@@ -35,6 +35,10 @@ static partial class GPEdit
         foreach (var go in Selection.gameObjects)
             CollectEditablePrimitives(go.GetComponent<GreyPrimitive>(), targets, visited);
 
+        PruneSubSelection(targets);
+        // A pending left press either stays pending, becomes a selection click, or starts one of the drags below.
+        if (s_subPress.active) HandleSubPress(e, sv);
+
         GreyPrimitive active = null;
         if (s_gbDrag != GbDrag.None)
         {
@@ -45,6 +49,11 @@ static partial class GPEdit
         {
             active = s_sp.Obj as GreyPrimitive;
             HandleSplineDrag(e, sv, s_sp);
+        }
+        else if (s_ldDrag != LdDrag.None)
+        {
+            active = s_ldTarget;
+            HandleLedgeDrag(e, sv);
         }
         else
         {
@@ -58,6 +67,14 @@ static partial class GPEdit
             if (active is Greybox box) OnGreyboxSceneGUI(sv, e, box);
             else if (active is Greypipe pipe) OnGreypipeSceneGUI(sv, e, pipe);
             else if (active is Greyroad road) OnGreyroadSceneGUI(sv, e, road);
+
+            // A plain left click on no control clears the sub-selection instead of picking an object.
+            if (e.type == EventType.MouseDown && e.button == 0 && !e.alt && !e.control
+                && s_subSelection.Count > 0 && !QuickTransform.ModeKeyHeld)
+            {
+                ClearSubSelection();
+                e.Use();
+            }
         }
 
         if (e.type == EventType.Repaint)
@@ -69,10 +86,20 @@ static partial class GPEdit
                     box.GetWorldCorners(s_gbWc);
                     DrawGreybox(box, -1, -1, SelectionTintIndex(box, targets));
                 }
+                else if (primitive is Greyroad ledge && ledge.IsLedge)
+                {
+                    ledge.GetPathFramesWorld(s_ldFrames);
+                    DrawLedge(ledge, default);
+                }
                 else
                 {
                     var spline = ProbeSpline(primitive);
                     if (spline != null) DrawSpline(spline, -1, -1, 0, -1, 0, false, default);
+                    if (primitive is Greyroad road)
+                    {
+                        road.GetPathFramesWorld(s_ldSourceFrames);
+                        DrawRoadEdgeHints(s_ldSourceFrames);
+                    }
                 }
             }
         s_tooltipPrimitive = active;
@@ -98,6 +125,7 @@ static partial class GPEdit
             }
             return float.MaxValue;
         }
+        if (primitive is Greyroad ledge && ledge.IsLedge) return LedgeHoverScore(ledge, mouse);
         var spline = ProbeSpline(primitive);
         if (spline == null) return float.MaxValue;
         int vertex = HitSplineVertex(spline, mouse);
@@ -111,7 +139,7 @@ static partial class GPEdit
         }
         if (HitSplineSegment(spline, mouse, out int segment, out float t))
             return GPEditShared.HandlePx + Vector2.Distance(mouse, HandleUtility.WorldToGUIPoint(spline.EvaluateSplineWorld(segment, t)));
-        return float.MaxValue;
+        return primitive is Greyroad road ? RoadEdgeHoverScore(road, mouse) : float.MaxValue;
     }
 }
 #endif

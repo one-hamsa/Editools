@@ -22,7 +22,16 @@ static class GreyPrimitiveSettings
     internal static bool DefaultStatic => EditoolsSettings.Current.greyDefaultStatic;
     internal static int DefaultLayer => EditoolsSettings.Current.greyDefaultLayer;
     internal static bool DefaultMeshCollider => EditoolsSettings.Current.greyDefaultMeshCollider;
-    internal static bool DefaultShadowCasting => EditoolsSettings.Current.greyDefaultShadowCasting;
+
+    /// <summary>Cast Shadows default for new primitives of type <typeparamref name="T"/>.</summary>
+    internal static bool DefaultShadowCasting<T>() where T : GreyPrimitive
+    {
+        var settings = EditoolsSettings.Current;
+        if (typeof(T) == typeof(Greypipe)) return settings.greypipeCastShadows;
+        if (typeof(T) == typeof(Greyroad)) return settings.greyroadCastShadows;
+        if (typeof(T) == typeof(Greyquad)) return settings.greyquadCastShadows;
+        return settings.greyboxCastShadows;
+    }
 
     internal static Material GetOrCreateDefaultMaterial()
     {
@@ -32,7 +41,7 @@ static class GreyPrimitiveSettings
     }
 
     // meshCollider / castShadows override the shared prefs when set; null falls back to the
-    // DefaultMeshCollider / DefaultShadowCasting settings (Greyquad hardcodes both off).
+    // DefaultMeshCollider / per-type DefaultShadowCasting settings (Greyquad hardcodes no collider).
     internal static GameObject PlacePrimitive<T>(string name, Vector3 worldPos, Quaternion worldRot, Transform parent,
         bool? meshCollider = null, bool? castShadows = null, bool select = true)
         where T : GreyPrimitive
@@ -51,7 +60,7 @@ static class GreyPrimitiveSettings
         if (mr != null)
         {
             mr.sharedMaterial     = GetOrCreateDefaultMaterial();
-            mr.shadowCastingMode  = (castShadows ?? DefaultShadowCasting) ? ShadowCastingMode.On : ShadowCastingMode.Off;
+            mr.shadowCastingMode  = (castShadows ?? DefaultShadowCasting<T>()) ? ShadowCastingMode.On : ShadowCastingMode.Off;
         }
 
         go.transform.position = worldPos;

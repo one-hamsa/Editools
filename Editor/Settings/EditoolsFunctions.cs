@@ -124,22 +124,28 @@ static class EditoolsFunctions
 		layer.intValue = EditorGUILayout.LayerField(new GUIContent("Default Layer", layer.tooltip), layer.intValue);
 
 		Field(so, nameof(EditoolsSettings.greyDefaultMeshCollider), "Mesh Collider");
-		Field(so, nameof(EditoolsSettings.greyDefaultShadowCasting), "Cast Shadows");
 
 		EditorGUILayout.LabelField("Greybox", EditorStyles.boldLabel);
 		Field(so, nameof(EditoolsSettings.greyboxDefaultScale), "Default Scale");
+		Field(so, nameof(EditoolsSettings.greyboxCastShadows), "Cast Shadows");
 
 		EditorGUILayout.LabelField("Greypipe", EditorStyles.boldLabel);
 		Field(so, nameof(EditoolsSettings.greypipeDefaultGirth), "Default Girth");
 		Field(so, nameof(EditoolsSettings.greypipeDefaultLength), "Default Length");
+		Field(so, nameof(EditoolsSettings.greypipeCastShadows), "Cast Shadows");
 
 		EditorGUILayout.LabelField("Greyroad", EditorStyles.boldLabel);
 		Field(so, nameof(EditoolsSettings.greyroadDefaultWidth), "Default Width");
 		Field(so, nameof(EditoolsSettings.greyroadDefaultHeight), "Default Height");
 		Field(so, nameof(EditoolsSettings.greyroadDefaultLength), "Default Length");
+		Field(so, nameof(EditoolsSettings.greyroadCastShadows), "Cast Shadows");
 
 		EditorGUILayout.LabelField("Greyquad", EditorStyles.boldLabel);
 		Field(so, nameof(EditoolsSettings.greyquadDefaultSize), "Default Size");
+		Field(so, nameof(EditoolsSettings.greyquadCastShadows), "Cast Shadows");
+
+		EditorGUILayout.LabelField("Boolean Result", EditorStyles.boldLabel);
+		Field(so, nameof(EditoolsSettings.greyBooleanSimplifyWhileDragging), "Simplify While Dragging");
 
 		EditorGUILayout.LabelField("Edit Mode", EditorStyles.boldLabel);
 		Field(so, nameof(EditoolsSettings.greyEditModeTooltips), "Scene View Tooltips");

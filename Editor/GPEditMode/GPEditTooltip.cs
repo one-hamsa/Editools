@@ -13,7 +13,8 @@ static partial class GPEdit
 
     static readonly (string input, string output)[] k_GreyboxHints =
     {
-        ("LMB", "move"),
+        ("LMB", "click to select / drag to move"),
+        ("Ctrl + LMB click", "add to / remove from the selection (drag a selected one to edit all)"),
         ("Ctrl", "alternative coordinates"),
         ("Shift", "axis lock"),
         ("MMB", "click face to hide / show"),
@@ -24,16 +25,38 @@ static partial class GPEdit
 
     static readonly (string input, string output)[] k_PipeHints =
     {
-        ("LMB", "move"),
+        ("LMB", "click to select / drag to move"),
+        ("Ctrl + LMB click", "add to / remove from the selection (drag a selected one to edit all)"),
         ("Ctrl", "alternative coordinates"),
         ("Shift", "axis lock"),
         ("LMB + Alt", "reshape spline from endpoint"),
         ("MMB", "click to delete vertex / reset handle"),
-        ("RMB", "drag endpoint to extend / click spline to insert"),
+        ("RMB", "drag endpoint to extend / drag inner vertex to chamfer / click spline to insert"),
         ("Alt while dragging", "symmetrical: mirrored vertex follows"),
     };
 
-    static readonly (string input, string output)[] k_RoadHints = k_PipeHints;
+    static readonly (string input, string output)[] k_RoadHints =
+    {
+        ("LMB", "click to select / drag to move"),
+        ("Ctrl + LMB click", "add to / remove from the selection (drag a selected one to edit all)"),
+        ("Ctrl", "alternative coordinates"),
+        ("Shift", "axis lock"),
+        ("LMB + Alt", "reshape spline from endpoint"),
+        ("MMB", "click to delete vertex / reset handle"),
+        ("RMB", "drag endpoint to extend / drag inner vertex to chamfer / click spline to insert / drag spline to branch a road"),
+        ("RMB on edge", "drag along the edge to create a ledge"),
+        ("LMB on branch start", "slide it along the source road / Ctrl = toward its edges"),
+        ("Alt while dragging", "symmetrical: mirrored vertex follows"),
+    };
+
+    static readonly (string input, string output)[] k_LedgeHints =
+    {
+        ("LMB", "click a face to select / drag a face to resize / drag an end along the road"),
+        ("Ctrl + LMB click", "add to / remove from the selection (drag a selected one to edit all)"),
+        ("Ctrl + LMB on top / bottom", "tilt the ledge around the opposite face"),
+        ("MMB", "click a face or end to hide / show"),
+        ("RMB", "click the top line to split the ledge"),
+    };
 
     static partial void DrawTooltip(SceneView sv, GreyPrimitive gp)
     {
@@ -43,6 +66,7 @@ static partial class GPEdit
             GreyBooleanResult => k_GreyboxHints,
             GreyboxCompound => k_GreyboxHints,
             Greypipe => k_PipeHints,
+            Greyroad road when road.IsLedge => k_LedgeHints,
             Greyroad => k_RoadHints,
             _        => null,
         };

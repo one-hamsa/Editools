@@ -52,6 +52,15 @@ public class GreyBooleanResult : GreyPrimitive
     public GreyPrimitive Operator => _operator;
 
     public override bool UsesColliderMesh => true; // bakes a low-poly collider twin
+#if UNITY_EDITOR
+    protected override bool UsesDraftDensity => true;
+
+    protected override void CollectGeometryInputs(List<GreyPrimitive> inputs)
+    {
+        inputs.Add(_subject);
+        inputs.Add(_operator);
+    }
+#endif
 
     public void Configure(GreyPrimitive subject, GreyPrimitive op)
     {

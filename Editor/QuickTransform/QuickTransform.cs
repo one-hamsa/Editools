@@ -119,6 +119,9 @@ static partial class QuickTransform
 
     // Key tracking
     static bool wHeld, eHeld, rHeld;
+
+    /// <summary>True while W, E or R is held, i.e. Scene View clicks belong to Quick Transform.</summary>
+    internal static bool ModeKeyHeld => wHeld || eHeld || rHeld;
     static bool rmbHeld;
     static double modeKeyDownTime;   // EditorApplication.timeSinceStartup when mode key first pressed
     static Mode suppressKeyUpFor;

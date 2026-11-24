@@ -18,6 +18,8 @@ using UnityEngine;
 /// Control grammar (shared across all three types):
 ///   LMB = manipulate · Ctrl = alternative coordinates · MMB = remove/reset · RMB = add/create · Shift = axis lock; Alt = special action
 ///   Alt pressed during a drag = symmetry: the drag also acts on the opposite element
+///   LMB click = select a sub-object, Ctrl + click = add / remove; an action on a selected one runs on all
+///   (GPEditSubSelection.cs)
 ///
 /// The mode toggle is SessionState-backed, so it persists across selection changes for the whole
 /// editor session and resets on restart; the tooltip flag lives in EditoolsSettings. The hook into
@@ -39,6 +41,8 @@ static partial class GPEdit
             if (value == Enabled) return;
             SessionState.SetBool(k_EnabledKey, value);
             CancelPrimitiveClick();
+            CancelSubPress();
+            ClearSubSelection();
             if (value)
             {
                 Tools.current = Tool.None;
@@ -153,7 +157,7 @@ static partial class GPEdit
 
     // Click actions commit on release; drag actions own their input separately.
 
-    enum ClickAction { SplitEdge, ToggleFace, InsertVertex, DeleteVertex, ResetHandle, ResetBanking }
+    enum ClickAction { SplitEdge, ToggleFace, InsertVertex, DeleteVertex, ResetHandle, ResetBanking, SplitLedge, ToggleLedgeFace }
 
     struct PrimitiveClick
     {
@@ -222,8 +226,10 @@ static partial class GPEdit
 
         switch (click.action)
         {
-            case ClickAction.SplitEdge: SplitGreybox((Greybox)click.target, click.element, click.fraction); break;
+            case ClickAction.SplitEdge: SplitGreyboxEdges((Greybox)click.target, click.element, click.fraction); break;
             case ClickAction.ToggleFace: ToggleGreyboxFace((Greybox)click.target, click.element); break;
+            case ClickAction.SplitLedge: SplitLedge((Greyroad)click.target, click.fraction); break;
+            case ClickAction.ToggleLedgeFace: ToggleLedgeFace((Greyroad)click.target, click.element); break;
             default: if (!CommitSplineClick(click)) return false; break;
         }
         if (e.type != EventType.Used) e.Use();
@@ -260,7 +266,7 @@ static partial class GPEdit
     }
 
     // ─── Per-type entry points ──────────────────────────────────
-    // Implemented in GPEditGreybox.cs and GPEditSpline.cs. Unimplemented partials are no-ops,
+    // Implemented in GPEditGreybox.cs and GPEditSpline.cs (ledges: GPEditLedge.cs). Unimplemented partials are no-ops,
     // so the scaffolding compiles and runs before the type behaviors land.
 
     static partial void OnGreyboxSceneGUI(SceneView sv, Event e, Greybox gb);

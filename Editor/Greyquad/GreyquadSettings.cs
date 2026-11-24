@@ -20,12 +20,11 @@ static class GreyquadSettings
     [MenuItem("GameObject/3D Object/Greyquad", true)]
     static bool CreateGreyquadValidate() => GreyPrimitiveSettings.Enabled;
 
-    // A Greyquad never casts shadows and never gets a collider — the shared
-    // DefaultMeshCollider/DefaultShadowCasting prefs don't apply to it.
+    // A Greyquad never gets a collider; the shared DefaultMeshCollider pref doesn't apply to it.
     internal static GameObject PlaceGreyquad(Vector3 worldPos, Quaternion worldRot, Transform parent)
     {
         var go = GreyPrimitiveSettings.PlacePrimitive<Greyquad>("Greyquad", worldPos, worldRot, parent,
-            meshCollider: false, castShadows: false);
+            meshCollider: false);
         var size = DefaultSize;
         go.transform.localScale = new Vector3(size.x, 1f, size.y);
         return go;

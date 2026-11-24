@@ -263,6 +263,7 @@ public abstract class GreyPrimitive : MonoBehaviour
 #if UNITY_EDITOR
         if (!s_deferPersist) PersistBakedMeshes();
 #endif
+        OnAfterRebuild();
     }
 
 #if UNITY_EDITOR
@@ -290,6 +291,12 @@ public abstract class GreyPrimitive : MonoBehaviour
     {
         if (_suppressSubdivision) return 0f;
         float multiplier = Mathf.Max(0f, _subdivisionMultiplier);
+#if UNITY_EDITOR
+        // Heavy types are meshed without subdivision during an edit drag; the drag-end rebuild restores
+        // it. Zero, not a small density: the Boolean mesher merges outline corners closer than half
+        // a grid cell, so a very coarse grid bends cuts, while zero keeps the exact outline.
+        if (s_deferPersist && UsesDraftDensity && DraftWhileDeferred) return 0f;
+#endif
         if (multiplier == 0f) return 0f;
         var manager = GetComponentInParent<GreyPrimitiveManager>();
         float density = manager != null ? manager.VertexDensity : 0f;
@@ -426,6 +433,9 @@ public abstract class GreyPrimitive : MonoBehaviour
 
     protected virtual void OnBeforeRebuild() { }
 
+    /// <summary>Runs after every <see cref="RebuildMesh"/>. Override to rebuild primitives derived from this one.</summary>
+    protected virtual void OnAfterRebuild() { }
+
     // ─── Mesh lifecycle (player build) ───────────────────────────
     // In the editor PrepareBakeTargets supersedes these. An asset-backed mesh (prefab-owned bake) is
     // never replaced here — the asset is the identity, valid on any instance regardless of ids.
@@ -454,6 +464,18 @@ public abstract class GreyPrimitive : MonoBehaviour
     // + persist once when the tool ends the scope.
     static bool s_deferPersist;
     public static bool IsPersistenceDeferred => s_deferPersist;
+
+    /// <summary>
+    /// When set, types that opt in (<see cref="UsesDraftDensity"/>) are meshed without subdivision
+    /// while persistence is deferred, i.e. during an edit drag. Set from Editools Settings.
+    /// </summary>
+    public static bool DraftWhileDeferred { get; set; } = true;
+
+    /// <summary>True for types too heavy to mesh at full subdivision on every drag event (Boolean Results).</summary>
+    protected virtual bool UsesDraftDensity => false;
+
+    /// <summary>Adds the primitives this one is built from (a Boolean Result's inputs, a compound's parts).</summary>
+    protected virtual void CollectGeometryInputs(List<GreyPrimitive> inputs) { }
     static readonly System.Collections.Generic.HashSet<GreyPrimitive> s_deferredPersist =
         new System.Collections.Generic.HashSet<GreyPrimitive>();
 
@@ -467,9 +489,22 @@ public abstract class GreyPrimitive : MonoBehaviour
     public static void EndDeferredPersist()
     {
         s_deferPersist = false;
-        foreach (var gp in s_deferredPersist)
-            if (gp != null) gp.RebuildMesh();
+        var done = new HashSet<GreyPrimitive>();
+        foreach (var gp in s_deferredPersist) RebuildDeferred(gp, done);
         s_deferredPersist.Clear();
+    }
+
+    // Inputs first: a compound combines its parts' finished meshes and a Boolean Result reads its
+    // inputs' finished solids, so either one rebuilt before an input keeps that input's drag-time state.
+    static void RebuildDeferred(GreyPrimitive gp, HashSet<GreyPrimitive> done)
+    {
+        // Deleted during the drag, or already rebuilt (which also ends a reference cycle).
+        if (gp == null || !done.Add(gp)) return;
+        var inputs = new List<GreyPrimitive>();
+        gp.CollectGeometryInputs(inputs);
+        foreach (var input in inputs)
+            if (input != null && s_deferredPersist.Contains(input)) RebuildDeferred(input, done);
+        gp.RebuildMesh();
     }
 
     /// <summary>Ensures live mesh objects exist to write geometry into, with no AssetDatabase work —

@@ -13,6 +13,10 @@ public class GreyboxCompound : GreyPrimitive
 
     protected override void ResetToDefaults() => _parts.Clear();
 
+#if UNITY_EDITOR
+    protected override void CollectGeometryInputs(List<GreyPrimitive> inputs) => inputs.AddRange(_parts);
+#endif
+
     protected override void GenerateMesh(Mesh mesh)
     {
         var pieces = new List<CombineInstance>();

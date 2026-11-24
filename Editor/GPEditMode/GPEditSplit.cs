@@ -126,6 +126,44 @@ static partial class GPEdit
         return true;
     }
 
+    /// <summary>
+    /// Splits the clicked edge's loop; when the clicked edge is selected, the loop of every
+    /// selected edge, at the same fraction. A loop an earlier cut of the same click already went
+    /// through is not cut again. One undo step. Clears the sub-selection: the cut changes the boxes.
+    /// </summary>
+    static void SplitGreyboxEdges(Greybox box, int edge, float fraction)
+    {
+        if (!IsSubSelected(box, SubKind.BoxEdge, edge))
+        {
+            SplitGreybox(box, edge, fraction);
+            ClearSubSelection();
+            return;
+        }
+
+        using var elementsScope = ListPool<SubElement>.Get(out var elements);
+        elements.AddRange(s_subSelection);
+        ClearSubSelection();
+        using var cutScope = HashSetPool<long>.Get(out var cut);
+        Undo.IncrementCurrentGroup();
+        int group = Undo.GetCurrentGroup();
+        foreach (var element in elements)
+        {
+            var target = (Greybox)element.target;
+            int axis = element.index / 4;
+            if (cut.Contains(SplitKey(target, axis))) continue;
+            using var splitsScope = ListPool<BoxSplit>.Get(out var splits);
+            using var mapScope = DictionaryPool<int, BoxSplit>.Get(out var byId);
+            using var seamsScope = ListPool<SplitSeam>.Get(out var seams);
+            if (PlanGreyboxSplit(target, axis, fraction, splits, byId, seams))
+                foreach (var split in splits) cut.Add(SplitKey(split.box, split.axis));
+            SplitGreybox(target, element.index, fraction);
+        }
+        Undo.SetCurrentGroupName("Split Linked Greyboxes");
+        Undo.CollapseUndoOperations(group);
+    }
+
+    static long SplitKey(Greybox box, int axis) => ((long)box.GetInstanceID() << 2) | (uint)axis;
+
     static void SplitGreybox(Greybox box, int edge, float fraction)
     {
         if (!GreyboxLinkHierarchy.CanLink(box, box)) return;

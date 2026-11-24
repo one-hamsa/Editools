@@ -329,9 +329,17 @@ internal sealed class GreyFaceOutline
     }
 
     // Drops hairline holes (filling them) and sliver faces whose mean width is below k_MinWidth.
+    // A hairline hole that has faces nested in it (pieces the union left touching the main face
+    // along a seam) only loses its contour: removing the node would remove those faces with it.
     static void RemoveSlivers(PolyNode node)
     {
-        node.Childs.RemoveAll(child => MeanWidth(child.Contour) < k_MinWidth);
+        for (int i = node.Childs.Count - 1; i >= 0; i--)
+        {
+            var child = node.Childs[i];
+            if (MeanWidth(child.Contour) >= k_MinWidth) continue;
+            if (child.IsHole && child.ChildCount > 0) child.Contour.Clear();
+            else node.Childs.RemoveAt(i);
+        }
         foreach (var child in node.Childs) RemoveSlivers(child);
     }
 

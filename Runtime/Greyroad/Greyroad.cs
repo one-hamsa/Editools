@@ -7,9 +7,13 @@ using UnityEngine;
 /// but lofts a box cross-section (width x height) rather than a
 /// circle, adds per-vertex Banking (twist around the tangent), and exposes 6 face-visibility
 /// flags so the user can hide individual sides (top / bottom / left / right / start cap / end cap)
-/// in QuickTransform Special mode.
+/// in the Grey Primitive panel (a ledge: MMB on its face handles in Edit Mode).
 ///
 /// Default visible faces at spawn: Top + the two lateral sides. Bottom and end caps are hidden.
+///
+/// A road can be a ledge: it follows one edge of a source road over a range of the source's
+/// length and is rebuilt whenever the source is (see the Ledge link section). A road can also
+/// be a branch: its first vertex stays on another road's spline (see the Branch anchor section).
 /// </summary>
 public class Greyroad : GreyPrimitive
 {
@@ -116,9 +120,81 @@ public class Greyroad : GreyPrimitive
 
     [SerializeField]
     [Tooltip("6 flags controlling which faces are included in the mesh. " +
-             "Toggle via Q + LMB on a face in the Scene View. " +
+             "Toggled in the Grey Primitive panel; a ledge's by MMB on its face handles. " +
              "Indices: 0=Top, 1=Bottom, 2=LeftSide, 3=RightSide, 4=StartCap, 5=EndCap.")]
     bool[] _activeFaces = DefaultActiveFaces();
+
+    // ─── Ledge link ─────────────────────────────────────────────
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Source road this road follows as a ledge. While set, the path is derived from one edge " +
+             "of the source and the stored vertices are overwritten on every rebuild. Empty = a normal road.")]
+    Greyroad _ledgeSource;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Edge of the source road the ledge follows: +1 = right edge, -1 = left edge.")]
+    int _ledgeSide = 1;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Where the ledge starts along the source, as segment index + fraction of that segment's length.")]
+    float _ledgeStart;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Where the ledge ends along the source, as segment index + fraction of that segment's length.")]
+    float _ledgeEnd = 1f;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Ledge only: how far the ledge's inner side sits inside the source road's edge, in source " +
+             "local units. 0 = flush with the edge; higher values overlap the road. Set by dragging the inner face.")]
+    float _ledgeInset;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Ledge only: height of the ledge's top above the source road's edge, in source local " +
+             "units. 0 = level with the road. Set by dragging the top face.")]
+    float _ledgeRise;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Ledge only: lean of the ledge around its inner top edge, in degrees. 0 = vertical; " +
+             "positive leans the top away from the road. Set by Ctrl-dragging the top face.")]
+    float _ledgeTilt;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Reverse index: ledges that follow this road. They are rebuilt whenever this road is.")]
+    List<Greyroad> _ledges = new List<Greyroad>();
+
+    // ─── Branch anchor ──────────────────────────────────────────
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Road this road branches off. While set, the first vertex is kept on that road's spline " +
+             "at the branch position. Empty = a free road.")]
+    Greyroad _branchSource;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Where the first vertex sits along the branch source's spline, as segment index + " +
+             "fraction of that segment's length.")]
+    float _branchParam;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Sideways offset of the first vertex from the branch source's spline, along the source's " +
+             "cross-section, in source local units. Positive = toward the source's right edge.")]
+    float _branchOffset;
+
+    [SerializeField]
+    [HideInInspector]
+    [Tooltip("Reverse index: roads that branch off this road. Their first vertex follows it whenever " +
+             "this road is rebuilt.")]
+    List<Greyroad> _branches = new List<Greyroad>();
 
     // ─── Public accessors ───────────────────────────────────────
 
@@ -187,6 +263,212 @@ public class Greyroad : GreyPrimitive
     public bool[] ActiveFaces => _activeFaces;
 
     public int SegmentCount => _vertices != null ? Mathf.Max(0, _vertices.Count - 1) : 0;
+
+    // ─── Ledge link API ─────────────────────────────────────────
+
+    /// <summary>Shortest ledge range, in path parameter units (segment index + length fraction).</summary>
+    public const float MinLedgeSpan = 0.01f;
+
+    /// <summary>True while this road follows an edge of a source road.</summary>
+    public bool IsLedge => _ledgeSource != null && _ledgeSource != this;
+
+    public Greyroad LedgeSource => _ledgeSource;
+
+    /// <summary>+1 = the ledge follows the source's right edge, -1 = its left edge.</summary>
+    public int LedgeSide => _ledgeSide;
+
+    public float LedgeStart => _ledgeStart;
+    public float LedgeEnd => _ledgeEnd;
+
+    public float LedgeInset
+    {
+        get => _ledgeInset;
+        set => _ledgeInset = value;
+    }
+
+    public float LedgeRise
+    {
+        get => _ledgeRise;
+        set => _ledgeRise = value;
+    }
+
+    /// <summary>Largest ledge lean either way, in degrees.</summary>
+    public const float MaxLedgeTilt = 85f;
+
+    /// <summary>Lean around the inner top edge in degrees: 0 = vertical, positive = top away from the road.</summary>
+    public float LedgeTilt
+    {
+        get => _ledgeTilt;
+        set => _ledgeTilt = Mathf.Clamp(value, -MaxLedgeTilt, MaxLedgeTilt);
+    }
+
+    /// <summary>Makes this road a ledge of <paramref name="source"/>. Rebuild afterwards.</summary>
+    public void LinkAsLedge(Greyroad source, int side, float start, float end)
+    {
+        _ledgeSource = source;
+        _ledgeSide = side >= 0 ? 1 : -1;
+        SetLedgeRange(start, end);
+        source.AddLedge(this);
+    }
+
+    /// <summary>Sets the range of the source's length the ledge covers, clamped to the source's path.</summary>
+    public void SetLedgeRange(float start, float end)
+    {
+        float max = Mathf.Max(MinLedgeSpan, _ledgeSource.SegmentCount);
+        _ledgeStart = Mathf.Clamp(start, 0f, max - MinLedgeSpan);
+        _ledgeEnd = Mathf.Clamp(end, _ledgeStart + MinLedgeSpan, max);
+    }
+
+    /// <summary>Severs the ledge link. The road keeps its last derived vertices and becomes a normal road.</summary>
+    public void UnlinkLedge()
+    {
+        // Legitimate filter: the source may have been deleted already.
+        if (_ledgeSource != null) _ledgeSource._ledges.Remove(this);
+        _ledgeSource = null;
+    }
+
+    /// <summary>The live ledges that follow this road.</summary>
+    public void GetLedges(List<Greyroad> ledges)
+    {
+        ledges.Clear();
+        foreach (var ledge in _ledges)
+            if (ledge != null && ledge._ledgeSource == this) ledges.Add(ledge);
+    }
+
+    void AddLedge(Greyroad ledge)
+    {
+        if (!_ledges.Contains(ledge)) _ledges.Add(ledge);
+    }
+
+    // ─── Branch anchor API ──────────────────────────────────────
+
+    /// <summary>True while this road's first vertex is kept on another road's spline.</summary>
+    public bool IsBranch => _branchSource != null && _branchSource != this;
+
+    public Greyroad BranchSource => _branchSource;
+
+    /// <summary>Moves the anchored first vertex along the source road. Rebuild afterwards.</summary>
+    public void SetBranchParam(float param) => _branchParam = Mathf.Clamp(param, 0f, _branchSource.SegmentCount);
+
+    /// <summary>Sideways offset of the anchored first vertex from the source spline, in source local units (+ = right). Rebuild afterwards.</summary>
+    public float BranchOffset
+    {
+        get => _branchOffset;
+        set => _branchOffset = value;
+    }
+
+    /// <summary>
+    /// World position of the anchored first vertex and the source's sideways axis there, as the
+    /// world vector of one source local unit. False when this is not a branch or the source has no path.
+    /// </summary>
+    public bool GetBranchAnchorWorld(out Vector3 point, out Vector3 sideways)
+    {
+        point = sideways = default;
+        if (!IsBranch || !_branchSource.GetPathFrameLocal(_branchParam, out Vector3 position, out _, out _, out Vector3 right))
+            return false;
+        Transform from = _branchSource.transform;
+        point = from.TransformPoint(position + right * _branchOffset);
+        sideways = from.TransformVector(right);
+        return true;
+    }
+
+    /// <summary>Frees the first vertex. The road keeps its current shape and becomes a normal road.</summary>
+    public void UnlinkBranch()
+    {
+        // Legitimate filter: the source may have been deleted already.
+        if (_branchSource != null) _branchSource._branches.Remove(this);
+        _branchSource = null;
+    }
+
+    /// <summary>Anchors this road's first vertex to <paramref name="source"/>'s spline at a path parameter. Rebuild afterwards.</summary>
+    public void LinkAsBranch(Greyroad source, float param)
+    {
+        _branchSource = source;
+        _branchParam = Mathf.Clamp(param, 0f, source.SegmentCount);
+        source.AddBranch(this);
+    }
+
+    /// <summary>The live roads that branch off this road.</summary>
+    public void GetBranches(List<Greyroad> branches)
+    {
+        branches.Clear();
+        foreach (var branch in _branches)
+            if (branch != null && branch._branchSource == this) branches.Add(branch);
+    }
+
+    void AddBranch(Greyroad branch)
+    {
+        if (!_branches.Contains(branch)) _branches.Add(branch);
+    }
+
+    // ─── Path parameter queries ─────────────────────────────────
+
+    const int k_PathLutSteps = 32;
+
+    /// <summary>Path parameter (segment index + fraction of that segment's length) of a Bezier parameter on a segment.</summary>
+    public float PathParamFromBezier(int segment, float t)
+    {
+        Span<float> lengths = stackalloc float[k_PathLutSteps + 1];
+        float total = SegmentLengthTable(segment, lengths);
+        if (total < 1e-6f) return segment;
+        float k = Mathf.Clamp01(t) * k_PathLutSteps;
+        int i = Mathf.Min(Mathf.FloorToInt(k), k_PathLutSteps - 1);
+        return segment + Mathf.Lerp(lengths[i], lengths[i + 1], k - i) / total;
+    }
+
+    /// <summary>Local position on the spline at a path parameter (segment index + fraction of that segment's length).</summary>
+    public Vector3 GetPathPointLocal(float param)
+    {
+        int segment = Mathf.Clamp(Mathf.FloorToInt(param), 0, SegmentCount - 1);
+        Span<float> lengths = stackalloc float[k_PathLutSteps + 1];
+        float target = Mathf.Clamp01(param - segment) * SegmentLengthTable(segment, lengths);
+        float t = 1f;
+        for (int i = 1; i <= k_PathLutSteps; i++)
+        {
+            if (lengths[i] < target) continue;
+            float span = lengths[i] - lengths[i - 1];
+            t = (i - 1 + (span > 1e-6f ? (target - lengths[i - 1]) / span : 0f)) / k_PathLutSteps;
+            break;
+        }
+        GetSegmentControlPoints(segment, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+        return EvaluateBezier(p0, p1, p2, p3, t);
+    }
+
+    /// <summary>
+    /// Local position, unit tangent, cross-section up and cross-section right of the mesh path at a
+    /// path parameter, the same values the mesh ring there is built from. False when the road has
+    /// no path to sample.
+    /// </summary>
+    public bool GetPathFrameLocal(float param, out Vector3 position, out Vector3 tangent, out Vector3 up, out Vector3 right)
+    {
+        var frames = BuildFrames(ComputeEffectiveDensity(), param, param);
+        if (frames.Length == 0)
+        {
+            position = tangent = up = right = default;
+            return false;
+        }
+        position = frames[0].position;
+        tangent = frames[0].tangent;
+        up = frames[0].up;
+        right = frames[0].right;
+        return true;
+    }
+
+    /// <summary>Cumulative local length at evenly spaced Bezier parameters of a segment; returns the segment length.</summary>
+    float SegmentLengthTable(int segment, Span<float> lengths)
+    {
+        GetSegmentControlPoints(segment, out Vector3 p0, out Vector3 p1, out Vector3 p2, out Vector3 p3);
+        int last = lengths.Length - 1;
+        Vector3 previous = p0;
+        lengths[0] = 0f;
+        for (int i = 1; i <= last; i++)
+        {
+            Vector3 point = EvaluateBezier(p0, p1, p2, p3, i / (float)last);
+            lengths[i] = lengths[i - 1] + Vector3.Distance(previous, point);
+            previous = point;
+        }
+        return lengths[last];
+    }
 
     // ─── Main Axis & Frame ──────────────────────────────────────
 
@@ -401,6 +683,7 @@ public class Greyroad : GreyPrimitive
             bankingAngle = Mathf.LerpAngle(a.bankingAngle * Mathf.Rad2Deg,
                 b.bankingAngle * Mathf.Rad2Deg, t) * Mathf.Deg2Rad,
         });
+        ShiftDependentParams(p => ParamAfterInsert(p, segmentIndex, t));
     }
 
     public void ExtendFromEdge(int edgeIndex, Vector3 localPosition)
@@ -432,7 +715,10 @@ public class Greyroad : GreyPrimitive
         };
 
         if (edgeIndex == 0)
+        {
             _vertices.Insert(0, newVert);
+            ShiftDependentParams(p => p + 1f);
+        }
         else
             _vertices.Add(newVert);
     }
@@ -441,7 +727,35 @@ public class Greyroad : GreyPrimitive
     {
         if (_vertices.Count <= 2) return false;
         _vertices.RemoveAt(index);
+        ShiftDependentParams(p => ParamAfterRemove(p, index));
         return true;
+    }
+
+    /// <summary>Keeps every ledge and branch on the same stretch of road after a vertex was added or removed.</summary>
+    void ShiftDependentParams(Func<float, float> shift)
+    {
+        foreach (var ledge in _ledges)
+            if (ledge != null && ledge._ledgeSource == this)
+                ledge.SetLedgeRange(shift(ledge._ledgeStart), shift(ledge._ledgeEnd));
+        foreach (var branch in _branches)
+            if (branch != null && branch._branchSource == this)
+                branch._branchParam = Mathf.Clamp(shift(branch._branchParam), 0f, SegmentCount);
+    }
+
+    static float ParamAfterInsert(float param, int segment, float t)
+    {
+        if (param >= segment + 1) return param + 1f;
+        if (param <= segment) return param;
+        float local = param - segment;
+        return local <= t ? segment + local / t : segment + 1f + (local - t) / (1f - t);
+    }
+
+    // The two segments around the removed vertex merge into one.
+    static float ParamAfterRemove(float param, int index)
+    {
+        if (param >= index + 1) return param - 1f;
+        if (param <= index - 1) return param;
+        return index - 1 + (param - (index - 1)) * 0.5f;
     }
 
     // ─── GreyPrimitive overrides ─────────────────────────────────
@@ -452,6 +766,77 @@ public class Greyroad : GreyPrimitive
             _vertices = DefaultVertices();
         if (_activeFaces == null || _activeFaces.Length != 6)
             _activeFaces = DefaultActiveFaces();
+        // A duplicated ledge or branch is not in its source's reverse index yet.
+        if (IsLedge) _ledgeSource.AddLedge(this);
+        if (IsBranch)
+        {
+            _branchSource.AddBranch(this);
+            AnchorBranchStart();
+        }
+    }
+
+    /// <summary>
+    /// Puts the first vertex on the source road's path and matches the source's surface there, so
+    /// the two meshes meet flush: the cross-section up follows the source's up (banking), and the
+    /// handle keeps only its direction within the source's surface plane.
+    /// </summary>
+    void AnchorBranchStart()
+    {
+        var source = _branchSource;
+        Transform from = source.transform, to = transform;
+        var first = _vertices[0];
+        if (!source.GetPathFrameLocal(_branchParam, out Vector3 position, out _, out Vector3 sourceUp, out Vector3 sourceRight))
+        {
+            // A degenerate source path has no surface to match; keep the start on its spline.
+            first.position = to.InverseTransformPoint(from.TransformPoint(source.GetPathPointLocal(_branchParam)));
+            _vertices[0] = first;
+            return;
+        }
+        first.position = to.InverseTransformPoint(from.TransformPoint(position + sourceRight * _branchOffset));
+        Vector3 up =to.InverseTransformVector(from.TransformVector(sourceUp)).normalized;
+
+        Vector3 handle = Vector3.ProjectOnPlane(first.handleRotation * Vector3.forward, up);
+        if (handle.sqrMagnitude < 1e-8f && _vertices.Count > 1)
+            handle = Vector3.ProjectOnPlane(_vertices[1].position - first.position, up);
+        if (handle.sqrMagnitude > 1e-8f)
+        {
+            handle.Normalize();
+            first.handleRotation = Quaternion.LookRotation(handle, Vector3.up);
+            Vector3 refUp = to.InverseTransformDirection(Vector3.up).normalized;
+            ReferenceFrame(handle, refUp, out _, out Vector3 flatUp);
+            first.bankingAngle = Vector3.SignedAngle(flatUp, up, handle) * Mathf.Deg2Rad;
+        }
+        _vertices[0] = first;
+    }
+
+    // Set while this road rebuilds its ledges and branches; ends reference cycles.
+    [NonSerialized] bool _rebuildingDependents;
+
+    protected override void OnAfterRebuild()
+    {
+        if (_rebuildingDependents) return;
+        _rebuildingDependents = true;
+        try
+        {
+            RebuildDependents(_ledges, ledges: true);
+            RebuildDependents(_branches, ledges: false);
+        }
+        finally
+        {
+            _rebuildingDependents = false;
+        }
+    }
+
+    void RebuildDependents(List<Greyroad> dependents, bool ledges)
+    {
+        for (int i = dependents.Count - 1; i >= 0; i--)
+        {
+            var road = dependents[i];
+            // Deleted roads, roads linked elsewhere and the entries a duplicated source copied are dropped.
+            if (road == null || road == this || (ledges ? road._ledgeSource : road._branchSource) != this)
+                dependents.RemoveAt(i);
+            else road.RebuildMesh();
+        }
     }
 
     protected override void ResetToDefaults()
@@ -473,6 +858,7 @@ public class Greyroad : GreyPrimitive
         public float heightMul;
         public float bankingAngle;
         public float arcLen; // cumulative distance along the spline, in local units
+        public float param;  // segment index + fraction of that segment's length
     }
 
     /// <summary>
@@ -488,6 +874,7 @@ public class Greyroad : GreyPrimitive
         public float halfWidth;
         public float halfHeight;
         public float arcLen;  // cumulative distance along the spline, in local units
+        public float param;   // segment index + fraction of that segment's length
     }
 
     protected override void GenerateMesh(Mesh mesh)
@@ -497,9 +884,10 @@ public class Greyroad : GreyPrimitive
 
         float density = ComputeEffectiveDensity();
 
-        var samples = SampleSpline(density);
-        int ringCount = samples.Count;
+        RingFrame[] frames = IsLedge ? BuildLedgeFrames() : BuildFrames(density, 0f, SegmentCount);
+        int ringCount = frames.Length;
         if (ringCount < 2) { mesh.Clear(); return; }
+        if (IsLedge) SyncLedgeVertices(frames);
 
         int widthSubs = ComputeWidthSubdivisions(density);
         int sideSubs  = ComputeSideSubdivisions(density);
@@ -508,10 +896,6 @@ public class Greyroad : GreyPrimitive
         // Top/Bottom edges → widthSubs + 1 verts; Left/Right side edges → sideSubs + 1 verts.
         int wN = widthSubs + 1;
         int sN = sideSubs  + 1;
-
-        var frames = new RingFrame[ringCount];
-        Vector3 refUp = transform.InverseTransformDirection(Vector3.up).normalized;
-        ComputeRingFrames(samples, frames, refUp);
 
         // Accumulators
         var verts = new List<Vector3>(ringCount * 8);
@@ -540,6 +924,118 @@ public class Greyroad : GreyPrimitive
         mesh.RecalculateNormals();
     }
 
+    /// <summary>Ring frames of this road's own spline between two path parameters, in local space.</summary>
+    RingFrame[] BuildFrames(float density, float from, float to)
+    {
+        var samples = SampleSpline(density, from, to);
+        var frames = new RingFrame[samples.Count];
+        Vector3 refUp = transform.InverseTransformDirection(Vector3.up).normalized;
+        ComputeRingFrames(samples, frames, refUp);
+        return frames;
+    }
+
+    /// <summary>
+    /// Ring frames of a ledge in its own local space: the source's rings over the ledge range,
+    /// moved onto the followed edge. Using the source's rings keeps the two meshes aligned. The
+    /// cross-section stands vertical whatever the source's banking, leaned by the tilt around
+    /// the ledge's inner top edge, which sits on the source edge (moved by inset and rise).
+    /// </summary>
+    RingFrame[] BuildLedgeFrames()
+    {
+        var source = _ledgeSource;
+        var frames = source.BuildFrames(source.ComputeEffectiveDensity(), _ledgeStart, _ledgeEnd);
+        Transform from = source.transform, to = transform;
+        Vector3 refUp = from.InverseTransformDirection(Vector3.up).normalized;
+        for (int i = 0; i < frames.Length; i++)
+        {
+            RingFrame f = frames[i];
+            Vector3 edge = f.position + f.right * (_ledgeSide * source._baseWidth * f.halfWidth);
+            ReferenceFrame(f.tangent, refUp, out Vector3 flatRight, out Vector3 flatUp);
+            Vector3 innerTop = edge - flatRight * (_ledgeSide * _ledgeInset) + flatUp * _ledgeRise;
+            // A positive tilt turns the up axis toward the outward side.
+            Quaternion tilt = Quaternion.AngleAxis(-_ledgeSide * _ledgeTilt, f.tangent);
+            Vector3 right = tilt * flatRight;
+            Vector3 up = tilt * flatUp;
+            Vector3 position = innerTop + right * (_ledgeSide * _baseWidth * 0.5f);
+            f.position = to.InverseTransformPoint(from.TransformPoint(position));
+            f.tangent = to.InverseTransformDirection(from.TransformDirection(f.tangent));
+            f.right = to.InverseTransformDirection(from.TransformDirection(right));
+            f.up = to.InverseTransformDirection(from.TransformDirection(up));
+            f.halfWidth = 0.5f;
+            f.halfHeight = 0.5f;
+            frames[i] = f;
+        }
+        return frames;
+    }
+
+    /// <summary>
+    /// Overwrites a ledge's stored vertices with points on its derived path (both ends plus one per
+    /// source vertex crossed), so code that reads the vertices and a later unlink see the real path.
+    /// </summary>
+    void SyncLedgeVertices(RingFrame[] frames)
+    {
+        _vertices.Clear();
+        Vector3 refUp = transform.InverseTransformDirection(Vector3.up).normalized;
+        int last = frames.Length - 1;
+        for (int i = 0; i <= last; i++)
+        {
+            RingFrame f = frames[i];
+            bool end = i == 0 || i == last;
+            bool onSourceVertex = Mathf.Abs(f.param - Mathf.Round(f.param)) < 1e-4f;
+            if (!end && !onSourceVertex) continue;
+            if (!end && (f.position - _vertices[_vertices.Count - 1].position).sqrMagnitude < 1e-4f) continue;
+
+            ReferenceFrame(f.tangent, refUp, out _, out Vector3 unbankedUp);
+            _vertices.Add(new RoadVertex
+            {
+                position         = f.position,
+                handleRotation   = Quaternion.LookRotation(f.tangent, Vector3.up),
+                widthMultiplier  = 1f,
+                heightMultiplier = 1f,
+                bankingAngle     = Vector3.SignedAngle(unbankedUp, f.up, f.tangent) * Mathf.Deg2Rad,
+            });
+        }
+
+        for (int i = 0; i < _vertices.Count; i++)
+        {
+            var v = _vertices[i];
+            float span = float.MaxValue;
+            if (i > 0) span = Mathf.Min(span, Vector3.Distance(v.position, _vertices[i - 1].position));
+            if (i < _vertices.Count - 1) span = Mathf.Min(span, Vector3.Distance(v.position, _vertices[i + 1].position));
+            v.handleLength = Mathf.Max(0.01f, span / 3f);
+            _vertices[i] = v;
+        }
+    }
+
+    /// <summary>One cross-section of the path the mesh is built from, in world space.</summary>
+    public struct PathFrame
+    {
+        public Vector3 position;  // top centre
+        public Vector3 tangent;   // unit, toward higher path parameters
+        public Vector3 halfRight; // top centre to the right top edge
+        public Vector3 drop;      // top to bottom
+        public float param;       // segment index + length fraction; a ledge reports its source's parameter
+    }
+
+    /// <summary>
+    /// World-space cross-sections along the path the mesh is built from, in path order. For a
+    /// ledge this is its derived path, with <see cref="PathFrame.param"/> on the source road.
+    /// </summary>
+    public void GetPathFramesWorld(List<PathFrame> result)
+    {
+        result.Clear();
+        RingFrame[] frames = IsLedge ? BuildLedgeFrames() : BuildFrames(ComputeEffectiveDensity(), 0f, SegmentCount);
+        foreach (var f in frames)
+            result.Add(new PathFrame
+            {
+                position  = transform.TransformPoint(f.position),
+                tangent   = transform.TransformDirection(f.tangent),
+                halfRight = transform.TransformVector(f.right * (_baseWidth * f.halfWidth)),
+                drop      = transform.TransformVector(f.up * -(_baseHeight * f.halfHeight * 2f)),
+                param     = f.param,
+            });
+    }
+
     static void ComputeRingFrames(List<SplineSample> samples, RingFrame[] frames, Vector3 refUp)
     {
         for (int ring = 0; ring < samples.Count; ring++)
@@ -566,6 +1062,7 @@ public class Greyroad : GreyPrimitive
             frames[ring].halfWidth  = 0.5f * Mathf.Max(0f, s.widthMul);
             frames[ring].halfHeight = 0.5f * Mathf.Max(0f, s.heightMul);
             frames[ring].arcLen     = s.arcLen;
+            frames[ring].param      = s.param;
         }
     }
 
@@ -711,7 +1208,12 @@ public class Greyroad : GreyPrimitive
 
     // ─── Spline sampling ────────────────────────────────────────
 
-    List<SplineSample> SampleSpline(float density)
+    /// <summary>
+    /// Samples the spline between two path parameters (segment index + fraction of that segment's
+    /// length). The interior rings are the ones the whole road gets, so a partial range lines up
+    /// with the full road; exact samples are added at <paramref name="from"/> and <paramref name="to"/>.
+    /// </summary>
+    List<SplineSample> SampleSpline(float density, float from, float to)
     {
         var samples = new List<SplineSample>(64);
         int vertCount = _vertices.Count;
@@ -801,7 +1303,9 @@ public class Greyroad : GreyPrimitive
         float lengthMultiplier = Mathf.Max(0.1f, _lengthSubdivMultiplier) * GetManagerLengthMultiplier();
         float densityFactor = density > 0f ? density : 1f;
         int cursor = 0;
-        for (int seg = 0; seg < segCount; seg++)
+        int firstSeg = Mathf.Clamp(Mathf.FloorToInt(from), 0, segCount - 1);
+        int lastSeg = Mathf.Clamp(Mathf.CeilToInt(to) - 1, firstSeg, segCount - 1);
+        for (int seg = firstSeg; seg <= lastSeg; seg++)
         {
             float segLen = vertexLen[seg + 1] - vertexLen[seg];
             if (segLen < 1e-6f) continue;
@@ -810,9 +1314,13 @@ public class Greyroad : GreyPrimitive
             turning += Mathf.Abs(bankVals[seg + 1] - bankVals[seg]);
             int steps = Mathf.Clamp(Mathf.CeilToInt(Mathf.Max(segLen * densityFactor * lengthMultiplier,
                 turning / 5f)), 2, 4096);
+            float uFrom = seg == firstSeg ? Mathf.Clamp01(from - seg) : 0f;
+            float uTo = seg == lastSeg ? Mathf.Clamp01(to - seg) : 1f;
+            // Range ends first and last; between them only the whole road's own ring positions.
             for (int r = samples.Count == 0 ? 0 : 1; r <= steps; r++)
             {
-                float u = r / (float)steps;
+                float u = r == 0 ? uFrom : r == steps ? uTo : r / (float)steps;
+                if (r > 0 && r < steps && (u <= uFrom + 1e-5f || u >= uTo - 1e-5f)) continue;
                 float target = Mathf.Lerp(vertexLen[seg], vertexLen[seg + 1], u);
                 while (cursor < lutN - 2 && lutLen[cursor + 1] < target) cursor++;
                 float spanLen = lutLen[cursor + 1] - lutLen[cursor];
@@ -828,6 +1336,7 @@ public class Greyroad : GreyPrimitive
                     heightMul = EvaluateHermite(heightVals[seg], heightTan[seg], heightVals[seg + 1], heightTan[seg + 1], u, segLen),
                     bankingAngle = EvaluateHermite(bankVals[seg], bankTan[seg], bankVals[seg + 1], bankTan[seg + 1], u, segLen) * Mathf.Deg2Rad,
                     arcLen = target,
+                    param = seg + u,
                 });
             }
         }
@@ -1016,7 +1525,8 @@ public class Greyroad : GreyPrimitive
         var vertex = _vertices[index];
         Vector3 authored = transform.TransformVector(GetVertexHandleDirLocal(index) * vertex.handleLength);
         Vector3 smooth = _smoothingDerivatives[index];
-        float amount = Mathf.Clamp01(_splineSmoothing);
+        // A branch start keeps its locked handle so the path leaves the source road flush.
+        float amount = index == 0 && IsBranch ? 0f : Mathf.Clamp01(_splineSmoothing);
         Vector3 direction = authored.sqrMagnitude < 1e-12f ? smooth.normalized
             : smooth.sqrMagnitude < 1e-12f ? authored.normalized
             : Vector3.Slerp(authored.normalized, smooth.normalized, amount).normalized;

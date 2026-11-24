@@ -28,6 +28,14 @@ static partial class GPEdit
         public int lockAxis;
         /// <summary>True while Alt, pressed after the drag began, asks the drag to also act on the opposite element.</summary>
         public bool symmetric;
+        /// <summary>Movement since the last rebase (a Ctrl or Local / Global switch).</summary>
+        public Vector3 current;
+        /// <summary><see cref="current"/> as distances along the two axes captured at that rebase.</summary>
+        public Vector2 amounts;
+        /// <summary>Number of rebases so far; a <see cref="CoordinateFollower"/> folds its movement when it changes.</summary>
+        public int captures;
+        public bool Alternate => alternate;
+        public bool LocalMode => localMode;
         GPEditShared.PlaneDragFrame frame;
         Vector3 offset;
         Vector2 press, lastMouse;
@@ -41,7 +49,9 @@ static partial class GPEdit
             global = globalCoordinates;
             local = localCoordinates;
             anchor = point;
-            delta = offset = Vector3.zero;
+            delta = offset = current = Vector3.zero;
+            amounts = Vector2.zero;
+            captures = 0;
             lastMouse = mouse;
             altHeldSincePress = Event.current.alt;
             symmetric = false;
@@ -56,6 +66,7 @@ static partial class GPEdit
             frame = GPEditShared.PlaneDragFrame.Capture(anchor + offset, a, b);
             press = mouse;
             lockAxis = -1;
+            captures++;
         }
 
         public Vector3 Update(Vector2 mouse)
@@ -70,7 +81,9 @@ static partial class GPEdit
             var movement = mouse - press;
             lockAxis = DominantCoordinateAxis(frame, movement, Event.current.shift, lockAxis);
             frame.Solve(movement, lockAxis, out float a, out float b, out _, out _);
-            delta = offset + frame.WorldDelta(a, b);
+            current = frame.WorldDelta(a, b);
+            amounts = new Vector2(a * frame.step, b * frame.step);
+            delta = offset + current;
             lastMouse = mouse;
             return delta;
         }
@@ -81,6 +94,42 @@ static partial class GPEdit
             var coordinates = Tools.pivotRotation == PivotRotation.Local ? local : global;
             coordinates.Axes(Event.current.control, out var a, out var b);
             DrawCoordinates(point, a, b, sameMode && Event.current.shift ? lockAxis : -1);
+        }
+    }
+
+    /// <summary>
+    /// Movement of one more element in a multi-selection drag led by a <see cref="CoordinateDrag"/>.
+    /// In Local the element moves along its own axes by the lead's distances; in Global it moves
+    /// by the lead's world offset. Update it after the lead, on every event.
+    /// </summary>
+    struct CoordinateFollower
+    {
+        public Vector3 delta;
+        EditCoordinates local;
+        Vector3 offset;
+        int captures;
+
+        public void Begin(EditCoordinates localCoordinates, ref CoordinateDrag lead)
+        {
+            local = localCoordinates;
+            delta = offset = Vector3.zero;
+            captures = lead.captures;
+        }
+
+        public Vector3 Update(ref CoordinateDrag lead)
+        {
+            if (captures != lead.captures)
+            {
+                offset = delta;
+                captures = lead.captures;
+            }
+            if (lead.LocalMode)
+            {
+                local.Axes(lead.Alternate, out Vector3 a, out Vector3 b);
+                delta = offset + a * lead.amounts.x + b * lead.amounts.y;
+            }
+            else delta = offset + lead.current;
+            return delta;
         }
     }
 
@@ -173,6 +222,20 @@ static partial class GPEdit
             }
         }
         return EditCoordinates.Surface(a, b, along);
+    }
+
+    /// <summary>
+    /// Banking handle coordinates: along the cross-section's up axis (Global: world up); Ctrl = the
+    /// horizontal plane (Global: world XZ; Local: the handle's banking and tangent axes).
+    /// </summary>
+    static EditCoordinates BankingCoordinates(GPSpline spline, int vertex, bool local)
+    {
+        var global = new EditCoordinates { a = Vector3.up, alternateA = Vector3.right, alternateB = Vector3.forward };
+        if (!local) return global;
+        spline.ComputeBankingAxis(vertex, out Vector3 up, out Vector3 right);
+        Vector3 along = Vector3.Cross(right, up);
+        if (along.sqrMagnitude < 0.000001f) return global;
+        return new EditCoordinates { a = up, alternateA = right, alternateB = along.normalized };
     }
 
     static EditCoordinates SplineCoordinates(GPSpline spline, int vertex, bool local)

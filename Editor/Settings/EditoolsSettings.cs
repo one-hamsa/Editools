@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Serialization;
 
 /// <summary>
 /// Per-user Editools settings: which functions are enabled, which ones show as buttons in the
@@ -141,26 +142,36 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 	public int greyDefaultLayer;
 	[Tooltip("Add a MeshCollider to new primitives.")]
 	public bool greyDefaultMeshCollider = true;
-	[Tooltip("New primitives cast shadows.")]
-	public bool greyDefaultShadowCasting = true;
 	[Tooltip("Recenter Greybox pivots after shape edits without moving the geometry or child objects.")]
 	public bool greyAutoUpdatePivot = true;
+	[Tooltip("While an edit drag is in progress (moving their inputs, Edit Mode drags), Boolean Results are meshed " +
+	         "without subdivision: exact cut outlines, far fewer triangles. The full mesh is rebuilt when the drag ends.")]
+	public bool greyBooleanSimplifyWhileDragging = true;
 	[Tooltip("Show the action hints in the Scene View while Grey Primitive Edit Mode is on.")]
 	public bool greyEditModeTooltips = true;
 	[Tooltip("Local scale of new Greyboxes. The mesh is a unit cube, so 10 gives a 10x10x10 box.")]
 	public Vector3 greyboxDefaultScale = new Vector3(10f, 10f, 10f);
+	[FormerlySerializedAs("greyDefaultShadowCasting")]
+	[Tooltip("New Greyboxes (also extrusions and splits) cast shadows.")]
+	public bool greyboxCastShadows = true;
+	[Tooltip("New Greypipes cast shadows.")]
+	public bool greypipeCastShadows = true;
 	[Tooltip("Base radius of the cross-section of new Greypipes.")]
 	[Min(0.001f)] public float greypipeDefaultGirth = 0.5f;
 	[Tooltip("Length between the two end vertices of new Greypipes, in local units.")]
 	[Min(0.01f)] public float greypipeDefaultLength = 5f;
 	[Tooltip("Local X / Z scale of new Greyquads. The mesh is a unit quad, so 10 gives a 10x10 quad.")]
 	public Vector2 greyquadDefaultSize = new Vector2(10f, 10f);
+	[Tooltip("New Greyquads cast shadows.")]
+	public bool greyquadCastShadows;
 	[Tooltip("Base width of the box cross-section of new Greyroads.")]
 	[Min(0.001f)] public float greyroadDefaultWidth = 10f;
 	[Tooltip("Base height (thickness) of the box cross-section of new Greyroads.")]
 	[Min(0.001f)] public float greyroadDefaultHeight = 2f;
 	[Tooltip("Length between the two end vertices of new Greyroads, in local units.")]
 	[Min(0.01f)] public float greyroadDefaultLength = 5f;
+	[Tooltip("New Greyroads cast shadows. Ledges and branch roads copy their source road's renderer instead.")]
+	public bool greyroadCastShadows = true;
 
 	// ─── Hierarchy Heatmap ───────────────────────────────────────
 
@@ -206,6 +217,7 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 		hideFlags = HideFlags.DontSave;
 		s_current = this;
 		s_hasCurrent = true;
+		PushRuntimeValues();
 
 		if (version < k_CurrentVersion)
 		{
@@ -228,8 +240,12 @@ sealed class EditoolsSettings : ScriptableSingleton<EditoolsSettings>
 	internal void SaveAndNotify()
 	{
 		Save(true);
+		PushRuntimeValues();
 		Changed?.Invoke();
 	}
+
+	/// <summary>Copies the values runtime-assembly code reads into its statics.</summary>
+	void PushRuntimeValues() => GreyPrimitive.DraftWhileDeferred = greyBooleanSimplifyWhileDragging;
 
 	internal static void RaiseChanged() => Changed?.Invoke();
 
@@ -308,7 +324,9 @@ static class EditoolsSettingsMigration
 		s.greyDefaultStatic        = EditorPrefs.GetBool("Editools_Greybox_DefaultStatic", s.greyDefaultStatic);
 		s.greyDefaultLayer         = EditorPrefs.GetInt("Editools_Greybox_DefaultLayer", s.greyDefaultLayer);
 		s.greyDefaultMeshCollider  = EditorPrefs.GetBool("Editools_Greybox_DefaultMeshCollider", s.greyDefaultMeshCollider);
-		s.greyDefaultShadowCasting = EditorPrefs.GetBool("Editools_Greybox_DefaultShadowCast", s.greyDefaultShadowCasting);
+		s.greyboxCastShadows       = EditorPrefs.GetBool("Editools_Greybox_DefaultShadowCast", s.greyboxCastShadows);
+		s.greypipeCastShadows      = s.greyboxCastShadows;
+		s.greyroadCastShadows      = s.greyboxCastShadows;
 		s.greyAutoUpdatePivot      = EditorPrefs.GetBool("Editools_GreyPrimitive_AutoUpdatePivot", s.greyAutoUpdatePivot);
 		s.greyboxDefaultScale = new Vector3(
 			EditorPrefs.GetFloat("Editools_Greybox_DefaultScaleX", s.greyboxDefaultScale.x),
